@@ -356,6 +356,13 @@ struct SettingsFile {
     /// Not written to the registry and not written into grids.ini.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     blocked_shell_extensions: Vec<String>,
+    /// Workspace slots 1–9. Each entry is `{slot, name?, grids?}`. Omitted when every slot is empty.
+    /// A `.grids` file does not store this.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    workspaces: Vec<Value>,
+    /// Ask before loading a workspace replaces the current tabs. Missing means no. Omitted while off.
+    #[serde(default, skip_serializing_if = "is_off")]
+    workspace_confirm: bool,
     #[serde(default, flatten)]
     extra: Map<String, Value>,
 }
@@ -439,6 +446,8 @@ impl SettingsFile {
             ctx_win11_pack_migrated: false,
             ctx_win11_view: false,
             blocked_shell_extensions: Vec::new(),
+            workspaces: Vec::new(),
+            workspace_confirm: false,
             extra: Map::new(),
         }
     }
@@ -543,6 +552,8 @@ impl SettingsFile {
             ctx_win11_pack_migrated: s.ctx_win11_pack_migrated,
             ctx_win11_view: s.ctx_win11_view,
             blocked_shell_extensions: clean_blocked(&s.blocked_shell_extensions),
+            workspaces: crate::workspaces_json(),
+            workspace_confirm: crate::workspaces_confirm(),
             extra: Map::new(),
         }
     }
@@ -594,6 +605,8 @@ impl SettingsFile {
         self.extra.remove("ctx_win11_pack_migrated");
         self.extra.remove("ctx_win11_view");
         self.extra.remove("blocked_shell_extensions");
+        self.extra.remove("workspaces");
+        self.extra.remove("workspace_confirm");
         // Older builds stored a pane-tab on/off switch. Tabs are always on; the key is dropped.
         self.extra.remove("pane_tabs");
     }
@@ -864,6 +877,7 @@ fn adopt(text: &str) -> Option<Session> {
     let file: SettingsFile = serde_json::from_str(text).ok()?;
     let s = file.to_session();
     crate::keys::load_bindings(&file.keybindings);
+    crate::load_workspaces(&file.workspaces, file.workspace_confirm);
     remember(file);
     Some(s)
 }
@@ -1166,6 +1180,33 @@ mod tests {
         let ini = import_text(&parsed.to_ini()).unwrap();
         assert_eq!(ini, parsed);
         assert!(import_text("{").is_err());
+    }
+
+    #[test]
+    fn workspaces_live_in_maguro_json_and_are_omitted_when_empty() {
+        crate::reset_workspaces();
+        let s = Session::default();
+        let text = sync_text(&s);
+        assert!(!text.contains("\"workspaces\""));
+        assert!(!text.contains("workspace_confirm"));
+        let grids = "cols=1\np0=C:\\work\n";
+        assert!(crate::store_workspace(0, grids));
+        crate::rename_workspace_name(0, "Desk");
+        crate::set_workspaces_confirm(true);
+        let text = sync_text(&s);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["workspaces"][0]["slot"], 1);
+        assert_eq!(v["workspaces"][0]["name"], "Desk");
+        assert_eq!(v["workspaces"][0]["grids"], grids);
+        assert_eq!(v["workspace_confirm"], true);
+        crate::reset_workspaces();
+        assert!(crate::workspace_grids(0).is_none());
+        let back = adopt(&text).unwrap();
+        assert_eq!(back.theme, s.theme);
+        assert!(crate::workspaces_confirm());
+        assert_eq!(crate::workspace_grids(0).as_deref(), Some(grids));
+        assert_eq!(crate::workspace_name(0), "Desk");
+        crate::reset_workspaces();
     }
 
     #[test]
