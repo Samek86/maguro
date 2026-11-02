@@ -700,11 +700,12 @@ pub(crate) enum Key {
     SwitchToProgram,
     CloseProgram,
     CloseProgramAsk,
+    CtxWin11Note,
 }
 
-pub(crate) const KEY_COUNT: usize = 697;
+pub(crate) const KEY_COUNT: usize = 698;
 
-const _: () = assert!((Key::CloseProgramAsk as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::CtxWin11Note as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1404,6 +1405,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Switch to program",
     "Close program",
     "Ask {app} to close?\n\nMaguro will ask it to close. It will not be forced to quit.",
+    "Windows 11 apps start off. Turn on only what you need. Items already shown are not added again. Enabled ones sit with Open. Properties stays last.",
 
 ];
 
@@ -2105,6 +2107,7 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "switch_to_program",
     "close_program",
     "close_program_ask",
+    "ctx_win11_note",
 
 ];
 
