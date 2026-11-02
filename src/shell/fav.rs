@@ -578,6 +578,7 @@ pub(crate) const ID_CTX_PROPS: u32 = 0x8001; // folder Properties, added when th
 pub(crate) const ID_CTX_BATCH: u32 = 0x8002; // batch rename, also outside the shell id range
 pub(crate) const ID_CTX_FAST: u32 = 0x8003; // Fast paste, also outside the shell id range
 pub(crate) const ID_CTX_WHO: u32 = 0x8004; // who is using this file, also outside the shell id range
+pub(crate) const ID_CTX_REVEAL: u32 = 0x8005; // Recent files: show the target in its folder
 
 pub(crate) struct MenuBridge {
     pub(crate) cm3: Option<IContextMenu3>,
@@ -871,6 +872,27 @@ fn who_path(items: &[(String, bool)], background: bool) -> Option<String> {
     if *file && is_fs(path) { Some(path.clone()) } else { None }
 }
 
+/// Drop verbs that would change the Recent folder. App commands sit at 0x8000 and above.
+unsafe fn strip_recent_writes(menu: HMENU, cm: &IContextMenu) {
+    let n = GetMenuItemCount(Some(menu)).max(0);
+    let mut drop_at = Vec::new();
+    for i in 0..n as u32 {
+        if menu_sep(menu, i) {
+            continue;
+        }
+        let id = GetMenuItemID(menu, i as i32);
+        if id == u32::MAX || id < 1 || id >= ID_CTX_FAV {
+            continue;
+        }
+        if crate::pane::recent::write_verb(&cmd_verb(cm, (id - 1) as usize)) {
+            drop_at.push(i);
+        }
+    }
+    for i in drop_at.into_iter().rev() {
+        let _ = DeleteMenu(menu, i, MF_BYPOSITION);
+    }
+}
+
 /// Directly above batch rename (or favourites, if that row is the one present).
 unsafe fn insert_who(menu: HMENU) {
     if let Some(i) = menu_index(menu, ID_CTX_WHO as usize) {
@@ -944,8 +966,8 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
         insert_fav(menu, at, ID_CTX_FAV as usize, fav_menu_label(&paths));
     }
     // Directly above favourites, in the normal menu and after a filtered shell menu.
-    // Background clicks have nothing to rename.
-    if !background && !paths.is_empty() {
+    // Background clicks have nothing to rename. Recent files is read-only, so no rename there.
+    if !background && !paths.is_empty() && !crate::pane::recent::locked(pane) {
         if let Some(fav_at) = menu_index(menu, ID_CTX_FAV as usize) {
             let label = HSTRING::from(crate::rename::menu_label());
             _ = InsertMenuW(menu, fav_at, MF_STRING | MF_BYPOSITION, ID_CTX_BATCH as usize, &label);
@@ -969,6 +991,16 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     finish_shell_menu(menu, Some(&cm), background);
     tidy_fav_item(menu, ID_CTX_FAV as usize);
     insert_fast_paste_idx(menu, &verbs);
+    if crate::pane::recent::locked(pane) {
+        strip_recent_writes(menu, &cm);
+        if let Some(i) = menu_index(menu, ID_CTX_FAST as usize) {
+            let _ = DeleteMenu(menu, i, MF_BYPOSITION);
+        }
+        if !background && items.len() == 1 {
+            let label = HSTRING::from(crate::pane::recent::reveal_label());
+            let _ = InsertMenuW(menu, 0, MF_STRING | MF_BYPOSITION, ID_CTX_REVEAL as usize, &label);
+        }
+    }
     super::ctxmenu::dump_menu_items(if background { "background" } else if items.first().is_some_and(|(_, f)| !*f) { "folder" } else { "file" }, menu);
     super::ctxmenu::log_phase("total-pre", t_pre);
     MENU_BRIDGE.with(|b| {
@@ -978,7 +1010,11 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, None, owner, None).0;
     super::ctxmenu::observe_menu(menu, &cm, targets);
     MENU_BRIDGE.with(|b| *b.borrow_mut() = None);
-    if cmd == ID_CTX_WHO as i32 {
+    if cmd == ID_CTX_REVEAL as i32 {
+        if let Some((path, _)) = items.first() {
+            crate::pane::recent::show_item(pane, path);
+        }
+    } else if cmd == ID_CTX_WHO as i32 {
         if let Some(path) = WHO_PATH.with(|p| p.borrow().clone()) {
             super::inuse::show_who(owner, &path);
         }
@@ -1479,6 +1515,10 @@ fn fav_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 
 // F7: the view's own "New folder", so the shell names it, selects it and starts rename.
 pub(crate) unsafe fn explorer_new_folder(i: usize) {
+    if crate::pane::recent::locked(i) {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    }
     let Some(sv) = view_of::<IShellView>(i) else {
         _ = MessageBeep(MB_ICONWARNING);
         return;
@@ -1508,6 +1548,10 @@ pub(crate) unsafe fn explorer_new_folder(i: usize) {
 
 // Ctrl+Shift+N: a new folder in the active pane, then the shell's own rename (F2) once it shows up.
 pub(crate) unsafe fn new_folder(i: usize) {
+    if crate::pane::recent::locked(i) {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    }
     let dir = app(|a| a.s.paths.get(i).cloned().unwrap_or_default());
     if !is_fs(&dir) {
         _ = MessageBeep(MB_ICONWARNING);
