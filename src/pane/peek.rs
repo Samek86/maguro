@@ -1381,7 +1381,43 @@ fn open_with_cancelled(err: &Error) -> bool {
     err.code() == HRESULT::from_win32(ERROR_CANCELLED.0)
 }
 
-/// Standard Windows Open With dialog (`SHOpenWithDialog`) for the file the preview is showing.
+/// Open With via shell `openas` (`ShellExecuteEx` + `SEE_MASK_INVOKEIDLIST`).
+/// Falls back to `rundll32 shell32.dll,OpenAs_RunDLL` if that fails.
+unsafe fn shell_open_as(path: &str, owner: HWND) -> Result<(), Error> {
+    let file = HSTRING::from(path);
+    let verb = w!("openas");
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_INVOKEIDLIST,
+        hwnd: owner,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    match ShellExecuteExW(Some(&mut info)) {
+        Ok(()) => Ok(()),
+        Err(e) if open_with_cancelled(&e) => Err(e),
+        Err(_) => {
+            let params = HSTRING::from(format!("shell32.dll,OpenAs_RunDLL {path}"));
+            let r = ShellExecuteW(
+                None,
+                w!("open"),
+                w!("rundll32.exe"),
+                &params,
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+            if r.0 as isize > 32 {
+                Ok(())
+            } else {
+                Err(Error::from_win32())
+            }
+        }
+    }
+}
+
+/// Standard Windows Open With dialog for the file the preview is showing.
 pub(crate) unsafe fn open_peek_with() {
     let h = app(|a| a.peek);
     if h.0.is_null() {
@@ -1395,13 +1431,7 @@ pub(crate) unsafe fn open_peek_with() {
     // The dialog deactivates peek. HOLD_PEEK keeps WA_INACTIVE from destroying it.
     HOLD_PEEK.store(true, Ordering::SeqCst);
     let owner = app(|a| a.main);
-    let file = HSTRING::from(&path);
-    let info = OPENASINFO {
-        pcszFile: PCWSTR(file.as_ptr()),
-        pcszClass: PCWSTR::null(),
-        oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_EXEC,
-    };
-    let opened = SHOpenWithDialog((!owner.0.is_null()).then_some(owner), &info);
+    let opened = shell_open_as(&path, owner);
     if !IsWindow(Some(h)).as_bool() {
         HOLD_PEEK.store(false, Ordering::SeqCst);
         return;
