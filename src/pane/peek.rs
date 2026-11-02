@@ -1381,43 +1381,9 @@ fn open_with_cancelled(err: &Error) -> bool {
     err.code() == HRESULT::from_win32(ERROR_CANCELLED.0)
 }
 
-/// Open With via shell `openas` (`ShellExecuteEx` + `SEE_MASK_INVOKEIDLIST`).
-/// Falls back to `rundll32 shell32.dll,OpenAs_RunDLL` if that fails.
-unsafe fn shell_open_as(path: &str, owner: HWND) -> Result<()> {
-    let file = HSTRING::from(path);
-    let verb = w!("openas");
-    let mut info = SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_INVOKEIDLIST,
-        hwnd: owner,
-        lpVerb: PCWSTR(verb.as_ptr()),
-        lpFile: PCWSTR(file.as_ptr()),
-        nShow: SW_SHOWNORMAL.0,
-        ..Default::default()
-    };
-    match ShellExecuteExW(&mut info) {
-        Ok(()) => Ok(()),
-        Err(e) if open_with_cancelled(&e) => Err(e),
-        Err(_) => {
-            let params = HSTRING::from(format!("shell32.dll,OpenAs_RunDLL {path}"));
-            let r = ShellExecuteW(
-                None,
-                w!("open"),
-                w!("rundll32.exe"),
-                &params,
-                PCWSTR::null(),
-                SW_SHOWNORMAL,
-            );
-            if r.0 as isize > 32 {
-                Ok(())
-            } else {
-                Err(Error::from_thread())
-            }
-        }
-    }
-}
-
-/// Standard Windows Open With dialog for the file the preview is showing.
+/// Open With for the previewed file.
+/// Close peek first so a topmost peek cannot bury the chooser, then `SHOpenWithDialog`
+/// on the UI thread with the main window as owner. Fallback: `rundll32 OpenAs_RunDLL`.
 pub(crate) unsafe fn open_peek_with() {
     let h = app(|a| a.peek);
     if h.0.is_null() {
@@ -1428,20 +1394,31 @@ pub(crate) unsafe fn open_peek_with() {
         refocus_peek(h);
         return;
     };
-    // The dialog deactivates peek. HOLD_PEEK keeps WA_INACTIVE from destroying it.
-    HOLD_PEEK.store(true, Ordering::SeqCst);
     let owner = app(|a| a.main);
-    let opened = shell_open_as(&path, owner);
-    if !IsWindow(Some(h)).as_bool() {
-        HOLD_PEEK.store(false, Ordering::SeqCst);
-        return;
-    }
-    match opened {
-        Ok(()) => close_peek_after_open(h),
-        Err(e) if open_with_cancelled(&e) => refocus_peek(h),
+    // Peek is topmost; leaving it up puts the chooser behind it and looks like a no-op.
+    close_peek_after_open(h);
+    let file = HSTRING::from(&path);
+    let info = OPENASINFO {
+        pcszFile: PCWSTR(file.as_ptr()),
+        pcszClass: PCWSTR::null(),
+        oaifInFlags: OAIF_ALLOW_REGISTRATION | OAIF_EXEC,
+    };
+    match SHOpenWithDialog((!owner.0.is_null()).then_some(owner), &info) {
+        Ok(()) => {}
+        Err(e) if open_with_cancelled(&e) => {}
         Err(_) => {
-            refocus_peek(h);
-            _ = MessageBeep(MB_ICONWARNING);
+            let params = HSTRING::from(format!("shell32.dll,OpenAs_RunDLL {path}"));
+            let r = ShellExecuteW(
+                None,
+                w!("open"),
+                w!("rundll32.exe"),
+                &params,
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+            if r.0 as isize <= 32 {
+                _ = MessageBeep(MB_ICONWARNING);
+            }
         }
     }
 }
@@ -3572,9 +3549,11 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_KEYDOWN => {
                 let k = VIRTUAL_KEY(wp.0 as u16);
                 let repeat = lp.0 & (1 << 30) != 0;
-                let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
-                let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
-                let alt = GetKeyState(VK_MENU.0 as i32) < 0;
+                // Async: injected Shift/Ctrl reach GetAsyncKeyState before this thread
+                // has processed their WM_KEYDOWN (GetKeyState alone misses Shift+Enter).
+                let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32) < 0;
+                let shift = GetAsyncKeyState(VK_SHIFT.0 as i32) < 0;
+                let alt = GetAsyncKeyState(VK_MENU.0 as i32) < 0;
                 if ctrl && matches!(k, VK_0 | VK_NUMPAD0) {
                     set_zoom(h, 1.0, None);
                 } else {
