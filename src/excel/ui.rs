@@ -13,7 +13,7 @@ use crate::i18n::*;
 use super::ooxml::{self, TidyOptions};
 
 /// Above the shell range, next to the other Maguro commands (who-is-using is 0x8004).
-pub(crate) const ID_CTX_EXCEL: u32 = 0x8005;
+pub(crate) const ID_CTX_EXCEL: u32 = 0x8007; // tidy A1; REVEAL=0x8005 excelro=0x8006
 
 const BM_GETCHECK: u32 = 0x00F0;
 const BM_SETCHECK: u32 = 0x00F1;
