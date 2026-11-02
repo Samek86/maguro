@@ -700,11 +700,14 @@ pub(crate) enum Key {
     SwitchToProgram,
     CloseProgram,
     CloseProgramAsk,
+    OpenReadOnly,
+    ExcelIsNotInstalled,
+    ExcelDidNotStart,
 }
 
-pub(crate) const KEY_COUNT: usize = 697;
+pub(crate) const KEY_COUNT: usize = 700;
 
-const _: () = assert!((Key::CloseProgramAsk as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::ExcelDidNotStart as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1404,6 +1407,9 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Switch to program",
     "Close program",
     "Ask {app} to close?\n\nMaguro will ask it to close. It will not be forced to quit.",
+    "Open read-only",
+    "Excel is not installed, so the selected files can't be opened read-only.",
+    "Excel did not start.",
 
 ];
 
@@ -2105,6 +2111,9 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "switch_to_program",
     "close_program",
     "close_program_ask",
+    "open_read_only",
+    "excel_is_not_installed",
+    "excel_did_not_start",
 
 ];
 
