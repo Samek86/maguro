@@ -230,6 +230,14 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 ID_PANEL => toggle_tree(),
                 ID_GATHER => gather_explorer(),
                 ID_BASKET => crate::basket::toggle(),
+                ID_RECENT => {
+                    let i = app(|a| a.s.active);
+                    crate::pane::recent::open_recent(i);
+                }
+                ID_REVEAL => {
+                    let i = app(|a| a.s.active);
+                    crate::pane::recent::show_selection(i);
+                }
                 ID_HOTKEY => toggle_hotkey(),
                 ID_FOLLOW => {
                     let follow = app(|a| {
@@ -319,6 +327,10 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     );
                     _ = ModifyMenuW(menu, ID_GATHER as u32, MF_BYCOMMAND | MF_STRING, ID_GATHER as usize, &HSTRING::from(label));
                 }
+                _ = ModifyMenuW(menu, ID_RECENT as u32, MF_BYCOMMAND | MF_STRING, ID_RECENT, &HSTRING::from(crate::pane::recent::open_label()));
+                _ = ModifyMenuW(menu, ID_REVEAL as u32, MF_BYCOMMAND | MF_STRING, ID_REVEAL, &HSTRING::from(crate::pane::recent::reveal_label()));
+                let reveal_on = crate::pane::recent::can_show(app(|a| a.s.active));
+                _ = EnableMenuItem(menu, ID_REVEAL as u32, MF_BYCOMMAND | if reveal_on { MF_ENABLED } else { MF_GRAYED });
                 if let Some(i) = crate::keys::index("sess.save") {
                     let label = format!("{}\t{}", tr(crate::Key::SaveThisTab), crate::keys::chord_text(i));
                     _ = ModifyMenuW(menu, ID_SESS_SAVE as u32, MF_BYCOMMAND | MF_STRING, ID_SESS_SAVE, &HSTRING::from(label));
@@ -514,6 +526,7 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_TIMER if wp.0 == TIMER_SETTLE => settle_cols(h),
             WM_TIMER if wp.0 == TIMER_DROP => on_pane_drop_timer(h),
             WM_THEME_SCROLL => apply_theme_scroll(h),
+            WM_TIMER if wp.0 == TIMER_RECENT => crate::pane::recent::on_timer(h),
             WM_TIMER if wp.0 == TIMER_NEWFILE => {
                 let job = PENDING_FILE.lock().ok().and_then(|mut p| {
                     let cur = p.as_mut()?;
@@ -1060,6 +1073,8 @@ pub(crate) unsafe fn make_menus() -> Result<HMENU> {
     )?;
     let basket_chord = crate::keys::index("file.basket").map(crate::keys::chord_text).unwrap_or_default();
     item(view, MF_STRING, ID_BASKET, &format!("{}\t{}", tr(crate::Key::FileBasket), basket_chord))?;
+    item(view, MF_STRING, ID_RECENT, &crate::pane::recent::open_label())?;
+    item(view, MF_STRING, ID_REVEAL, &crate::pane::recent::reveal_label())?;
     item(view, MF_STRING, ID_EXT, tr(crate::Key::ShowFileExtensions))?;
     item(view, MF_STRING, ID_FOLLOW, tr(crate::Key::FollowWindowsLightDark))?;
     item(view, MF_STRING, ID_THEME, theme_action_label())?;

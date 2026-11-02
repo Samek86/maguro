@@ -94,6 +94,8 @@ const CMDS: &[Cmd] = &[
     cmd("view.hidden", VIEW, crate::Key::ShowHiddenFiles, 0x48, true, false, false, false, false),
     cmd("view.panel", VIEW, crate::Key::ShowLeftPanel, 0x45, true, true, false, false, false),
     cmd("view.gather", VIEW, crate::Key::OpenExplorerFolders, 0x4F, true, true, false, false, false),
+    // Ctrl+Shift+R is batch rename. Recent files is Ctrl+Alt+R.
+    cmd("view.recentfiles", VIEW, crate::Key::RecentFiles, 0x52, true, false, true, false, false),
     cmd("view.zoom", VIEW, crate::Key::MaximiseRestorePane, 0x4D, true, true, false, false, false),
     cmd("file.path", FILE, crate::Key::CopyFullPath, 0x43, true, true, false, false, false),
     cmd("file.rename", FILE, crate::Key::BatchRename, 0x52, true, true, false, false, false),
@@ -109,6 +111,8 @@ const CMDS: &[Cmd] = &[
     // Ctrl+B is Favourites. Ctrl+Shift+B toggles the basket; Ctrl+Alt+B adds the selection.
     cmd("file.basket", FILE, crate::Key::FileBasket, 0x42, true, true, false, false, false),
     cmd("file.basket.add", FILE, crate::Key::AddSelectionToBasket, 0x42, true, false, true, false, false),
+    // Show in folder, only while the pane is showing Recent files. Elsewhere the key is forwarded.
+    cmd("file.reveal", FILE, crate::Key::ShowInFolder, 0x0D, true, false, false, false, false),
     cmd("sess.save", SESS, crate::Key::SaveThisTab, 0x53, true, false, false, false, false),
     cmd("fav.list", FAV, crate::Key::Favourites, 0x42, true, false, false, false, false),
     cmd("app.settings", HELP, crate::Key::Settings2, 0xBC, true, false, false, false, false),
@@ -654,6 +658,13 @@ mod tests {
                 }
             }
         }
+        assert_eq!(lookup(b'R' as u16, true, true, false, false), index("file.rename"));
+        assert_eq!(chord_text(index("view.recentfiles").unwrap()), "Ctrl+Alt+R");
+        assert_eq!(lookup(b'R' as u16, true, false, true, false), index("view.recentfiles"));
+        assert_eq!(chord_text(index("file.reveal").unwrap()), "Ctrl+Enter");
+        assert_eq!(lookup(0x0D, true, false, false, false), index("file.reveal"));
+        assert!(help_text().lines().any(|l| l == "Ctrl+Alt+R\tRecent files"));
+        assert!(help_text().lines().any(|l| l == "Ctrl+Enter\tShow in folder"));
         assert_eq!(lookup(0x74, false, false, false, false), None); // F5 stays a pane refresh, not a binding
         let dup = index("tab.dup").unwrap();
         assert_eq!(CMDS[dup].cat, TAB);
