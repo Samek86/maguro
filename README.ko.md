@@ -139,13 +139,15 @@ Space 또는 F3으로 그림, PDF, Office, HTML, Markdown, 코드, CSV, ZIP, HWP
 
 ### 13. 파일 바구니
 
-Ctrl+Shift+B로 항상 위 작은 바구니를 엽니다. 파일을 놓거나 Ctrl+Alt+B로 활성 패널 선택을 담고, 나중에 아무 패널로 복사·이동합니다. 경로는 세션이 아니라 `maguro.json`에만 남습니다.
+Ctrl+Shift+B로 항상 위 작은 바구니를 엽니다. 파일을 놓거나 Ctrl+Alt+B로 활성 패널 선택을 담고, 나중에 아무 패널로 복사·이동합니다. 경로는 세션이 아니라 `maguro.json`에만 남습니다. 원본이 없어도 목록에 남고, 직접 지울 때까지 표시됩니다.
 
+<p align="center"><img width="420" alt="설정 스타일 컴팩트 행의 파일 바구니" src="docs/images-v2/feature_basket.ko.png"></p>
 
 ### 14. 폴더 감시
 
-Ctrl+Shift+W로 폴더 감시를 엽니다. 폴더를 놓거나 활성 패널을 추가하면, Maguro가 실행 중일 때만 변경을 알려 줍니다.
+Ctrl+Shift+W로 폴더 감시를 엽니다. 폴더·활성 패널뿐 아니라 **개별 파일**도 추가할 수 있습니다. Maguro가 실행 중일 때만 변경을 알려 줍니다. 감시 중이던 파일이 사라지면 「파일을 찾을 수 없음」으로 표시됩니다.
 
+<p align="center"><img width="560" alt="폴더와 파일 행이 있는 폴더 감시" src="docs/images-v2/feature_folder_watch.ko.png"></p>
 
 ### 15. 클립보드 경로 열기 (Win+Shift+V)
 

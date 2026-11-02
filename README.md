@@ -139,13 +139,15 @@ Right-click an `.xlsx` / `.xlsm` → **Open read-only** to open Excel without lo
 
 ### 13. File basket
 
-Ctrl+Shift+B opens a small always-on-top basket. Drop files into it (or Ctrl+Alt+B for the active selection); copy or move them later into any pane. Paths stay in `maguro.json`, not in session files.
+Ctrl+Shift+B opens a small always-on-top basket. Drop files into it (or Ctrl+Alt+B for the active selection); copy or move them later into any pane. Paths stay in `maguro.json`, not in session files. Missing originals stay listed until you remove them.
 
+<p align="center"><img width="420" alt="File basket with compact Settings-style rows" src="docs/images-v2/feature_basket.png"></p>
 
 ### 14. Folder watch
 
-Ctrl+Shift+W opens folder watch. Drop folders (or add the active pane); Maguro notifies you when files change, but only while Maguro is running.
+Ctrl+Shift+W opens folder watch. Add folders, the active pane, or **individual files**. Maguro notifies you when something changes, but only while Maguro is running. A watched file that disappears shows as missing until you delete the row.
 
+<p align="center"><img width="560" alt="Folder watch with a folder and a file row" src="docs/images-v2/feature_folder_watch.png"></p>
 
 ### 15. Open clipboard path (Win+Shift+V)
 
