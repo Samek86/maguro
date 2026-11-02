@@ -339,6 +339,7 @@ struct SettingsFile {
     /// Older denylist (`packaged:{clsid}`). Read so a saved file does not keep the key
     /// in `extra`, then dropped. Empty used to mean all on. Not written back.
     #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
     ctx_packaged_off: BTreeSet<String>,
     /// Packaged Windows 11 commands the user turned on. Empty means all off.
     /// Not written into grids.ini.
