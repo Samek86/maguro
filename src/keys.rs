@@ -114,6 +114,8 @@ const CMDS: &[Cmd] = &[
     cmd("app.front", WIN, crate::Key::BringMaguroFront, 0x45, false, true, false, true, false),
     // Registered only while another app's Open or Save dialog is in front. See dialogjump.
     cmd("dialog.jump", WIN, crate::Key::JumpToAFolderInAFileDialog, 0x47, true, false, true, false, false),
+    // Registered for the whole time Maguro is running, same as app.front. See cliphot.
+    cmd("clip.open", WIN, crate::Key::OpenClipboardPath, 0x56, false, true, false, true, false),
     cmd("win.new", WIN, crate::Key::NewWindow, 0x4E, true, false, false, false, false),
 ];
 
@@ -319,6 +321,11 @@ pub(crate) fn hot_chord() -> Option<Chord> {
 /// The chord that lists Maguro folders in another app's file dialog.
 pub(crate) fn dialog_chord() -> Option<Chord> {
     index("dialog.jump").and_then(|i| with(|s| s.binds.get(i).copied()))
+}
+
+/// The chord that opens a clipboard path in a new tab.
+pub(crate) fn clip_chord() -> Option<Chord> {
+    index("clip.open").and_then(|i| with(|s| s.binds.get(i).copied()))
 }
 
 /// What the menu click asks for. `reg(true)` registers and reports whether it is really on.
@@ -632,6 +639,16 @@ mod tests {
         assert_eq!(lookup(b'G' as u16, true, false, true, false), index("dialog.jump"));
         assert_eq!(chord_text(index("dialog.jump").unwrap()), "Ctrl+Alt+G");
         assert!(help_text().lines().any(|l| l == "Ctrl+Alt+G\tJump to a folder in a file dialog"));
+        let clip = index("clip.open").unwrap();
+        assert_eq!(chord_text(clip), "Win+Shift+V");
+        assert_eq!(lookup(b'V' as u16, false, true, false, true), Some(clip));
+        assert!(help_text().lines().any(|l| l == "Win+Shift+V\tOpen clipboard path"));
+        let clip_chord = default_chord(clip).unwrap();
+        for (i, c) in CMDS.iter().enumerate() {
+            if i != clip {
+                assert!(!overlaps(c.chord(), clip_chord), "{} collides with clip.open", c.id);
+            }
+        }
         assert_eq!(lookup(b'E' as u16, false, false, true, true), None);
         assert_eq!(lookup(b'E' as u16, false, false, true, false), None);
         assert_eq!(lookup(b'C' as u16, true, false, true, false), index("file.winmerge"));

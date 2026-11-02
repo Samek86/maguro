@@ -909,6 +909,7 @@ pub(crate) unsafe fn reset_prefs() {
     _ = crate::folderapp::set_registered(false);
     set_language(fresh.lang);
     crate::keys::reset_all();
+    crate::cliphot::apply(false);
     relayout();
     save_session();
     settings::refresh();
@@ -937,6 +938,7 @@ pub(crate) unsafe fn import_settings(text: &str) -> bool {
         apply_font();
     }
     apply_ext(app(|a| a.s.ext));
+    crate::cliphot::apply(false);
     relayout();
     save_session();
     settings::refresh();
