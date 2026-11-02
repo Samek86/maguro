@@ -1383,7 +1383,7 @@ fn open_with_cancelled(err: &Error) -> bool {
 
 /// Open With via shell `openas` (`ShellExecuteEx` + `SEE_MASK_INVOKEIDLIST`).
 /// Falls back to `rundll32 shell32.dll,OpenAs_RunDLL` if that fails.
-unsafe fn shell_open_as(path: &str, owner: HWND) -> Result<(), Error> {
+unsafe fn shell_open_as(path: &str, owner: HWND) -> Result<()> {
     let file = HSTRING::from(path);
     let verb = w!("openas");
     let mut info = SHELLEXECUTEINFOW {
@@ -1395,7 +1395,7 @@ unsafe fn shell_open_as(path: &str, owner: HWND) -> Result<(), Error> {
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };
-    match ShellExecuteExW(Some(&mut info)) {
+    match ShellExecuteExW(&mut info) {
         Ok(()) => Ok(()),
         Err(e) if open_with_cancelled(&e) => Err(e),
         Err(_) => {
@@ -1411,7 +1411,7 @@ unsafe fn shell_open_as(path: &str, owner: HWND) -> Result<(), Error> {
             if r.0 as isize > 32 {
                 Ok(())
             } else {
-                Err(Error::from_win32())
+                Err(Error::from_thread())
             }
         }
     }
