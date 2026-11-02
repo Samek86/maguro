@@ -1286,6 +1286,34 @@ mod tests {
     }
 
     #[test]
+    fn fresh_config_is_one_pane_and_a_saved_grid_stays() {
+        let root = scratch("fresh-panes");
+        let exe = root.join("exe");
+        let cfg = root.join("cfg");
+        let old = root.join("old");
+        std::fs::create_dir_all(&exe).unwrap();
+        let fresh = load_at(&exe, &cfg, &old);
+        assert_eq!((fresh.layout_new, fresh.heights.clone(), fresh.panes()), (3, vec![1], 1));
+        assert!(!exe.join("grids.ini").exists());
+        assert!(!old.join("grids.ini").exists());
+        assert!(!cfg.join("grids.ini").exists());
+
+        let mut saved = Session::default();
+        saved.set_heights(vec![2, 2]);
+        saved.paths[0] = r"C:\keep".into();
+        saved.layout_new = 3;
+        saved.anchor();
+        std::fs::write(cfg.join(SETTINGS_FILE), sync_text(&saved)).unwrap();
+        let back = load_at(&exe, &cfg, &old);
+        assert_eq!(back.heights, vec![2, 2]);
+        assert_eq!(back.paths[0], r"C:\keep");
+        assert_eq!(back.layout_new, 3);
+        assert_eq!(back.panes(), 4);
+        assert!(!exe.join("grids.ini").exists());
+        assert!(!cfg.join("grids.ini").exists());
+    }
+
+    #[test]
     fn favorites_tree_nests_files_and_migrates_a_flat_list() {
         let old = r#"{"version":1,"favorites":[{"path":"C:\\Work","name":"Work"},{"path":"D:\\Photos"}]}"#;
         let migrated = adopt(old).unwrap();
