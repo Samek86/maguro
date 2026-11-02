@@ -5,7 +5,6 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 
 use crate::imports::*;
@@ -319,8 +318,7 @@ fn client_h(dpi: i32) -> i32 {
 }
 
 fn outer_size(dpi: i32) -> (i32, i32) {
-    use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
-    let dpi = dpi.max(96);
+        let dpi = dpi.max(96);
     let cw = sc(dpi, CLIENT_W_DIP);
     let ch = client_h(dpi);
     let mut r = RECT { left: 0, top: 0, right: cw, bottom: ch };
@@ -570,8 +568,8 @@ unsafe fn proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             let _ = GetClientRect(h, &mut rc);
             let l = lay(rc.right - rc.left, rc.bottom - rc.top, dpi);
             // SIGNED coords for multi-monitor / negative; LOWORD/HIWORD as i16
-            let x = (lp.0 as i16 as i32);
-            let y = ((lp.0 >> 16) as i16 as i32);
+            let x = lp.0 as i16 as i32;
+            let y = (lp.0 >> 16) as i16 as i32;
             let next = hit_check(&l, x, y);
             let prev = HOT.with(|c| c.replace(next));
             if prev != next {
@@ -584,8 +582,8 @@ unsafe fn proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             let mut rc = RECT::default();
             let _ = GetClientRect(h, &mut rc);
             let l = lay(rc.right - rc.left, rc.bottom - rc.top, dpi);
-            let x = (lp.0 as i16 as i32);
-            let y = ((lp.0 >> 16) as i16 as i32);
+            let x = lp.0 as i16 as i32;
+            let y = (lp.0 >> 16) as i16 as i32;
             let id = hit_check(&l, x, y);
             if id != 0 {
                 PREFS.with(|p| {
