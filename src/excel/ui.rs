@@ -6,6 +6,7 @@ use std::path::Path;
 
 use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 
 use crate::imports::*;
 use crate::i18n::*;
