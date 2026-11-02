@@ -478,7 +478,9 @@ unsafe fn insert_fast_paste(menu: HMENU, cm: &IContextMenu) {
     let _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_FAST as usize, &HSTRING::from(tr(crate::Key::FastPaste)));
 }
 
-/// Directly under the top shell Open row. Hidden unless every selected file is an Excel workbook or CSV.
+/// Directly under the top shell Open row. A csv file selected with an xlsx file
+/// often has no shared Open verb, so the row goes at the top instead.
+/// Hidden unless every selected file is an Excel workbook or CSV.
 unsafe fn insert_excel_idx(menu: HMENU, verbs: &VerbIndex) {
     if let Some(i) = menu_index(menu, ID_CTX_EXCEL as usize) {
         let _ = DeleteMenu(menu, i, MF_BYPOSITION);
@@ -486,7 +488,7 @@ unsafe fn insert_excel_idx(menu: HMENU, verbs: &VerbIndex) {
     if !super::excelro::armed() {
         return;
     }
-    let Some(at) = verbs.find_pos_after(menu, "open") else { return };
+    let at = verbs.find_pos_after(menu, "open").unwrap_or(0);
     let _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_EXCEL as usize, &HSTRING::from(tr(crate::Key::OpenReadOnly)));
 }
 
@@ -516,7 +518,7 @@ unsafe fn insert_excel(menu: HMENU, cm: &IContextMenu) {
             break;
         }
     }
-    let Some(at) = at else { return };
+    let at = at.unwrap_or(0);
     let _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_EXCEL as usize, &HSTRING::from(tr(crate::Key::OpenReadOnly)));
 }
 
