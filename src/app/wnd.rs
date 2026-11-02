@@ -118,6 +118,11 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 update_status();
                 check_dirty();
                 retry_save();
+                poll_preview();
+            }
+            WM_TIMER if wp.0 == TIMER_PREVIEW => {
+                _ = KillTimer(Some(h), TIMER_PREVIEW);
+                run_preview(false);
             }
             WM_TIMER if wp.0 == TIMER_SAVE => {
                 _ = KillTimer(Some(h), TIMER_SAVE);
@@ -139,7 +144,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     return DefWindowProcW(h, msg, wp, lp);
                 };
                 let c = match d {
-                    Hit::Side | Hit::Col(_) => IDC_SIZEWE,
+                    Hit::Side | Hit::Col(_) | Hit::Preview => IDC_SIZEWE,
                     Hit::Row(..) | Hit::SideSplit => IDC_SIZENS,
                 };
                 SetCursor(LoadCursorW(None, c).ok());
@@ -181,6 +186,13 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                                 a.s.rowr[c] = r;
                             }
                         }
+                        Hit::Preview => {
+                            let min_left = g.gx + pane_min_w(a.dpi);
+                            let max_left = (g.w - g.pad - 1).max(min_left);
+                            let left = (x + g.gap / 2).clamp(min_left, max_left);
+                            let px = (g.w - g.pad - left).max(1);
+                            a.s.preview_w = preview_dip(px, a.dpi);
+                        }
                     }
                     a.s.side = kept_side(a.s.tree_on, a.s.side, geo(a).side);
                     Some(())
@@ -202,13 +214,24 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     Some(Hit::SideSplit) => a.s.side_split = 0.5,
                     Some(Hit::Col(_)) => a.s.colr = even(a.s.heights.len()),
                     Some(Hit::Row(c, _)) => a.s.rowr[c] = even(a.s.heights[c]),
+                    Some(Hit::Preview) => a.s.preview_w = 0,
                     None => {}
                 });
                 if matches!(d, Some(Hit::SideSplit)) {
                     note_save();
                 }
+                if matches!(d, Some(Hit::Preview)) {
+                    publish_shared();
+                    note_save();
+                }
                 relayout();
                 redraw_all();
+                if matches!(d, Some(Hit::Preview)) {
+                    across_windows(|| {
+                        relayout();
+                        redraw_all();
+                    });
+                }
             }
             WM_COMMAND => match wp.0 & 0xffff {
                 id if id == ID_TB_LAYOUT as usize => open_grid(),
@@ -216,6 +239,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 id if id == ID_TB_LOAD as usize => open_session_list(),
                 ID_SESS_SAVE => save_current(),
                 ID_SESS_OPEN => open_session_list(),
+                id if workspace_command(id) => {}
                 id if id == ID_TB_FAV as usize => open_fav_manager(h),
                 id if id == ID_TB_SET as usize => popup_menu(app(|a| a.view_menu), ID_TB_SET),
                 id if (ID_DRIVE as usize..ID_DRIVE as usize + 26).contains(&id) => {
@@ -228,7 +252,17 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
                 ID_HIDDEN => toggle_hidden(),
                 ID_PANEL => toggle_tree(),
+                ID_PREVIEW => toggle_preview(),
                 ID_GATHER => gather_explorer(),
+                ID_BASKET => crate::basket::toggle(),
+                ID_RECENT => {
+                    let i = app(|a| a.s.active);
+                    crate::pane::recent::open_recent(i);
+                }
+                ID_REVEAL => {
+                    let i = app(|a| a.s.active);
+                    crate::pane::recent::show_selection(i);
+                }
                 ID_HOTKEY => toggle_hotkey(),
                 ID_FOLLOW => {
                     let follow = app(|a| {
@@ -267,6 +301,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     settings::redraw();
                 }
                 ID_SETTINGS => settings::open(h),
+                ID_WATCH => crate::watch::open(h),
                 ID_LANG_AUTO => set_language(Lang::Auto),
                 id if (ID_LANG_FIRST..ID_LANG_FIRST + 64).contains(&id) => {
                     if let Some((lang, _)) = language_choices().get(id - ID_LANG_FIRST) {
@@ -285,14 +320,16 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 _ => {}
             },
             WM_INITMENUPOPUP => {
-                let (menu, dblup, accent, lang, panel, ext, hot) = app(|a| (a.view_menu, a.s.dblup, a.s.accent_now(), a.s.lang, a.s.tree_on, a.s.ext, a.hot_on));
+                let (menu, dblup, accent, lang, panel, preview, ext, hot) = app(|a| (a.view_menu, a.s.dblup, a.s.accent_now(), a.s.lang, a.s.tree_on, a.s.preview_on, a.s.ext, a.hot_on));
                 // Submenus (language, colours, WinMerge panes) also send this. Rebuilding then destroys the one that just opened.
                 if HMENU(wp.0 as _) == menu {
                     crate::winmerge::sync_gear(menu);
+                    sync_workspace_menu(menu);
                 }
                 let check = |id: usize, on: bool| CheckMenuItem(menu, id as u32, (MF_BYCOMMAND | if on { MF_CHECKED } else { MF_UNCHECKED }).0);
                 check(ID_HIDDEN, hidden());
                 check(ID_PANEL, panel);
+                check(ID_PREVIEW, preview);
                 check(ID_EXT, ext);
                 check(ID_FOLLOW, app(|a| a.s.theme == 0));
                 _ = ModifyMenuW(menu, ID_THEME as u32, MF_BYCOMMAND | MF_STRING, ID_THEME as usize, &HSTRING::from(theme_action_label()));
@@ -305,6 +342,15 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let label = format!("{}\t{}", tr(crate::Key::LeftPanel), crate::keys::chord_text(i));
                     _ = ModifyMenuW(menu, ID_PANEL as u32, MF_BYCOMMAND | MF_STRING, ID_PANEL as usize, &HSTRING::from(label));
                 }
+                if let Some(i) = crate::keys::index("view.preview") {
+                    let label = format!("{}\t{}", tr(crate::Key::PreviewPane), crate::keys::chord_text(i));
+                    _ = ModifyMenuW(menu, ID_PREVIEW as u32, MF_BYCOMMAND | MF_STRING, ID_PREVIEW as usize, &HSTRING::from(label));
+                }
+                if let Some(i) = crate::keys::index("file.basket") {
+                    let label = format!("{}\t{}", tr(crate::Key::FileBasket), crate::keys::chord_text(i));
+                    _ = ModifyMenuW(menu, ID_BASKET as u32, MF_BYCOMMAND | MF_STRING, ID_BASKET, &HSTRING::from(label));
+                }
+                check(ID_BASKET, crate::basket::alive());
                 if let Some(i) = crate::keys::index("view.gather") {
                     let label = format!(
                         "{}\t{}",
@@ -313,9 +359,17 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     );
                     _ = ModifyMenuW(menu, ID_GATHER as u32, MF_BYCOMMAND | MF_STRING, ID_GATHER as usize, &HSTRING::from(label));
                 }
+                _ = ModifyMenuW(menu, ID_RECENT as u32, MF_BYCOMMAND | MF_STRING, ID_RECENT, &HSTRING::from(crate::pane::recent::open_label()));
+                _ = ModifyMenuW(menu, ID_REVEAL as u32, MF_BYCOMMAND | MF_STRING, ID_REVEAL, &HSTRING::from(crate::pane::recent::reveal_label()));
+                let reveal_on = crate::pane::recent::can_show(app(|a| a.s.active));
+                _ = EnableMenuItem(menu, ID_REVEAL as u32, MF_BYCOMMAND | if reveal_on { MF_ENABLED } else { MF_GRAYED });
                 if let Some(i) = crate::keys::index("sess.save") {
                     let label = format!("{}\t{}", tr(crate::Key::SaveThisTab), crate::keys::chord_text(i));
                     _ = ModifyMenuW(menu, ID_SESS_SAVE as u32, MF_BYCOMMAND | MF_STRING, ID_SESS_SAVE, &HSTRING::from(label));
+                }
+                if let Some(i) = crate::keys::index("watch.open") {
+                    let label = format!("{}\t{}", tr(crate::Key::FolderWatch), crate::keys::chord_text(i));
+                    _ = ModifyMenuW(menu, ID_WATCH as u32, MF_BYCOMMAND | MF_STRING, ID_WATCH, &HSTRING::from(label));
                 }
                 check(ID_DBLUP, dblup);
                 check(ID_LANG_AUTO, lang == Lang::Auto);
@@ -422,12 +476,16 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_THEME_SYNC => theme_sync(),
             WM_ABOUT => about(h),
+            WM_WATCH => crate::watch::on_ui_event(),
+            WM_WATCH_OPEN => crate::watch::open_queued(),
+            WM_WATCH_TOAST => crate::watch::show_fallback(),
             WM_THEME_PANE => theme_pane_step(),
             WM_THEME_RELAUNCH => theme_relaunch(),
             WM_UPDATE => on_update(h, wp.0),
             crate::remote::WM_REMOTE => remote_arrived(),
             WM_HOTKEY if wp.0 == HOTKEY_ID as usize => hotkey_pressed(),
             WM_HOTKEY if wp.0 == crate::dialogjump::DIALOG_HOTKEY_ID as usize => crate::dialogjump::on_hotkey(),
+            WM_HOTKEY if wp.0 == crate::cliphot::CLIP_HOTKEY_ID as usize => crate::cliphot::on_hotkey(),
             WM_CLOSE => {
                 _ = KillTimer(Some(h), TIMER_SAVE);
                 _ = KillTimer(Some(h), TIMER_FVIEWS);
@@ -462,6 +520,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_DESTROY => {
                 release_hotkey_hwnd(h);
+                crate::cliphot::release(h);
                 crate::dialogjump::release(h);
                 _ = KillTimer(Some(h), TIMER_STATUS);
                 _ = KillTimer(Some(h), TIMER_SAVE);
@@ -475,10 +534,14 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     release_desk_handles(handles.0, handles.1, handles.2, handles.3, handles.4);
                 }
                 if window_count() == 0 {
+                    crate::watch::shutdown();
+                    crate::basket::close();
                     crate::dialogjump::shutdown();
                     PostQuitMessage(0);
                 } else {
+                    crate::watch::retarget(app(|a| a.main));
                     try_register_hotkey(app(|a| a.main));
+                    crate::cliphot::install(app(|a| a.main));
                     crate::dialogjump::install(app(|a| a.main));
                 }
             }
@@ -507,6 +570,7 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_TIMER if wp.0 == TIMER_SETTLE => settle_cols(h),
             WM_TIMER if wp.0 == TIMER_DROP => on_pane_drop_timer(h),
             WM_THEME_SCROLL => apply_theme_scroll(h),
+            WM_TIMER if wp.0 == TIMER_RECENT => crate::pane::recent::on_timer(h),
             WM_TIMER if wp.0 == TIMER_NEWFILE => {
                 let job = PENDING_FILE.lock().ok().and_then(|mut p| {
                     let cur = p.as_mut()?;
@@ -531,6 +595,7 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     _ = KillTimer(Some(h), TIMER_NEWFILE);
                 }
             }
+            WM_TIMER if wp.0 == TIMER_CLIPSEL => crate::cliphot::on_select_timer(h),
             WM_TIMER if wp.0 == TIMER_NEWF => {
                 let job = PENDING_NEW.lock().ok().and_then(|mut p| {
                     let cur = p.as_mut()?;
@@ -893,8 +958,9 @@ pub(crate) unsafe fn apply_hotkey(notify: bool) {
             a.status_key.clear();
         });
     }
-    // A rebind can change the dialog chord too. ID 1 is left as it is.
+    // A rebind can change the dialog chord and the clipboard chord too. ID 1 is left as it is.
     crate::dialogjump::sync();
+    crate::cliphot::apply(notify);
 }
 
 pub(crate) unsafe fn release_hotkey_hwnd(h: HWND) {
@@ -1031,6 +1097,7 @@ pub(crate) unsafe fn set_language(lang: Lang) {
     });
     apply_font_all();
     apply_theme();
+    crate::basket::refresh();
     save_session();
 }
 
@@ -1041,15 +1108,23 @@ pub(crate) unsafe fn make_menus() -> Result<HMENU> {
     let save_chord = crate::keys::index("sess.save").map(crate::keys::chord_text).unwrap_or_default();
     item(view, MF_STRING, ID_SESS_SAVE, &format!("{}\t{}", tr(crate::Key::SaveThisTab), save_chord))?;
     item(view, MF_STRING, ID_SESS_OPEN, tr(crate::Key::OpenSession2))?;
+    let workspaces = workspace_menu()?;
+    item(view, MF_POPUP, workspaces.0 as usize, tr(crate::Key::Workspaces))?;
     AppendMenuW(view, MF_SEPARATOR, 0, PCWSTR::null())?;
     item(view, MF_STRING, ID_HIDDEN, tr(crate::Key::ShowHiddenFilesCtrlH))?;
     item(view, MF_STRING, ID_PANEL, tr(crate::Key::LeftPanelCtrlShiftE))?;
+    let preview_chord = crate::keys::index("view.preview").map(crate::keys::chord_text).unwrap_or_default();
+    item(view, MF_STRING, ID_PREVIEW, &format!("{}\t{}", tr(crate::Key::PreviewPane), preview_chord))?;
     item(
         view,
         MF_STRING,
         ID_GATHER,
         tr(crate::Key::OpenFoldersFromExplorerWindowsCtrlShift),
     )?;
+    let basket_chord = crate::keys::index("file.basket").map(crate::keys::chord_text).unwrap_or_default();
+    item(view, MF_STRING, ID_BASKET, &format!("{}\t{}", tr(crate::Key::FileBasket), basket_chord))?;
+    item(view, MF_STRING, ID_RECENT, &crate::pane::recent::open_label())?;
+    item(view, MF_STRING, ID_REVEAL, &crate::pane::recent::reveal_label())?;
     item(view, MF_STRING, ID_EXT, tr(crate::Key::ShowFileExtensions))?;
     item(view, MF_STRING, ID_FOLLOW, tr(crate::Key::FollowWindowsLightDark))?;
     item(view, MF_STRING, ID_THEME, theme_action_label())?;
@@ -1063,6 +1138,8 @@ pub(crate) unsafe fn make_menus() -> Result<HMENU> {
     item(colors, MF_STRING, ID_ACCENT_PICK, tr(crate::Key::Custom))?;
     item(view, MF_POPUP, colors.0 as usize, tr(crate::Key::SelectionColour))?;
     AppendMenuW(view, MF_SEPARATOR, 0, PCWSTR::null())?;
+    let watch_chord = crate::keys::index("watch.open").map(crate::keys::chord_text).unwrap_or_default();
+    item(view, MF_STRING, ID_WATCH, &format!("{}\t{}", tr(crate::Key::FolderWatch), watch_chord))?;
     item(view, MF_STRING, ID_SETTINGS, tr(crate::Key::Settings))?;
     let langs = CreatePopupMenu()?;
     item(langs, MF_STRING, ID_LANG_AUTO, tr(crate::Key::FollowWindows))?;

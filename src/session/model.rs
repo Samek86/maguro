@@ -254,6 +254,8 @@ pub(crate) struct Session {
     pub(crate) hotkey: bool,           // global hotkey brings Maguro forward; the chord is in the keymap
     /// List Maguro folders in another app's Open or Save dialog. Missing means on.
     pub(crate) dialog_jump: bool,
+    /// Open a clipboard path in a new tab. Missing means on. The chord is in the keymap.
+    pub(crate) clip_hotkey: bool,
     /// Session file of the tab on screen. Mirrors `tabs[tab].session`.
     /// Older files stored only this, for the whole window; it is adopted onto the active tab.
     pub(crate) file: String,
@@ -288,6 +290,10 @@ pub(crate) struct Session {
     pub(crate) start_path: String,
     pub(crate) ext: bool,              // show file extensions (the Windows Explorer setting)
     pub(crate) tree_on: bool,          // left panel open
+    /// Right-hand preview of the active pane. Missing means hidden.
+    pub(crate) preview_on: bool,
+    /// Preview plate width in DIP. 0 means the default until the user drags the splitter.
+    pub(crate) preview_w: i32,
     pub(crate) fav_top: bool,          // favourites above the folder tree; false puts the tree on top
     pub(crate) side_split: f64,        // folder tree's share of the left panel; favourites take the rest
     pub(crate) pins_open: bool,        // Explorer pins group expanded; the rows are not saved
@@ -331,6 +337,15 @@ pub(crate) struct Session {
     /// DLL file names that must not load inside this process. Empty means nothing extra is blocked.
     /// maguro.json only. The registry is not written, and a .grids file does not carry this.
     pub(crate) blocked_shell_extensions: Vec<String>,
+    /// Paths kept in the file basket. maguro.json only. A .grids file does not carry this.
+    /// Remove and Clear edit this list. They do not delete the files.
+    pub(crate) file_basket: Vec<String>,
+    /// Last "Tidy to A1 · 100%" checkboxes. Missing from maguro.json means all on.
+    /// A .grids file does not carry these.
+    pub(crate) excel_tidy_a1: bool,
+    pub(crate) excel_tidy_zoom: bool,
+    pub(crate) excel_tidy_first: bool,
+    pub(crate) excel_tidy_backup: bool,
 }
 
 /// Explorer's View menu, in its order. `(FOLDERVIEWMODE, icon size, label)`.
@@ -414,6 +429,7 @@ impl Default for Session {
             pane_cur: vec![0; MAXP],
             hotkey: true,
             dialog_jump: true,
+            clip_hotkey: true,
             file: String::new(),
             favs: Vec::new(),
             tree: Vec::new(),
@@ -439,6 +455,8 @@ impl Default for Session {
             start_path: String::new(),
             ext: true,
             tree_on: true,
+            preview_on: false,
+            preview_w: 0,
             fav_top: true,
             side_split: 0.5,
             pins_open: true,
@@ -465,6 +483,11 @@ impl Default for Session {
             ctx_win11_pack_migrated: true,
             ctx_win11_view: false,
             blocked_shell_extensions: Vec::new(),
+            file_basket: Vec::new(),
+            excel_tidy_a1: true,
+            excel_tidy_zoom: true,
+            excel_tidy_first: true,
+            excel_tidy_backup: true,
         };
         // A first-ever start: layout_new 3 is one pane. Saved maguro.json without layout_new stays 0 (two panes).
         s.set_heights(s.layout_heights());
@@ -496,6 +519,7 @@ impl PartialEq for Session {
             && self.peek_doc == o.peek_doc
             && self.hotkey == o.hotkey
             && self.dialog_jump == o.dialog_jump
+            && self.clip_hotkey == o.clip_hotkey
             && self.file == o.file
             && self.favs == o.favs
             && self.tree == o.tree
@@ -520,6 +544,8 @@ impl PartialEq for Session {
             && self.start_path == o.start_path
             && self.ext == o.ext
             && self.tree_on == o.tree_on
+            && self.preview_on == o.preview_on
+            && self.preview_w == o.preview_w
             && self.fav_top == o.fav_top
             && self.side_split == o.side_split
             && self.pins_open == o.pins_open
@@ -546,6 +572,11 @@ impl PartialEq for Session {
             && self.ctx_win11_pack_migrated == o.ctx_win11_pack_migrated
             && self.ctx_win11_view == o.ctx_win11_view
             && self.blocked_shell_extensions == o.blocked_shell_extensions
+            && self.file_basket == o.file_basket
+            && self.excel_tidy_a1 == o.excel_tidy_a1
+            && self.excel_tidy_zoom == o.excel_tidy_zoom
+            && self.excel_tidy_first == o.excel_tidy_first
+            && self.excel_tidy_backup == o.excel_tidy_backup
     }
 }
 
@@ -795,6 +826,11 @@ impl Session {
                 "startp" => s.start_path = v.trim().to_string(),
                 "ext" => s.ext = v.trim() != "0",
                 "tree" => s.tree_on = v.trim() != "0",
+                "previewpane" => s.preview_on = v.trim() == "1",
+                "previeww" => {
+                    let n = v.trim().parse::<i32>().unwrap_or(0);
+                    s.preview_w = if n <= 0 { 0 } else { n.clamp(160, 4000) };
+                }
                 // Omitted, or any value other than tree: favourites on top. The source grids.ini is never rewritten.
                 "sideorder" => s.fav_top = v.trim() != "tree",
                 "edge" => s.edge = v.trim() != "0",
@@ -818,6 +854,7 @@ impl Session {
                 "foldersizenet" => s.folder_sizes_network = v.trim() == "1",
                 "hotkey" => s.hotkey = v.trim() != "0",
                 "dialogjump" => s.dialog_jump = v.trim() != "0",
+                "cliphotkey" => s.clip_hotkey = v.trim() != "0",
                 "lang" => s.lang = Lang::from_ini(v),
                 "single" => s.single = v.trim() != "0",
                 "onewindow" => s.one_window = v.trim() != "0",
@@ -911,6 +948,12 @@ impl Session {
             o += &format!("startp={}\n", self.start_path);
         }
         o += &format!("ext={}\ntree={}\nedge={}\n", self.ext as u8, self.tree_on as u8, self.edge as u8);
+        if self.preview_on {
+            o += "previewpane=1\n";
+        }
+        if self.preview_w > 0 {
+            o += &format!("previeww={}\n", self.preview_w);
+        }
         // Default (favourites on top) adds no line, so an imported grids.ini is not given a new key.
         if !self.fav_top {
             o += "sideorder=tree\n";
@@ -927,7 +970,7 @@ impl Session {
             o += &format!("bootf={}\n", self.boot_file);
         }
         o += &format!("autosave={}\ndot={}\nupcheck={}\n", self.autosave as u8, self.dot as u8, self.update_check as u8);
-        o += &format!("dblup={}\nhotkey={}\nlang={}\nsingle={}\nonewindow={}\neverything={}\nevasked={}\nremoteasked={}\nspacepreview={}\npeekwheelnav={}\nfolderview={}\nfoldersize={}\nfoldersizenet={}\ndialogjump={}\n", self.dblup as u8, self.hotkey as u8, self.lang.ini(), self.single as u8, self.one_window as u8, self.use_everything as u8, self.ev_asked as u8, self.remote_asked as u8, self.space_preview as u8, self.peek_wheel_nav as u8, self.remember_views as u8, self.folder_sizes as u8, self.folder_sizes_network as u8, self.dialog_jump as u8);
+        o += &format!("dblup={}\nhotkey={}\nlang={}\nsingle={}\nonewindow={}\neverything={}\nevasked={}\nremoteasked={}\nspacepreview={}\npeekwheelnav={}\nfolderview={}\nfoldersize={}\nfoldersizenet={}\ndialogjump={}\ncliphotkey={}\n", self.dblup as u8, self.hotkey as u8, self.lang.ini(), self.single as u8, self.one_window as u8, self.use_everything as u8, self.ev_asked as u8, self.remote_asked as u8, self.space_preview as u8, self.peek_wheel_nav as u8, self.remember_views as u8, self.folder_sizes as u8, self.folder_sizes_network as u8, self.dialog_jump as u8, self.clip_hotkey as u8);
         if !self.winmerge_path.trim().is_empty() {
             o += &format!("winmerge={}\n", self.winmerge_path.trim());
         }

@@ -39,6 +39,10 @@ pub(crate) static PENDING_FILE: Mutex<Option<PendingFile>> = Mutex::new(None);
 
 // Ctrl+Alt+N: an empty text file in the active pane, then the shell's own rename (F2) once it shows up.
 pub(crate) unsafe fn new_file(i: usize) {
+    if crate::pane::recent::locked(i) {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    }
     let dir = app(|a| a.s.paths.get(i).cloned().unwrap_or_default());
     if !is_fs(&dir) {
         _ = MessageBeep(MB_ICONWARNING);
@@ -272,6 +276,20 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
         }
         return true;
     }
+    // The file basket is its own window. Its keys stay here, including the toggle and add chords.
+    if crate::basket::captures(m.hwnd) {
+        if let Some(i) = crate::keys::lookup(vk, ctrl, shift, alt, win) {
+            let id = crate::keys::id_of(i);
+            if matches!(id, "file.basket" | "file.basket.add") {
+                if m.lParam.0 & (1 << 30) != 0 {
+                    return true;
+                }
+                return dispatch(id, vk, active_pane(), false, || false);
+            }
+        }
+        let _ = crate::basket::on_key(vk, ctrl, shift);
+        return true;
+    }
     // Plain Alt+↑/↓ in the favourites panel or its list reorders that row.
     // It must not send the pane behind it to the parent folder.
     if fav_step(vk, ctrl, alt, shift).is_some() {
@@ -349,7 +367,10 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
         if id == "app.keys" && m.lParam.0 & (1 << 30) != 0 {
             return true; // holding Ctrl+/ toggles once
         }
-        if matches!(id, "focus.next" | "focus.prev" | "app.keys") {
+        if matches!(id, "file.basket" | "file.basket.add") && m.lParam.0 & (1 << 30) != 0 {
+            return true;
+        }
+        if matches!(id, "focus.next" | "focus.prev" | "app.keys" | "file.basket" | "file.basket.add") {
             return dispatch(id, vk, a, list, shell);
         }
     }
@@ -415,7 +436,7 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
     }
     if let Some(i) = crate::keys::lookup(vk, ctrl, shift, alt, win) {
         let id = crate::keys::id_of(i);
-        if matches!(id, "app.keys" | "view.peek" | "app.front" | "dialog.jump" | "view.gather" | "file.mkdir" | "file.winmerge") && m.lParam.0 & (1 << 30) != 0 {
+        if matches!(id, "app.keys" | "view.peek" | "view.preview" | "app.front" | "dialog.jump" | "clip.open" | "view.gather" | "view.recentfiles" | "file.mkdir" | "file.winmerge" | "file.reveal" | "file.basket" | "file.basket.add" | "ws.load" | "ws.save" | "watch.open") && m.lParam.0 & (1 << 30) != 0 {
             return true;
         }
         // Pane-tab chords stay out of the address bar (already returned) and out of every other focus,
@@ -427,6 +448,13 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
             }
         }
         return dispatch(id, vk, a, list, shell);
+    }
+    // Recent files is read-only. These keys would delete, rename, cut, or paste a shortcut.
+    if list && crate::pane::recent::locked(a) && crate::pane::recent::blocks_key(vk, ctrl, alt, shift) {
+        if m.lParam.0 & (1 << 30) == 0 {
+            _ = MessageBeep(MB_ICONWARNING);
+        }
+        return true;
     }
     // Not an app shortcut. Del and Ctrl+V still belong to the file list
     // unless the user has bound that chord above. F5 was handled above.
@@ -533,11 +561,13 @@ unsafe fn dispatch(id: &str, vk: u16, a: usize, list: bool, shell: impl Fn() -> 
         "view.peek" if list => open_peek(a),
         "view.peek" if find_focused(a) => preview_find_sel(a),
         "view.peek" => return shell(),
+        "view.preview" => toggle_preview(),
         "focus.next" => cycle_focus(false),
         "focus.prev" => cycle_focus(true),
         "view.hidden" => toggle_hidden(),
         "view.panel" => toggle_tree(),
         "view.gather" => gather_explorer(),
+        "view.recentfiles" => crate::pane::recent::open_recent(a),
         "view.zoom" => toggle_zoom(),
         "file.sel" | "file.sel2" if list => {
             app(|a| a.held = Some(vk));
@@ -567,6 +597,14 @@ unsafe fn dispatch(id: &str, vk: u16, a: usize, list: bool, shell: impl Fn() -> 
         "file.mkdir" if list => explorer_new_folder(a),
         "file.mkdir" => return shell(),
         "file.winmerge" => crate::winmerge::run_folders(app(|x| x.main), None),
+        "file.basket" => crate::basket::toggle(),
+        "file.basket.add" => crate::basket::add_active_selection(),
+        "file.reveal" => {
+            if !crate::pane::recent::locked(a) {
+                return shell();
+            }
+            crate::pane::recent::show_selection(a);
+        }
         "pane.tab.new" => {
             new_pane_tab(a);
             focus_view(a);
@@ -581,6 +619,16 @@ unsafe fn dispatch(id: &str, vk: u16, a: usize, list: bool, shell: impl Fn() -> 
         "pane.tab.next" => step_pane_tab(a, 1),
         "pane.tab.prev" => step_pane_tab(a, -1),
         "sess.save" => save_current(),
+        "ws.load" => {
+            if let Some(n) = workspace_digit(vk) {
+                load_workspace(n);
+            }
+        }
+        "ws.save" => {
+            if let Some(n) = workspace_digit(vk) {
+                save_workspace(n);
+            }
+        }
         "fav.list" => open_favs(),
         "app.settings" => settings::open(app(|x| x.main)),
         "app.help" => open_help(),
@@ -589,7 +637,9 @@ unsafe fn dispatch(id: &str, vk: u16, a: usize, list: bool, shell: impl Fn() -> 
         // Eat the chord inside Maguro too, so it does not type the letter. The menu opens
         // only when another app's file dialog is actually in front.
         "dialog.jump" => crate::dialogjump::on_hotkey(),
+        "clip.open" => crate::cliphot::on_hotkey(),
         "win.new" => new_window(),
+        "watch.open" => crate::watch::open(app(|x| x.main)),
         _ => return shell(),
     }
     true
@@ -730,7 +780,7 @@ unsafe fn side_popup(h: HWND) -> bool {
     if h.0.is_null() {
         return false;
     }
-    if settings::captures(h) || crate::rename::captures(h) || fav_manager_captures(h) {
+    if settings::captures(h) || crate::rename::captures(h) || fav_manager_captures(h) || crate::basket::captures(h) {
         return true;
     }
     let (peek, load, grid, keys, help, fav, match_hwnd) = app(|a| {

@@ -178,6 +178,9 @@ unsafe fn paste_clipboard(a: usize, dest: Option<String>, force: bool) -> bool {
         };
         (folder, x.main)
     });
+    if crate::pane::recent::path_is_recent(&dst) {
+        return false;
+    }
     if !is_fs(&dst) || OpenClipboard(Some(main)).is_err() {
         return false;
     }
@@ -636,6 +639,10 @@ unsafe fn copy_once(srcs: &[String], dst: &str, rename: bool, mv: bool) -> super
 }
 
 pub(crate) unsafe fn delete_selection(i: usize, shift: bool) {
+    if crate::pane::recent::locked(i) {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    }
     let arr = view_of::<IFolderView2>(i).and_then(|fv| fv.GetSelection(false).ok());
     let count = arr.as_ref().and_then(|a| a.GetCount().ok()).unwrap_or(0);
     let Ok(paths) = collect_all(count, |k| unsafe { arr.as_ref()?.GetItemAt(k).ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok().map(|p| pwstr(p)) }) else {
@@ -871,6 +878,8 @@ pub(crate) unsafe fn reset_prefs() {
         a.s.start_path.clear();
         // `ext` mirrors Explorer's system-wide HideFileExt; resetting app settings must not change it.
         a.s.tree_on = fresh.tree_on;
+        a.s.preview_on = fresh.preview_on;
+        a.s.preview_w = fresh.preview_w;
         a.s.fav_top = fresh.fav_top;
         a.s.edge = fresh.edge;
         a.s.confirm = fresh.confirm;
@@ -909,7 +918,13 @@ pub(crate) unsafe fn reset_prefs() {
     _ = crate::folderapp::set_registered(false);
     set_language(fresh.lang);
     crate::keys::reset_all();
+    crate::cliphot::apply(false);
     relayout();
+    publish_shared();
+    across_windows(|| {
+        relayout();
+        redraw_all();
+    });
     save_session();
     settings::refresh();
 }
@@ -937,9 +952,11 @@ pub(crate) unsafe fn import_settings(text: &str) -> bool {
         apply_font();
     }
     apply_ext(app(|a| a.s.ext));
+    crate::cliphot::apply(false);
     relayout();
     save_session();
     settings::refresh();
+    crate::watch::resync();
     true
 }
 

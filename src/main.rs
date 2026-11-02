@@ -8,7 +8,10 @@ mod langkey;
 mod i18n;
 mod keys;
 mod dialogjump;
+mod clippath;
+mod cliphot;
 mod app;
+mod basket;
 mod ui;
 mod pane;
 mod session;
@@ -18,10 +21,12 @@ mod folderview;
 mod everything;
 mod rename;
 mod winmerge;
+mod excel;
 mod folderapp;
 mod crash;
 mod winpath;
 mod remote;
+mod watch;
 
 use imports::*;
 
@@ -211,6 +216,14 @@ fn main() -> Result<()> {
             ..Default::default()
         });
         RegisterClassW(&WNDCLASSW {
+            style: CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(basket::basket_proc),
+            hInstance: hinst,
+            hCursor: arrow,
+            lpszClassName: w!("MaguroBasket"),
+            ..Default::default()
+        });
+        RegisterClassW(&WNDCLASSW {
             style: CS_DBLCLKS, // header maximises; a double-click on a picture or PDF resets zoom
             lpfnWndProc: Some(peek_proc),
             hInstance: hinst,
@@ -223,6 +236,21 @@ fn main() -> Result<()> {
             hInstance: hinst,
             hCursor: arrow,
             lpszClassName: w!("MaguroPeekHost"),
+            ..Default::default()
+        });
+        RegisterClassW(&WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(preview_proc),
+            hInstance: hinst,
+            hCursor: arrow,
+            lpszClassName: w!("MaguroPreview"),
+            ..Default::default()
+        });
+        RegisterClassW(&WNDCLASSW {
+            lpfnWndProc: Some(preview_host_proc),
+            hInstance: hinst,
+            hCursor: arrow,
+            lpszClassName: w!("MaguroPreviewHost"),
             ..Default::default()
         });
         RegisterClassW(&WNDCLASSW {
@@ -240,6 +268,7 @@ fn main() -> Result<()> {
         crash::show_previous();
         shell::blockext::apply(&s.blocked_shell_extensions);
         let main = open_window(s)?;
+        watch::start();
         apply_ext(app(|a| a.s.ext));
         if restore && boot != 0 && !keep_tabs {
             save_session();
@@ -365,6 +394,13 @@ mod tests {
         cur.take_layout(&Session::parse("dialogjump=0\n"));
         assert!(cur.dialog_jump); // a loaded layout does not change the dialog jump
         assert!(!layout_differs(&Session { dialog_jump: false, ..Session::default() }, &Session::default()));
+        assert!(Session::parse("side=300\n").clip_hotkey);
+        assert!(!Session::parse("cliphotkey=0\n").clip_hotkey);
+        assert!(Session::parse("cliphotkey=1\n").clip_hotkey);
+        assert!(!Session::parse(&Session { clip_hotkey: false, ..Session::default() }.to_ini()).clip_hotkey);
+        cur.take_layout(&Session::parse("cliphotkey=0\n"));
+        assert!(cur.clip_hotkey); // a loaded layout does not change the clipboard hotkey
+        assert!(!layout_differs(&Session { clip_hotkey: false, ..Session::default() }, &Session::default()));
     }
 
     #[test]

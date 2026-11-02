@@ -118,6 +118,7 @@ pub(crate) struct Desk {
     pub(crate) tree: Option<INameSpaceTreeControl>,
     pub(crate) tree_hwnd: HWND,
     pub(crate) side_hwnd: HWND, // favourites list in the left panel
+    pub(crate) preview_hwnd: HWND, // right preview pane; follows the active pane
     pub(crate) side_hot: Option<usize>,
     pub(crate) side_sel: Option<usize>,
     pub(crate) side_scroll: i32,
@@ -281,6 +282,8 @@ pub(crate) struct App {
     pub(crate) save_after: Option<Instant>,
     pub(crate) hot_on: bool,    // the global hotkey is really registered (s.hotkey is only the wish)
     pub(crate) hot_hwnd: HWND,  // the window that owns that registration
+    pub(crate) clip_on: bool,   // the clipboard-path hotkey is really registered (s.clip_hotkey is only the wish)
+    pub(crate) clip_hwnd: HWND, // the window that owns that registration
     pub(crate) last_front: usize, // desk that was active most recently
 }
 
@@ -326,6 +329,7 @@ pub(crate) fn blank_desk() -> Desk {
         tree: None,
         tree_hwnd: HWND::default(),
         side_hwnd: HWND::default(),
+        preview_hwnd: HWND::default(),
         side_hot: None,
         side_sel: None,
         side_scroll: 0,
@@ -446,7 +450,7 @@ pub(crate) fn blank_desk() -> Desk {
 }
 
 thread_local! {
-    static APP: RefCell<App> = RefCell::new(App { desks: vec![blank_desk()], cur: 0, fallback: blank_desk(), save_after: None, hot_on: false, hot_hwnd: HWND::default(), last_front: 0 });
+    static APP: RefCell<App> = RefCell::new(App { desks: vec![blank_desk()], cur: 0, fallback: blank_desk(), save_after: None, hot_on: false, hot_hwnd: HWND::default(), clip_on: false, clip_hwnd: HWND::default(), last_front: 0 });
 }
 
 pub(crate) fn no_panes() -> Vec<Option<Pane>> {
@@ -639,6 +643,8 @@ fn copy_shared(dst: &mut Session, src: &Session) {
     dst.start_path = src.start_path.clone();
     dst.ext = src.ext;
     dst.tree_on = src.tree_on;
+    dst.preview_on = src.preview_on;
+    dst.preview_w = src.preview_w;
     dst.fav_top = src.fav_top;
     dst.pins_open = src.pins_open;
     dst.files_open = src.files_open;
@@ -664,6 +670,7 @@ fn copy_shared(dst: &mut Session, src: &Session) {
     dst.peek_doc = src.peek_doc;
     dst.hotkey = src.hotkey;
     dst.dialog_jump = src.dialog_jump;
+    dst.clip_hotkey = src.clip_hotkey;
     dst.lang = src.lang;
     dst.single = src.single;
     dst.one_window = src.one_window;
@@ -675,6 +682,11 @@ fn copy_shared(dst: &mut Session, src: &Session) {
     dst.ctx_on = src.ctx_on.clone();
     dst.ctx_quiet = src.ctx_quiet.clone();
     dst.blocked_shell_extensions = src.blocked_shell_extensions.clone();
+    dst.file_basket = src.file_basket.clone();
+    dst.excel_tidy_a1 = src.excel_tidy_a1;
+    dst.excel_tidy_zoom = src.excel_tidy_zoom;
+    dst.excel_tidy_first = src.excel_tidy_first;
+    dst.excel_tidy_backup = src.excel_tidy_backup;
 }
 
 /// Copy process-wide preferences from the current window onto the others.

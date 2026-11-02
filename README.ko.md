@@ -172,8 +172,11 @@ Windows를 따르는 라이트/다크, 테마마다 강조색 여섯(기본 세�
 |  | Ctrl+\ | 레이아웃 고르기 |
 | **미리보기** | Space / F3 | 미리보기 |
 |  | Esc / Space / F3 | 미리보기 닫기 |
+|  | Alt+P | 미리보기 창 표시/숨기기 |
 | **파일** | Ctrl+Shift+C | 전체 경로 복사 |
 |  | Ctrl+Shift+R | 일괄 이름 바꾸기 |
+|  | Ctrl+Alt+R | 최근 파일 (Windows 최근 항목, 최신순) |
+|  | Ctrl+Enter | 선택한 최근 파일을 폴더에서 표시 |
 |  | Num+ 또는 Ctrl+Shift+A / Num− / Num* | 패턴으로 선택 / 해제 / 반전 |
 |  | Ctrl+Alt+N | 새 텍스트 파일 |
 |  | Ctrl+Shift+N, F7 | 새 폴더 |
