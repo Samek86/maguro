@@ -700,11 +700,20 @@ pub(crate) enum Key {
     SwitchToProgram,
     CloseProgram,
     CloseProgramAsk,
+    ExcelTidy,
+    ExcelTidyTitle,
+    ExcelTidySelection,
+    ExcelTidyZoom,
+    ExcelTidyFirst,
+    ExcelTidyBackup,
+    ExcelTidySummary,
+    ExcelTidySkippedLocked,
+    ExcelTidySkippedError,
 }
 
-pub(crate) const KEY_COUNT: usize = 697;
+pub(crate) const KEY_COUNT: usize = 706;
 
-const _: () = assert!((Key::CloseProgramAsk as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::ExcelTidySkippedError as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1404,6 +1413,15 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Switch to program",
     "Close program",
     "Ask {app} to close?\n\nMaguro will ask it to close. It will not be forced to quit.",
+    "Tidy to A1 · 100%",
+    "Tidy to A1 · 100%",
+    "Move selection to A1",
+    "Zoom to 100%",
+    "Select the first sheet",
+    "Make a backup",
+    "Done {done}. Skipped {skipped}.",
+    "{name} (in use)",
+    "{name} ({error})",
 
 ];
 
@@ -2105,6 +2123,15 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "switch_to_program",
     "close_program",
     "close_program_ask",
+    "excel_tidy",
+    "excel_tidy_title",
+    "excel_tidy_selection",
+    "excel_tidy_zoom",
+    "excel_tidy_first",
+    "excel_tidy_backup",
+    "excel_tidy_summary",
+    "excel_tidy_skipped_locked",
+    "excel_tidy_skipped_error",
 
 ];
 
