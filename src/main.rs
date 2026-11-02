@@ -9,6 +9,7 @@ mod i18n;
 mod keys;
 mod dialogjump;
 mod app;
+mod basket;
 mod ui;
 mod pane;
 mod session;
@@ -18,6 +19,7 @@ mod folderview;
 mod everything;
 mod rename;
 mod winmerge;
+mod excel;
 mod folderapp;
 mod crash;
 mod winpath;
@@ -208,6 +210,14 @@ fn main() -> Result<()> {
             hInstance: hinst,
             hCursor: arrow,
             lpszClassName: w!("MaguroHelp"),
+            ..Default::default()
+        });
+        RegisterClassW(&WNDCLASSW {
+            style: CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(basket::basket_proc),
+            hInstance: hinst,
+            hCursor: arrow,
+            lpszClassName: w!("MaguroBasket"),
             ..Default::default()
         });
         RegisterClassW(&WNDCLASSW {

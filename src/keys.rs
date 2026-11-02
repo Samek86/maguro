@@ -96,6 +96,8 @@ const CMDS: &[Cmd] = &[
     cmd("view.hidden", VIEW, crate::Key::ShowHiddenFiles, 0x48, true, false, false, false, false),
     cmd("view.panel", VIEW, crate::Key::ShowLeftPanel, 0x45, true, true, false, false, false),
     cmd("view.gather", VIEW, crate::Key::OpenExplorerFolders, 0x4F, true, true, false, false, false),
+    // Ctrl+Shift+R is batch rename. Recent files is Ctrl+Alt+R.
+    cmd("view.recentfiles", VIEW, crate::Key::RecentFiles, 0x52, true, false, true, false, false),
     cmd("view.zoom", VIEW, crate::Key::MaximiseRestorePane, 0x4D, true, true, false, false, false),
     cmd("file.path", FILE, crate::Key::CopyFullPath, 0x43, true, true, false, false, false),
     cmd("file.rename", FILE, crate::Key::BatchRename, 0x52, true, true, false, false, false),
@@ -108,6 +110,11 @@ const CMDS: &[Cmd] = &[
     cmd("file.mkdir", FILE, crate::Key::NewFolderInThisPane, 0x76, false, false, false, false, false),
     // Ctrl+Alt+C is free (copy path is Ctrl+Shift+C, batch rename is Ctrl+Shift+R).
     cmd("file.winmerge", FILE, crate::Key::CompareFoldersInWinmerge, 0x43, true, false, true, false, false),
+    // Ctrl+B is Favourites. Ctrl+Shift+B toggles the basket; Ctrl+Alt+B adds the selection.
+    cmd("file.basket", FILE, crate::Key::FileBasket, 0x42, true, true, false, false, false),
+    cmd("file.basket.add", FILE, crate::Key::AddSelectionToBasket, 0x42, true, false, true, false, false),
+    // Show in folder, only while the pane is showing Recent files. Elsewhere the key is forwarded.
+    cmd("file.reveal", FILE, crate::Key::ShowInFolder, 0x0D, true, false, false, false, false),
     cmd("sess.save", SESS, crate::Key::SaveThisTab, 0x53, true, false, false, false, false),
     cmd("fav.list", FAV, crate::Key::Favourites, 0x42, true, false, false, false, false),
     cmd("app.settings", HELP, crate::Key::Settings2, 0xBC, true, false, false, false, false),
@@ -596,6 +603,8 @@ mod tests {
             ("file.dir", "Ctrl+Shift+N"),
             ("file.mkdir", "F7"),
             ("file.winmerge", "Ctrl+Alt+C"),
+            ("file.basket", "Ctrl+Shift+B"),
+            ("file.basket.add", "Ctrl+Alt+B"),
             ("pane.tab.new", "Ctrl+Alt+T"),
             ("pane.tab.close", "Ctrl+Alt+W"),
             ("pane.tab.next", "Ctrl+Alt+PageDown"),
@@ -643,6 +652,26 @@ mod tests {
         assert_eq!(lookup(b'E' as u16, false, false, true, false), None);
         assert_eq!(lookup(b'C' as u16, true, false, true, false), index("file.winmerge"));
         assert_eq!(lookup(b'C' as u16, true, true, false, false), index("file.path"));
+        assert_eq!(lookup(b'B' as u16, true, false, false, false), index("fav.list"));
+        assert_eq!(lookup(b'B' as u16, true, true, false, false), index("file.basket"));
+        assert_eq!(lookup(b'B' as u16, true, false, true, false), index("file.basket.add"));
+        assert_eq!(chord_text(index("file.basket").unwrap()), "Ctrl+Shift+B");
+        assert_eq!(chord_text(index("file.basket.add").unwrap()), "Ctrl+Alt+B");
+        for id in ["file.basket", "file.basket.add"] {
+            let chord = default_chord(index(id).unwrap()).unwrap();
+            for c in CMDS.iter() {
+                if c.id != id {
+                    assert!(!overlaps(c.chord(), chord), "{} collides with {id}", c.id);
+                }
+            }
+        }
+        assert_eq!(lookup(b'R' as u16, true, true, false, false), index("file.rename"));
+        assert_eq!(chord_text(index("view.recentfiles").unwrap()), "Ctrl+Alt+R");
+        assert_eq!(lookup(b'R' as u16, true, false, true, false), index("view.recentfiles"));
+        assert_eq!(chord_text(index("file.reveal").unwrap()), "Ctrl+Enter");
+        assert_eq!(lookup(0x0D, true, false, false, false), index("file.reveal"));
+        assert!(help_text().lines().any(|l| l == "Ctrl+Alt+R\tRecent files"));
+        assert!(help_text().lines().any(|l| l == "Ctrl+Enter\tShow in folder"));
         assert_eq!(lookup(0x74, false, false, false, false), None); // F5 stays a pane refresh, not a binding
         let dup = index("tab.dup").unwrap();
         assert_eq!(CMDS[dup].cat, TAB);
