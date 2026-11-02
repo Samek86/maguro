@@ -704,7 +704,7 @@ pub(crate) enum Key {
     CtxWin11Note,
 }
 
-pub(crate) const KEY_COUNT: usize = 698;
+pub(crate) const KEY_COUNT: usize = 699;
 
 const _: () = assert!((Key::CtxWin11Note as usize) + 1 == KEY_COUNT);
 
