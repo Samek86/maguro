@@ -1103,7 +1103,14 @@ mod tests {
         let text = pretty(&SettingsFile::from_session(&parsed));
         let back = adopt(&text).unwrap();
         assert_eq!(back, parsed);
-        assert_eq!(adopt("{}").unwrap(), Session::default());
+        // Empty JSON is an older file: two panes side by side. A fresh Session is one pane.
+        // Every other field still matches once that layout difference is set aside.
+        let mut empty = adopt("{}").unwrap();
+        assert_eq!((empty.layout_new, empty.heights.clone()), (0, vec![1, 1]));
+        empty.layout_new = Session::default().layout_new;
+        empty.set_heights(Session::default().heights.clone());
+        empty.anchor();
+        assert_eq!(empty, Session::default());
 
         let mut file = SettingsFile::from_session(&parsed);
         file.version = 2;
