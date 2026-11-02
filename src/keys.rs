@@ -90,11 +90,15 @@ const CMDS: &[Cmd] = &[
     cmd("nav.addr3", MOVE, crate::Key::AddressBar, 0x73, false, false, false, false, false),
     cmd("view.filter", VIEW, crate::Key::SearchThisFolder, 0x46, true, false, false, false, false),
     cmd("view.peek", VIEW, crate::Key::QuickLook, 0x72, false, false, false, false, false),
+    // Alt+P is free: no other default chord uses P, with or without modifiers.
+    cmd("view.preview", VIEW, crate::Key::PreviewPane, 0x50, false, false, true, false, false),
     cmd("focus.next", VIEW, crate::Key::NextFocus, 0x75, false, false, false, false, false),
     cmd("focus.prev", VIEW, crate::Key::PreviousFocus, 0x75, false, true, false, false, false),
     cmd("view.hidden", VIEW, crate::Key::ShowHiddenFiles, 0x48, true, false, false, false, false),
     cmd("view.panel", VIEW, crate::Key::ShowLeftPanel, 0x45, true, true, false, false, false),
     cmd("view.gather", VIEW, crate::Key::OpenExplorerFolders, 0x4F, true, true, false, false, false),
+    // Ctrl+Shift+R is batch rename. Recent files is Ctrl+Alt+R.
+    cmd("view.recentfiles", VIEW, crate::Key::RecentFiles, 0x52, true, false, true, false, false),
     cmd("view.zoom", VIEW, crate::Key::MaximiseRestorePane, 0x4D, true, true, false, false, false),
     cmd("file.path", FILE, crate::Key::CopyFullPath, 0x43, true, true, false, false, false),
     cmd("file.rename", FILE, crate::Key::BatchRename, 0x52, true, true, false, false, false),
@@ -107,6 +111,11 @@ const CMDS: &[Cmd] = &[
     cmd("file.mkdir", FILE, crate::Key::NewFolderInThisPane, 0x76, false, false, false, false, false),
     // Ctrl+Alt+C is free (copy path is Ctrl+Shift+C, batch rename is Ctrl+Shift+R).
     cmd("file.winmerge", FILE, crate::Key::CompareFoldersInWinmerge, 0x43, true, false, true, false, false),
+    // Ctrl+B is Favourites. Ctrl+Shift+B toggles the basket; Ctrl+Alt+B adds the selection.
+    cmd("file.basket", FILE, crate::Key::FileBasket, 0x42, true, true, false, false, false),
+    cmd("file.basket.add", FILE, crate::Key::AddSelectionToBasket, 0x42, true, false, true, false, false),
+    // Show in folder, only while the pane is showing Recent files. Elsewhere the key is forwarded.
+    cmd("file.reveal", FILE, crate::Key::ShowInFolder, 0x0D, true, false, false, false, false),
     cmd("sess.save", SESS, crate::Key::SaveThisTab, 0x53, true, false, false, false, false),
     // Ctrl+1..9 stays Go to pane. These add Alt, and Alt+Shift. Not registered as global hotkeys
     // (those are Win+Shift+E, and Ctrl+Alt+G while a file dialog is in front).
@@ -613,6 +622,8 @@ mod tests {
             ("file.dir", "Ctrl+Shift+N"),
             ("file.mkdir", "F7"),
             ("file.winmerge", "Ctrl+Alt+C"),
+            ("file.basket", "Ctrl+Shift+B"),
+            ("file.basket.add", "Ctrl+Alt+B"),
             ("pane.tab.new", "Ctrl+Alt+T"),
             ("pane.tab.close", "Ctrl+Alt+W"),
             ("pane.tab.next", "Ctrl+Alt+PageDown"),
@@ -626,6 +637,7 @@ mod tests {
             ("focus.next", "F6"),
             ("focus.prev", "Shift+F6"),
             ("view.peek", "F3"),
+            ("view.preview", "Alt+P"),
             ("app.front", "Win+Shift+E"),
             ("win.new", "Ctrl+N"),
         ];
@@ -651,12 +663,36 @@ mod tests {
         assert_eq!(lookup(b'G' as u16, true, false, true, false), index("dialog.jump"));
         assert_eq!(chord_text(index("dialog.jump").unwrap()), "Ctrl+Alt+G");
         assert!(help_text().lines().any(|l| l == "Ctrl+Alt+G\tJump to a folder in a file dialog"));
+        assert_eq!(lookup(b'P' as u16, false, false, true, false), index("view.preview"));
+        assert_eq!(chord_text(index("view.preview").unwrap()), "Alt+P");
+        assert!(help_text().lines().any(|l| l == "Alt+P\tPreview pane"));
+        assert_ne!(lookup(b'P' as u16, true, false, false, false), index("view.preview"));
         assert_eq!(lookup(b'E' as u16, false, false, true, true), None);
         assert_eq!(lookup(b'3' as u16, true, false, true, false), index("ws.load"));
         assert_eq!(lookup(b'3' as u16, true, true, true, false), index("ws.save"));
         assert_eq!(lookup(b'E' as u16, false, false, true, false), None);
         assert_eq!(lookup(b'C' as u16, true, false, true, false), index("file.winmerge"));
         assert_eq!(lookup(b'C' as u16, true, true, false, false), index("file.path"));
+        assert_eq!(lookup(b'B' as u16, true, false, false, false), index("fav.list"));
+        assert_eq!(lookup(b'B' as u16, true, true, false, false), index("file.basket"));
+        assert_eq!(lookup(b'B' as u16, true, false, true, false), index("file.basket.add"));
+        assert_eq!(chord_text(index("file.basket").unwrap()), "Ctrl+Shift+B");
+        assert_eq!(chord_text(index("file.basket.add").unwrap()), "Ctrl+Alt+B");
+        for id in ["file.basket", "file.basket.add"] {
+            let chord = default_chord(index(id).unwrap()).unwrap();
+            for c in CMDS.iter() {
+                if c.id != id {
+                    assert!(!overlaps(c.chord(), chord), "{} collides with {id}", c.id);
+                }
+            }
+        }
+        assert_eq!(lookup(b'R' as u16, true, true, false, false), index("file.rename"));
+        assert_eq!(chord_text(index("view.recentfiles").unwrap()), "Ctrl+Alt+R");
+        assert_eq!(lookup(b'R' as u16, true, false, true, false), index("view.recentfiles"));
+        assert_eq!(chord_text(index("file.reveal").unwrap()), "Ctrl+Enter");
+        assert_eq!(lookup(0x0D, true, false, false, false), index("file.reveal"));
+        assert!(help_text().lines().any(|l| l == "Ctrl+Alt+R\tRecent files"));
+        assert!(help_text().lines().any(|l| l == "Ctrl+Enter\tShow in folder"));
         assert_eq!(lookup(0x74, false, false, false, false), None); // F5 stays a pane refresh, not a binding
         let dup = index("tab.dup").unwrap();
         assert_eq!(CMDS[dup].cat, TAB);

@@ -42,6 +42,26 @@ fn is_on(v: &bool) -> bool {
 fn is_off(v: &bool) -> bool {
     !*v
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ExcelTidyJson {
+    #[serde(default = "yes")]
+    selection: bool,
+    #[serde(default = "yes")]
+    zoom: bool,
+    #[serde(default = "yes")]
+    first_sheet: bool,
+    #[serde(default = "yes")]
+    backup: bool,
+}
+
+fn excel_tidy_default() -> ExcelTidyJson {
+    ExcelTidyJson { selection: true, zoom: true, first_sheet: true, backup: true }
+}
+
+fn excel_tidy_is_default(v: &ExcelTidyJson) -> bool {
+    v.selection && v.zoom && v.first_sheet && v.backup
+}
 fn is_zero_i32(v: &i32) -> bool {
     *v == 0
 }
@@ -281,6 +301,12 @@ struct SettingsFile {
     /// Space in a file list opens quick look. Missing means on. Omitted while on, so an older file stays unchanged.
     #[serde(default = "yes", skip_serializing_if = "is_on")]
     space_preview: bool,
+    /// Right-hand preview pane. Missing means hidden. Omitted while hidden.
+    #[serde(default, skip_serializing_if = "is_off")]
+    preview_pane: bool,
+    /// Preview width in DIP. 0 means the default until the splitter is dragged. Omitted while 0.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    preview_width: i32,
     /// Wheel in quick look steps to the next or previous file past the content end.
     /// Missing means off; it is on only when the user ticks it. Omitted while off.
     #[serde(default, skip_serializing_if = "is_wheel_off")]
@@ -363,6 +389,13 @@ struct SettingsFile {
     /// Ask before loading a workspace replaces the current tabs. Missing means no. Omitted while off.
     #[serde(default, skip_serializing_if = "is_off")]
     workspace_confirm: bool,
+    /// Paths in the file basket. Omitted when empty. Not written into grids.ini.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    file_basket: Vec<String>,
+    /// Last Excel tidy checkboxes. Omitted while every box is on, which is the default.
+    /// Not written into grids.ini.
+    #[serde(default = "excel_tidy_default", skip_serializing_if = "excel_tidy_is_default")]
+    excel_tidy: ExcelTidyJson,
     #[serde(default, flatten)]
     extra: Map<String, Value>,
 }
@@ -422,6 +455,8 @@ impl SettingsFile {
             one_window: true,
             use_everything: true,
             space_preview: true,
+            preview_pane: false,
+            preview_width: 0,
             peek_wheel_nav: false,
             remember_folder_view: true,
             show_folder_sizes: true,
@@ -448,6 +483,8 @@ impl SettingsFile {
             blocked_shell_extensions: Vec::new(),
             workspaces: Vec::new(),
             workspace_confirm: false,
+            file_basket: Vec::new(),
+            excel_tidy: excel_tidy_default(),
             extra: Map::new(),
         }
     }
@@ -528,6 +565,8 @@ impl SettingsFile {
             one_window: s.one_window,
             use_everything: s.use_everything,
             space_preview: s.space_preview,
+            preview_pane: s.preview_on,
+            preview_width: s.preview_w.max(0),
             peek_wheel_nav: s.peek_wheel_nav,
             remember_folder_view: s.remember_views,
             show_folder_sizes: s.folder_sizes,
@@ -554,6 +593,13 @@ impl SettingsFile {
             blocked_shell_extensions: clean_blocked(&s.blocked_shell_extensions),
             workspaces: crate::workspaces_json(),
             workspace_confirm: crate::workspaces_confirm(),
+            file_basket: crate::basket::tidy_list(&s.file_basket),
+            excel_tidy: ExcelTidyJson {
+                selection: s.excel_tidy_a1,
+                zoom: s.excel_tidy_zoom,
+                first_sheet: s.excel_tidy_first,
+                backup: s.excel_tidy_backup,
+            },
             extra: Map::new(),
         }
     }
@@ -590,6 +636,8 @@ impl SettingsFile {
         self.extra.remove("remote_asked");
         self.extra.remove("winmerge_path");
         self.extra.remove("space_preview");
+        self.extra.remove("preview_pane");
+        self.extra.remove("preview_width");
         self.extra.remove("peek_wheel_nav");
         self.extra.remove("remember_folder_view");
         self.extra.remove("show_folder_sizes");
@@ -607,6 +655,8 @@ impl SettingsFile {
         self.extra.remove("blocked_shell_extensions");
         self.extra.remove("workspaces");
         self.extra.remove("workspace_confirm");
+        self.extra.remove("file_basket");
+        self.extra.remove("excel_tidy");
         // Older builds stored a pane-tab on/off switch. Tabs are always on; the key is dropped.
         self.extra.remove("pane_tabs");
     }
@@ -697,6 +747,8 @@ impl SettingsFile {
         s.one_window = self.one_window;
         s.use_everything = self.use_everything;
         s.space_preview = self.space_preview;
+        s.preview_on = self.preview_pane;
+        s.preview_w = if self.preview_width <= 0 { 0 } else { self.preview_width.clamp(160, 4000) };
         s.peek_wheel_nav = self.peek_wheel_nav;
         s.remember_views = self.remember_folder_view;
         s.folder_sizes = self.show_folder_sizes;
@@ -721,6 +773,11 @@ impl SettingsFile {
         s.ctx_win11_pack_migrated = true;
         s.ctx_win11_view = self.ctx_win11_view;
         s.blocked_shell_extensions = clean_blocked(&self.blocked_shell_extensions);
+        s.file_basket = crate::basket::tidy_list(&self.file_basket);
+        s.excel_tidy_a1 = self.excel_tidy.selection;
+        s.excel_tidy_zoom = self.excel_tidy.zoom;
+        s.excel_tidy_first = self.excel_tidy.first_sheet;
+        s.excel_tidy_backup = self.excel_tidy.backup;
         crate::shell::ctxmenu::reconcile_winmerge(&mut s.ctx_off, &mut s.ctx_on);
         s.file = self.session.clone();
         let parsed_tree = crate::tree_from_values(&self.favorites_tree);
@@ -1347,6 +1404,22 @@ mod tests {
         assert_eq!(back.blocked_shell_extensions, vec!["Codec.dll".to_string(), "jpegxr.dll".to_string()]);
         let fresh = serde_json::from_str::<Value>(&sync_text(&Session::default())).unwrap();
         assert!(fresh.get("blocked_shell_extensions").is_none());
+    }
+
+    #[test]
+    fn file_basket_stays_in_json_only_and_drops_duplicates() {
+        let mut s = Session::default();
+        s.file_basket = vec![r"C:\Work\A.txt".into(), r"c:\work\a.txt\".into(), r"D:\Photos".into(), "  ".into()];
+        let text = sync_text(&s);
+        let saved: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(saved["file_basket"], serde_json::json!([r"C:\Work\A.txt", r"D:\Photos"]));
+        assert!(!s.to_ini().contains("file_basket"));
+        assert!(!s.to_ini().contains(r"C:\Work\A.txt"));
+        let back = adopt(&text).unwrap();
+        assert_eq!(back.file_basket, vec![r"C:\Work\A.txt".to_string(), r"D:\Photos".to_string()]);
+        let fresh = serde_json::from_str::<Value>(&sync_text(&Session::default())).unwrap();
+        assert!(fresh.get("file_basket").is_none());
+        assert!(adopt("{}").unwrap().file_basket.is_empty());
     }
 
     #[test]
@@ -2045,6 +2118,44 @@ mod tests {
     }
 
     #[test]
+    fn preview_pane_defaults_off_and_round_trips() {
+        assert!(!Session::default().preview_on);
+        assert_eq!(Session::default().preview_w, 0);
+        assert!(!adopt(r#"{"version":1}"#).unwrap().preview_on);
+        assert_eq!(adopt(r#"{"version":1}"#).unwrap().preview_w, 0);
+        assert!(!Session::parse("side=1\n").preview_on);
+        let mut s = Session::default();
+        s.preview_on = true;
+        s.preview_w = 320;
+        assert!(Session::parse(&s.to_ini()).preview_on);
+        assert_eq!(Session::parse(&s.to_ini()).preview_w, 320);
+        assert!(Session::parse("previewpane=1").preview_on);
+        assert_eq!(Session::parse("previeww=50").preview_w, 160);
+        assert_eq!(Session::parse("previeww=0").preview_w, 0);
+        let text = pretty(&SettingsFile::from_session(&s));
+        assert!(text.contains("\"preview_pane\": true"), "{text}");
+        assert!(text.contains("\"preview_width\": 320"), "{text}");
+        let back = adopt(&text).unwrap();
+        assert!(back.preview_on && back.preview_w == 320);
+        assert!(!pretty(&SettingsFile::from_session(&Session::default())).contains("preview_pane"));
+        assert!(!pretty(&SettingsFile::from_session(&Session::default())).contains("preview_width"));
+        let mut kept = Session::default();
+        kept.preview_on = true;
+        kept.preview_w = 300;
+        kept.take_layout(&Session { preview_on: false, preview_w: 900, ..Session::default() });
+        assert!(kept.preview_on);
+        assert_eq!(kept.preview_w, 300);
+        let mut file = SettingsFile::from_session(&s);
+        file.extra.insert("preview_pane".into(), serde_json::json!(false));
+        file.extra.insert("preview_width".into(), serde_json::json!(10));
+        file.merge_forward(&file.clone());
+        let saved: Value = serde_json::from_str(&pretty(&file)).unwrap();
+        assert_eq!(saved["preview_pane"], true);
+        assert_eq!(saved["preview_width"], 320);
+        assert!(saved.get("extra").is_none());
+    }
+
+    #[test]
     fn remember_folder_view_defaults_on_and_is_not_a_grids_ini_key_we_write_back() {
         assert!(Session::default().remember_views);
         assert!(adopt("{}").unwrap().remember_views);
@@ -2353,6 +2464,28 @@ mod tests {
         assert_eq!(adopt(r#"{"view_new":8}"#).unwrap().default_view(), (8, 32));
         assert_eq!(adopt(r#"{"view_new":9,"view_icon":48}"#).unwrap().default_view(), (4, 16));
         assert!(!pretty(&SettingsFile::from_session(&Session::default())).contains("view_icon"));
+    }
+
+    #[test]
+    fn excel_tidy_choices_default_on_and_round_trip_in_json_only() {
+        let fresh = adopt("{}").unwrap();
+        assert!(fresh.excel_tidy_a1 && fresh.excel_tidy_zoom && fresh.excel_tidy_first && fresh.excel_tidy_backup);
+        assert!(!sync_text(&fresh).contains("excel_tidy"));
+        let mut s = fresh;
+        s.excel_tidy_zoom = false;
+        s.excel_tidy_backup = false;
+        let text = sync_text(&s);
+        assert!(text.contains("\"excel_tidy\""), "{text}");
+        assert!(text.contains("\"zoom\": false"), "{text}");
+        assert!(text.contains("\"backup\": false"), "{text}");
+        let back = adopt(&text).unwrap();
+        assert!(back.excel_tidy_a1 && back.excel_tidy_first);
+        assert!(!back.excel_tidy_zoom && !back.excel_tidy_backup);
+        let partial = adopt(r#"{"excel_tidy":{"backup":false}}"#).unwrap();
+        assert!(partial.excel_tidy_a1 && partial.excel_tidy_zoom && partial.excel_tidy_first);
+        assert!(!partial.excel_tidy_backup);
+        assert!(!s.to_ini().contains("excel_tidy"));
+        assert!(Session::parse(&s.to_ini()).excel_tidy_backup);
     }
 }
 
