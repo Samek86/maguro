@@ -677,14 +677,34 @@ fn inject_candidates<'a>(rows: &'a [PackRow], on: &BTreeSet<String>, targets: u8
     rows.iter().filter(|r| r.targets & targets != 0 && on.contains(&r.id)).take(PACK_LIMIT as usize).collect()
 }
 
-/// `open` / `openwith…` sit in the upper block. Empty and other verbs do not.
+/// `open` / `openwith…` / `explore` sit in the upper block. Empty and other verbs do not.
 fn open_family_verb(verb: &str) -> bool {
     let v = verb.trim().to_ascii_lowercase();
-    v == "open" || v == "opennew" || v == "openas" || v.starts_with("openwith")
+    v == "open" || v == "opennew" || v == "openas" || v == "explore" || v.starts_with("openwith")
 }
 
 fn properties_verb(verb: &str) -> bool {
     verb.trim().eq_ignore_ascii_case("properties")
+}
+
+fn label_stem(folded: &str) -> &str {
+    let t = folded.trim();
+    match t.rfind('(') {
+        Some(i) if t.ends_with(')') && i > 0 => t[..i].trim(),
+        _ => t,
+    }
+}
+
+/// Folded menu title, accelerators already stripped. Covers a shell row whose verb did not come back.
+fn properties_label(folded: &str) -> bool {
+    matches!(label_stem(folded), "properties" | "속성" | "プロパティ" | "propriétés" | "proprietes" | "eigenschaften")
+}
+
+fn open_label(folded: &str) -> bool {
+    matches!(
+        label_stem(folded),
+        "open" | "open with" | "explore" | "열기" | "연결 프로그램" | "다른 앱으로 열기" | "開く" | "プログラムから開く" | "ouvrir" | "ouvrir avec" | "öffnen" | "öffnen mit"
+    )
 }
 
 /// Index for one injected command.
@@ -724,11 +744,14 @@ unsafe fn packaged_menu_anchor(menu: HMENU) -> u32 {
             continue;
         }
         let id = GetMenuItemID(menu, i as i32);
-        if id == super::fav::ID_CTX_PROPS || properties_verb(&super::fav::indexed_verb(id)) {
+        let verb = super::fav::indexed_verb(id);
+        let label = ctxmenu::fold_menu_label(&ctxmenu::item_text(menu, i as u32));
+        // Verb first. A missing verb still matches 속성 / Properties so the row stays last.
+        if id == super::fav::ID_CTX_PROPS || properties_verb(&verb) || properties_label(&label) {
             props = Some(i);
             break;
         }
-        if !seen_sep && open_family_verb(&super::fav::indexed_verb(id)) {
+        if !seen_sep && (open_family_verb(&verb) || open_label(&label)) {
             after_open = Some(i + 1);
         }
     }
@@ -771,10 +794,12 @@ pub(crate) unsafe fn inject_menu(menu: HMENU, paths: &[String], items: &[(String
     } else {
         paths.iter().filter(|p| !p.trim().is_empty()).cloned().collect()
     };
-    let arr = shell_array(&use_paths);
     let mut existing = ctxmenu::folded_menu_titles(menu);
     let mut added = 0u32;
     let at = packaged_menu_anchor(menu);
+    // Built on the first real CoCreate. A cached or duplicate title never parses the paths.
+    let mut arr: Option<IShellItemArray> = None;
+    let mut arr_ready = false;
     for row in hits {
         // Catalogue display name often matches the shell label before GetTitle runs.
         if title_already_present(&existing, &row.name) {
@@ -786,6 +811,10 @@ pub(crate) unsafe fn inject_menu(menu: HMENU, paths: &[String], items: &[(String
             title
         } else {
             let Ok(cmd) = CoCreateInstance::<_, IExplorerCommand>(&row.clsid, None, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER) else { continue };
+            if !arr_ready {
+                arr = shell_array(&use_paths);
+                arr_ready = true;
+            }
             if let Some(state) = command_state(&cmd, arr.as_ref()) {
                 if state & ECS_HIDDEN.0 as u32 != 0 {
                     continue;
@@ -954,9 +983,20 @@ mod tests {
         assert_eq!(packaged_insert_at(&[], None, None), 0);
         assert!(open_family_verb("Open"));
         assert!(open_family_verb("openwith"));
+        assert!(open_family_verb("explore"));
         assert!(!open_family_verb("properties"));
         assert!(properties_verb("Properties"));
         assert!(!properties_verb("open"));
+        // A shell row can come back without a verb. The visible title still anchors the insert.
+        assert!(properties_label(&ctxmenu::fold_menu_label("속성(&R)")));
+        assert!(properties_label(&ctxmenu::fold_menu_label("プロパティ(R)")));
+        assert!(properties_label(&ctxmenu::fold_menu_label("Properties")));
+        assert!(properties_label(&ctxmenu::fold_menu_label("Eigenschaften")));
+        assert!(!properties_label(&ctxmenu::fold_menu_label("열기(&O)")));
+        assert!(open_label(&ctxmenu::fold_menu_label("열기(&O)")));
+        assert!(open_label(&ctxmenu::fold_menu_label("Open with(&W)")));
+        assert!(open_label(&ctxmenu::fold_menu_label("開く")));
+        assert!(!open_label(&ctxmenu::fold_menu_label("잘라내기")));
     }
 
     #[test]
