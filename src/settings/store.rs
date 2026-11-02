@@ -356,6 +356,9 @@ struct SettingsFile {
     /// Not written to the registry and not written into grids.ini.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     blocked_shell_extensions: Vec<String>,
+    /// Folders watched while Maguro is running. Not part of a session and not written into grids.ini.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    folder_watches: Vec<crate::watch::WatchJson>,
     #[serde(default, flatten)]
     extra: Map<String, Value>,
 }
@@ -439,6 +442,7 @@ impl SettingsFile {
             ctx_win11_pack_migrated: false,
             ctx_win11_view: false,
             blocked_shell_extensions: Vec::new(),
+            folder_watches: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -543,6 +547,7 @@ impl SettingsFile {
             ctx_win11_pack_migrated: s.ctx_win11_pack_migrated,
             ctx_win11_view: s.ctx_win11_view,
             blocked_shell_extensions: clean_blocked(&s.blocked_shell_extensions),
+            folder_watches: crate::watch::export_saved(),
             extra: Map::new(),
         }
     }
@@ -594,11 +599,13 @@ impl SettingsFile {
         self.extra.remove("ctx_win11_pack_migrated");
         self.extra.remove("ctx_win11_view");
         self.extra.remove("blocked_shell_extensions");
+        self.extra.remove("folder_watches");
         // Older builds stored a pane-tab on/off switch. Tabs are always on; the key is dropped.
         self.extra.remove("pane_tabs");
     }
 
     fn to_session(&self) -> Session {
+        crate::watch::import_saved(&self.folder_watches);
         let mut s = Session::default();
         if let Some(w) = &self.window {
             s.win = Some([w.left, w.top, w.right, w.bottom, w.maximized as i32]);

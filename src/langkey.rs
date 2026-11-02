@@ -704,11 +704,32 @@ pub(crate) enum Key {
     ExcelIsNotInstalled,
     ExcelDidNotStart,
     CtxWin11Note,
+    FolderWatch,
+    FolderWatchHint,
+    AddActivePane,
+    IncludeSubfolders,
+    WatchWatching,
+    WatchPaused,
+    WatchMissing,
+    WatchFailed,
+    LastChange,
+    ChangeAdded,
+    ChangeRemoved,
+    ChangeModified,
+    ChangeRenamed,
+    WatchStop,
+    WatchResume,
+    WatchEmpty,
+    WatchNotify,
+    WatchNotFolder,
+    WatchAlready,
+    WatchLimit,
+    NoChangeYet,
 }
 
-pub(crate) const KEY_COUNT: usize = 701;
+pub(crate) const KEY_COUNT: usize = 722;
 
-const _: () = assert!((Key::CtxWin11Note as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::NoChangeYet as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1412,6 +1433,27 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Excel is not installed, so the selected files can't be opened read-only.",
     "Excel did not start.",
     "Windows 11 apps start off. Turn on only what you need. Items already shown are not added again. Enabled ones sit with Open. Properties stays last.",
+    "Folder Watch",
+    "These folders are watched only while Maguro is running.",
+    "Add active pane",
+    "Include subfolders",
+    "Watching",
+    "Paused",
+    "Folder not found",
+    "Could not watch",
+    "Last change",
+    "Added",
+    "Removed",
+    "Modified",
+    "Renamed",
+    "Stop",
+    "Resume",
+    "Drop a folder here, or add the active pane.",
+    "{kind}: {name}",
+    "That is not a folder.",
+    "That folder is already being watched.",
+    "Maguro can watch up to {n} folders.",
+    "No changes yet",
 
 ];
 
@@ -2117,6 +2159,27 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "excel_is_not_installed",
     "excel_did_not_start",
     "ctx_win11_note",
+    "folder_watch",
+    "folder_watch_hint",
+    "add_active_pane",
+    "include_subfolders",
+    "watch_watching",
+    "watch_paused",
+    "watch_missing",
+    "watch_failed",
+    "last_change",
+    "change_added",
+    "change_removed",
+    "change_modified",
+    "change_renamed",
+    "watch_stop",
+    "watch_resume",
+    "watch_empty",
+    "watch_notify",
+    "watch_not_folder",
+    "watch_already",
+    "watch_limit",
+    "no_change_yet",
 
 ];
 
