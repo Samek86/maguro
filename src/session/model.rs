@@ -328,6 +328,9 @@ pub(crate) struct Session {
     /// DLL file names that must not load inside this process. Empty means nothing extra is blocked.
     /// maguro.json only. The registry is not written, and a .grids file does not carry this.
     pub(crate) blocked_shell_extensions: Vec<String>,
+    /// Paths kept in the file basket. maguro.json only. A .grids file does not carry this.
+    /// Remove and Clear edit this list. They do not delete the files.
+    pub(crate) file_basket: Vec<String>,
 }
 
 /// Explorer's View menu, in its order. `(FOLDERVIEWMODE, icon size, label)`.
@@ -461,6 +464,7 @@ impl Default for Session {
             ctx_packaged_off: std::collections::BTreeSet::new(),
             ctx_win11_view: false,
             blocked_shell_extensions: Vec::new(),
+            file_basket: Vec::new(),
         };
         // A first-ever start: layout_new 3 is one pane. Saved maguro.json without layout_new stays 0 (two panes).
         s.set_heights(s.layout_heights());
@@ -541,6 +545,7 @@ impl PartialEq for Session {
             && self.ctx_packaged_off == o.ctx_packaged_off
             && self.ctx_win11_view == o.ctx_win11_view
             && self.blocked_shell_extensions == o.blocked_shell_extensions
+            && self.file_basket == o.file_basket
     }
 }
 

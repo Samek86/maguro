@@ -106,6 +106,9 @@ const CMDS: &[Cmd] = &[
     cmd("file.mkdir", FILE, crate::Key::NewFolderInThisPane, 0x76, false, false, false, false, false),
     // Ctrl+Alt+C is free (copy path is Ctrl+Shift+C, batch rename is Ctrl+Shift+R).
     cmd("file.winmerge", FILE, crate::Key::CompareFoldersInWinmerge, 0x43, true, false, true, false, false),
+    // Ctrl+B is Favourites. Ctrl+Shift+B toggles the basket; Ctrl+Alt+B adds the selection.
+    cmd("file.basket", FILE, crate::Key::FileBasket, 0x42, true, true, false, false, false),
+    cmd("file.basket.add", FILE, crate::Key::AddSelectionToBasket, 0x42, true, false, true, false, false),
     cmd("sess.save", SESS, crate::Key::SaveThisTab, 0x53, true, false, false, false, false),
     cmd("fav.list", FAV, crate::Key::Favourites, 0x42, true, false, false, false, false),
     cmd("app.settings", HELP, crate::Key::Settings2, 0xBC, true, false, false, false, false),
@@ -594,6 +597,8 @@ mod tests {
             ("file.dir", "Ctrl+Shift+N"),
             ("file.mkdir", "F7"),
             ("file.winmerge", "Ctrl+Alt+C"),
+            ("file.basket", "Ctrl+Shift+B"),
+            ("file.basket.add", "Ctrl+Alt+B"),
             ("pane.tab.new", "Ctrl+Alt+T"),
             ("pane.tab.close", "Ctrl+Alt+W"),
             ("pane.tab.next", "Ctrl+Alt+PageDown"),
@@ -636,6 +641,19 @@ mod tests {
         assert_eq!(lookup(b'E' as u16, false, false, true, false), None);
         assert_eq!(lookup(b'C' as u16, true, false, true, false), index("file.winmerge"));
         assert_eq!(lookup(b'C' as u16, true, true, false, false), index("file.path"));
+        assert_eq!(lookup(b'B' as u16, true, false, false, false), index("fav.list"));
+        assert_eq!(lookup(b'B' as u16, true, true, false, false), index("file.basket"));
+        assert_eq!(lookup(b'B' as u16, true, false, true, false), index("file.basket.add"));
+        assert_eq!(chord_text(index("file.basket").unwrap()), "Ctrl+Shift+B");
+        assert_eq!(chord_text(index("file.basket.add").unwrap()), "Ctrl+Alt+B");
+        for id in ["file.basket", "file.basket.add"] {
+            let chord = default_chord(index(id).unwrap()).unwrap();
+            for c in CMDS.iter() {
+                if c.id != id {
+                    assert!(!overlaps(c.chord(), chord), "{} collides with {id}", c.id);
+                }
+            }
+        }
         assert_eq!(lookup(0x74, false, false, false, false), None); // F5 stays a pane refresh, not a binding
         let dup = index("tab.dup").unwrap();
         assert_eq!(CMDS[dup].cat, TAB);

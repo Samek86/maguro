@@ -229,6 +229,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 ID_HIDDEN => toggle_hidden(),
                 ID_PANEL => toggle_tree(),
                 ID_GATHER => gather_explorer(),
+                ID_BASKET => crate::basket::toggle(),
                 ID_HOTKEY => toggle_hotkey(),
                 ID_FOLLOW => {
                     let follow = app(|a| {
@@ -305,6 +306,11 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let label = format!("{}\t{}", tr(crate::Key::LeftPanel), crate::keys::chord_text(i));
                     _ = ModifyMenuW(menu, ID_PANEL as u32, MF_BYCOMMAND | MF_STRING, ID_PANEL as usize, &HSTRING::from(label));
                 }
+                if let Some(i) = crate::keys::index("file.basket") {
+                    let label = format!("{}\t{}", tr(crate::Key::FileBasket), crate::keys::chord_text(i));
+                    _ = ModifyMenuW(menu, ID_BASKET as u32, MF_BYCOMMAND | MF_STRING, ID_BASKET, &HSTRING::from(label));
+                }
+                check(ID_BASKET, crate::basket::alive());
                 if let Some(i) = crate::keys::index("view.gather") {
                     let label = format!(
                         "{}\t{}",
@@ -475,6 +481,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     release_desk_handles(handles.0, handles.1, handles.2, handles.3, handles.4);
                 }
                 if window_count() == 0 {
+                    crate::basket::close();
                     crate::dialogjump::shutdown();
                     PostQuitMessage(0);
                 } else {
@@ -1031,6 +1038,7 @@ pub(crate) unsafe fn set_language(lang: Lang) {
     });
     apply_font_all();
     apply_theme();
+    crate::basket::refresh();
     save_session();
 }
 
@@ -1050,6 +1058,8 @@ pub(crate) unsafe fn make_menus() -> Result<HMENU> {
         ID_GATHER,
         tr(crate::Key::OpenFoldersFromExplorerWindowsCtrlShift),
     )?;
+    let basket_chord = crate::keys::index("file.basket").map(crate::keys::chord_text).unwrap_or_default();
+    item(view, MF_STRING, ID_BASKET, &format!("{}\t{}", tr(crate::Key::FileBasket), basket_chord))?;
     item(view, MF_STRING, ID_EXT, tr(crate::Key::ShowFileExtensions))?;
     item(view, MF_STRING, ID_FOLLOW, tr(crate::Key::FollowWindowsLightDark))?;
     item(view, MF_STRING, ID_THEME, theme_action_label())?;

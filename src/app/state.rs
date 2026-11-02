@@ -675,6 +675,7 @@ fn copy_shared(dst: &mut Session, src: &Session) {
     dst.ctx_on = src.ctx_on.clone();
     dst.ctx_quiet = src.ctx_quiet.clone();
     dst.blocked_shell_extensions = src.blocked_shell_extensions.clone();
+    dst.file_basket = src.file_basket.clone();
 }
 
 /// Copy process-wide preferences from the current window onto the others.

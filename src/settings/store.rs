@@ -347,6 +347,9 @@ struct SettingsFile {
     /// Not written to the registry and not written into grids.ini.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     blocked_shell_extensions: Vec<String>,
+    /// Paths in the file basket. Omitted when empty. Not written into grids.ini.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    file_basket: Vec<String>,
     #[serde(default, flatten)]
     extra: Map<String, Value>,
 }
@@ -428,6 +431,7 @@ impl SettingsFile {
             ctx_packaged_off: BTreeSet::new(),
             ctx_win11_view: false,
             blocked_shell_extensions: Vec::new(),
+            file_basket: Vec::new(),
             extra: Map::new(),
         }
     }
@@ -530,6 +534,7 @@ impl SettingsFile {
             ctx_packaged_off: clean_packaged(&s.ctx_packaged_off),
             ctx_win11_view: s.ctx_win11_view,
             blocked_shell_extensions: clean_blocked(&s.blocked_shell_extensions),
+            file_basket: crate::basket::tidy_list(&s.file_basket),
             extra: Map::new(),
         }
     }
@@ -579,6 +584,7 @@ impl SettingsFile {
         self.extra.remove("ctx_packaged_off");
         self.extra.remove("ctx_win11_view");
         self.extra.remove("blocked_shell_extensions");
+        self.extra.remove("file_basket");
         // Older builds stored a pane-tab on/off switch. Tabs are always on; the key is dropped.
         self.extra.remove("pane_tabs");
     }
@@ -685,6 +691,7 @@ impl SettingsFile {
         s.ctx_packaged_off = clean_packaged(&self.ctx_packaged_off);
         s.ctx_win11_view = self.ctx_win11_view;
         s.blocked_shell_extensions = clean_blocked(&self.blocked_shell_extensions);
+        s.file_basket = crate::basket::tidy_list(&self.file_basket);
         crate::shell::ctxmenu::reconcile_winmerge(&mut s.ctx_off, &mut s.ctx_on);
         s.file = self.session.clone();
         let parsed_tree = crate::tree_from_values(&self.favorites_tree);
@@ -1241,6 +1248,22 @@ mod tests {
         assert_eq!(back.blocked_shell_extensions, vec!["Codec.dll".to_string(), "jpegxr.dll".to_string()]);
         let fresh = serde_json::from_str::<Value>(&sync_text(&Session::default())).unwrap();
         assert!(fresh.get("blocked_shell_extensions").is_none());
+    }
+
+    #[test]
+    fn file_basket_stays_in_json_only_and_drops_duplicates() {
+        let mut s = Session::default();
+        s.file_basket = vec![r"C:\Work\A.txt".into(), r"c:\work\a.txt\".into(), r"D:\Photos".into(), "  ".into()];
+        let text = sync_text(&s);
+        let saved: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(saved["file_basket"], serde_json::json!([r"C:\Work\A.txt", r"D:\Photos"]));
+        assert!(!s.to_ini().contains("file_basket"));
+        assert!(!s.to_ini().contains(r"C:\Work\A.txt"));
+        let back = adopt(&text).unwrap();
+        assert_eq!(back.file_basket, vec![r"C:\Work\A.txt".to_string(), r"D:\Photos".to_string()]);
+        let fresh = serde_json::from_str::<Value>(&sync_text(&Session::default())).unwrap();
+        assert!(fresh.get("file_basket").is_none());
+        assert!(adopt("{}").unwrap().file_basket.is_empty());
     }
 
     #[test]
