@@ -206,7 +206,7 @@ foreach($pair in @(
     [void][CapFeat]::PostMessage($st.Hwnd,[CapFeat]::WM_COMMAND,[UIntPtr]::new(1140),[IntPtr]::Zero)
     Start-Sleep -Milliseconds 800
     $ex=[IntPtr]::Zero
-    foreach($cls in @('MaguroExcel','MaguroTidy','MaguroAsk')){
+    foreach($cls in @('MaguroExcelTidy','MaguroExcel','MaguroTidy','MaguroAsk')){
       $l=[CapFeat]::FindOwned($st.Pid,$cls); if($l.Count -gt 0){ $ex=$l[0]; break }
     }
     if($ex -ne [IntPtr]::Zero){ SaveCap $ex (Join-Path $Out $pair.excel) }
