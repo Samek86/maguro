@@ -263,6 +263,23 @@ pub(crate) fn fav_release(group: bool, dx: i32, dy: i32, on_pressed_row: bool) -
     }
 }
 
+/// Selection after a click. Opening a favourite navigates the pane and clears the highlight.
+/// A group toggle and a drag keep the row that was pressed.
+pub(crate) fn fav_sel_after_release(release: FavRelease, sel: Option<usize>) -> Option<usize> {
+    match release {
+        FavRelease::Open => None,
+        FavRelease::Toggle | FavRelease::None => sel,
+    }
+}
+
+/// Hover and timer repaints of the favourites panel.
+/// The panel blits its whole client over the rename edit. While that edit is open, or an IME
+/// composition is up, a hover wash or a pin timer covers the composition and the candidate window.
+/// `hot_changed` is false when the pointer stayed on the same row, so there is nothing to paint.
+pub(crate) fn fav_hover_paints(hot_changed: bool, edit_open: bool, composing: bool) -> bool {
+    hot_changed && !edit_open && !composing
+}
+
 /// Pointer over the favourites panel.
 /// A leaf opens on click, so the hand says so. A group header only expands or
 /// collapses, and empty space is not a row, so both keep the arrow.
@@ -438,7 +455,8 @@ pub(crate) unsafe fn hide_side_fav_tip() {
     let back = cursor_in_client(owner);
     if back.is_none() {
         let paint = app(|a| a.side_hot.take().is_some());
-        if paint && !owner.0.is_null() {
+        // Same freeze as a hover wash: this blit covers the rename edit and the IME window.
+        if paint && !owner.0.is_null() && !fav_repaint_frozen() {
             _ = InvalidateRect(Some(owner), None, false);
         }
     } else if !owner.0.is_null() && !app(|a| a.fav_tip_after_drop) {
@@ -466,6 +484,14 @@ fn side_tip_quiet() -> bool {
         return true;
     }
     fav_tip_blocked(false, ime_composing(hwnd), false)
+}
+
+/// The rename edit is up, or an IME composition is open on it.
+/// Hover and pin-timer paints stay down so they do not cover the composition window.
+fn fav_repaint_frozen() -> bool {
+    let (editing, host, edit) = app(|a| (!a.side_edit_at.is_empty(), a.side_hwnd, a.side_edit));
+    let composing = if edit.0.is_null() { ime_composing(host) } else { ime_composing(edit) };
+    !fav_hover_paints(true, editing, composing)
 }
 
 /// `x` and `y` are client coordinates. `row_i` is the visible row index for anchoring.
@@ -692,6 +718,12 @@ pub(crate) unsafe fn paint_side(h: HWND) {
         }
         paint_pin_note(dc, rc, font, dpi);
     });
+    // The buffer covers the rename edit. Paint the edit again so the composition string comes back.
+    let edit = app(|a| a.side_edit);
+    if !edit.0.is_null() && IsWindowVisible(edit).as_bool() {
+        _ = InvalidateRect(Some(edit), None, false);
+        _ = UpdateWindow(edit);
+    }
     if list.iter().any(|f| !f.group) {
         arm_icon_prewarm(h);
     }
@@ -1149,7 +1181,9 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_FAV_ICON => {
                 clear_icon_refresh();
-                _ = InvalidateRect(Some(h), None, false);
+                if !fav_repaint_frozen() {
+                    _ = InvalidateRect(Some(h), None, false);
+                }
                 // A row may have just been marked missing. Refresh the note if the pointer is still on it.
                 if app(|a| a.fav_tip_hold.is_none() && a.side_drag.is_none() && !a.side_external && !a.fav_tip_after_drop) {
                     if let Some((x, y)) = cursor_in_client(h) {
@@ -1187,8 +1221,11 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     dismiss_side_fav_tip();
                 }
                 clamp_side_scroll();
-                _ = InvalidateRect(Some(h), None, false);
-                _ = UpdateWindow(h);
+                // A pin retry paints every 700ms. That blit sits on the IME candidate while renaming.
+                if !fav_repaint_frozen() {
+                    _ = InvalidateRect(Some(h), None, false);
+                    _ = UpdateWindow(h);
+                }
                 if !pins_loaded() {
                     _ = SetTimer(Some(h), TIMER_PINS, 700, None);
                 }
@@ -1279,7 +1316,7 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         a.side_hot = next;
                         paint
                     });
-                    if paint {
+                    if paint && !fav_repaint_frozen() {
                         _ = InvalidateRect(Some(h), None, false);
                     }
                     match act {
@@ -1306,7 +1343,9 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
                 hide_side_fav_tip();
                 app(|a| a.side_hot = None);
-                _ = InvalidateRect(Some(h), None, false);
+                if !fav_repaint_frozen() {
+                    _ = InvalidateRect(Some(h), None, false);
+                }
             }
             WM_MOUSEWHEEL => {
                 dismiss_side_fav_tip();
@@ -1389,7 +1428,12 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     if let Some(row) = rows().get(i).cloned() {
                         match fav_release(row.group, x - px, y - py, on_row) {
                             FavRelease::Toggle => toggle_row(&row),
-                            FavRelease::Open => open_fav_row(&row),
+                            FavRelease::Open => {
+                                // The accent wash is selection, not hover. Clear it before the pane navigates.
+                                app(|a| a.side_sel = fav_sel_after_release(FavRelease::Open, a.side_sel));
+                                _ = InvalidateRect(Some(h), None, false);
+                                open_fav_row(&row);
+                            }
                             FavRelease::None => {}
                         }
                     }
@@ -1887,7 +1931,7 @@ pub(crate) unsafe fn register_side_drop(h: HWND) {
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use super::{fav_hover_cursor, fav_release, fav_row_at, fav_row_height, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text, mark_rows, FavCursor, FavRelease, FavRow, FavTipAct, RowKind};
+    use super::{fav_hover_cursor, fav_hover_paints, fav_release, fav_row_at, fav_row_height, fav_sel_after_release, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text, mark_rows, FavCursor, FavRelease, FavRow, FavTipAct, RowKind};
     use crate::i18n::UI;
 
     #[test]
@@ -2004,6 +2048,25 @@ mod tests {
         assert_eq!(fav_release(false, 0, 0, false), FavRelease::None);
         assert_eq!(fav_release(true, 0, 0, false), FavRelease::None);
         assert_eq!(fav_release(false, 100, 100, false), FavRelease::None);
+    }
+
+    #[test]
+    fn click_open_clears_the_highlight_and_a_toggle_keeps_it() {
+        assert_eq!(fav_sel_after_release(FavRelease::Open, Some(2)), None);
+        assert_eq!(fav_sel_after_release(FavRelease::Open, None), None);
+        assert_eq!(fav_sel_after_release(FavRelease::Toggle, Some(1)), Some(1));
+        assert_eq!(fav_sel_after_release(FavRelease::None, Some(4)), Some(4));
+        assert_eq!(fav_sel_after_release(FavRelease::None, None), None);
+    }
+
+    #[test]
+    fn hover_paint_stays_down_while_renaming_or_composing() {
+        assert!(fav_hover_paints(true, false, false));
+        assert!(!fav_hover_paints(false, false, false)); // pointer stayed on the same row
+        assert!(!fav_hover_paints(true, true, false)); // rename edit is open
+        assert!(!fav_hover_paints(true, false, true)); // IME composition
+        assert!(!fav_hover_paints(true, true, true));
+        assert!(!fav_hover_paints(false, true, true));
     }
 
     #[test]
