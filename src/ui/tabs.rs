@@ -619,7 +619,7 @@ pub(crate) unsafe fn new_tab_at(path: Option<&str>) {
         lru_note(a, tab);
         // Settings pane count, with even splits. Not the tab on screen.
         // Paths stay empty unless the caller named a folder for the first pane.
-        // Pane colours are the labels on screen, not the tab's saved copy.
+        // Pane colours start with no label.
         let fresh = session_for_new_tab(&a.s, &first);
         let old = a.s.tab;
         stash_tab_order(a, old);
