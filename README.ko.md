@@ -97,7 +97,7 @@
 
 이 포터블 데모에서 콜드 스타트 실측은 **607 ms**입니다. 네트워크 폴더로 붙여넣기·끌기는 robocopy를 쓸 수 있습니다(설정 → 파일 작업, 기본 끔). 우클릭 → 빠른 붙여넣기는 항상 쓰고, Maguro 자체 진행률과 덮어쓰기/건너뛰기/취소를 제공합니다.
 
-**Everything 연동 패널 검색.** 패널에서 Ctrl+F로 입력하는 대로 걸러집니다. 하위 폴더를 켜면 [voidtools Everything](https://www.voidtools.com/)에 물어 바로 결과를 받고, Everything이 없으면 디스크를 직접 걷습니다.
+**Everything 연동 패널 검색.** 패널에서 Ctrl+F로 입력하는 대로 걸러집니다. 하위 폴더를 켜면 [voidtools Everything](https://www.voidtools.com/)에 물어 바로 결과를 받고, Everything이 없으면 디스크를 직접 걷습니다. Everything 결과는 이름·경로·크기·수정한 날짜 표입니다. 열 경계를 끌면 폭이 바뀌고 maguro.json에 남습니다. 그 경계를 두 번 누르면 그 열이 기본 폭으로 돌아갑니다. 결과에 마우스를 올리면 전체 이름·폴더·정확한 크기·날짜가 다른 툴팁과 같이 바로 나타납니다.
 
 <p align="center"><img width="760" alt="Everything 연동 패널 검색" src="docs/images-v3/search.ko.png"></p>
 

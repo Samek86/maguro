@@ -97,7 +97,7 @@
 
 このポータブルデモでのコールドスタート実測は **607 ms**。ネットワークフォルダへの貼り付けやドラッグは robocopy を使えます（設定 → ファイル操作。既定はオフ）。右クリック → 高速貼り付けは常にこちらで、Maguro 独自の進捗と上書き／スキップ／キャンセルが出ます。
 
-**Everything 連携のペイン検索。** ペインで Ctrl+F すると入力のたびに絞り込み。サブフォルダをオンにすると [voidtools Everything](https://www.voidtools.com/) に聞いて一瞬で結果を出し、Everything が無ければディスクを歩きます。
+**Everything 連携のペイン検索。** ペインで Ctrl+F すると入力のたびに絞り込み。サブフォルダをオンにすると [voidtools Everything](https://www.voidtools.com/) に聞いて一瞬で結果を出し、Everything が無ければディスクを歩きます。Everything の結果は名前・パス・サイズ・更新日時の表です。列の境界をドラッグすると幅が変わり maguro.json に残ります。その境界をダブルクリックすると、その列が既定の幅に戻ります。結果にマウスを置くと、名前全体・フォルダ・正確なサイズ・日時が他のツールチップと同じ見た目で即座に出ます。
 
 <p align="center"><img width="760" alt="Everything 連携のペイン検索" src="docs/images-v3/search.ja.png"></p>
 

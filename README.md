@@ -97,7 +97,7 @@ Give each pane its own accent so you always know which side is source and which 
 
 Cold start measured at **607 ms** on this portable demo build. Paste and drag to or from a network folder can use robocopy (Settings → File operations; off by default). Right-click → Fast paste always uses it, with Maguro's own progress and overwrite / skip / cancel.
 
-**Pane search via Everything.** Ctrl+F filters as you type; tick Subfolders and Maguro asks [voidtools Everything](https://www.voidtools.com/) for instant results (or walks the disk if Everything is not running).
+**Pane search via Everything.** Ctrl+F filters as you type; tick Subfolders and Maguro asks [voidtools Everything](https://www.voidtools.com/) for instant results (or walks the disk if Everything is not running). Everything results are a table of name, path, size and date modified: drag a column border to resize it (kept in maguro.json; double-click that border to restore the column's default width) and hover a row for the full name, folder, exact size and date, in the same tooltip as the rest of Maguro.
 
 <p align="center"><img width="760" alt="Everything-powered pane search" src="docs/images-v3/search.png"></p>
 
