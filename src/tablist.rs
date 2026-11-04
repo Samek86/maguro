@@ -1113,7 +1113,7 @@ unsafe fn paint(dc: HDC, _rc: RECT) {
         text(dc, st.chord, &chord_label(), st.mono, p.sub, DT_CENTER);
     }
     if st.frame.bottom > st.frame.top {
-        paint_card(dc, st.frame, dpi);
+        crate::ui::paint_card(dc, st.frame, dpi);
     }
     fill(dc, st.head, p.bg);
     fill(dc, RECT { top: st.head.bottom - 1, bottom: st.head.bottom, ..st.head }, p.line);

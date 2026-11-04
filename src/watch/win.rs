@@ -641,7 +641,7 @@ unsafe fn paint(h: HWND, dc: HDC, rc: RECT) {
         crate::text(dc, lay.banner, &banner, small, ink, DT_LEFT);
     }
     if lay.frame.bottom > lay.frame.top {
-        crate::paint_card(dc, lay.frame, dpi);
+        crate::ui::paint_card(dc, lay.frame, dpi);
     }
     if lay.head.bottom > lay.head.top {
         crate::fill(dc, lay.head, pal.pill);

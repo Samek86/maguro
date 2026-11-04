@@ -1244,7 +1244,7 @@ unsafe fn paint(h: HWND, dc: HDC, rc: RECT) {
         paint_button(dc, *r, kind, track.visual(*id, !on), label, font, dpi, pal.bg, FocusRing::Outside);
     }
     if frame_r.bottom > frame_r.top {
-        paint_card(dc, frame_r, dpi);
+        crate::ui::paint_card(dc, frame_r, dpi);
     }
     if head.bottom > head.top {
         fill(dc, head, pal.pill);
