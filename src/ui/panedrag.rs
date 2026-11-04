@@ -67,6 +67,16 @@ pub(crate) fn drag_slack(dpi: i32) -> i32 {
     (4 * dpi.max(1) / 96).max(4)
 }
 
+/// Whether arming a pane-tab reorder should open the dragged tab.
+/// `cur` is the tab on display. `index` is the tab under the press.
+/// Never. `pick_pane_tab` browses, the shell takes the mouse, and `WM_CAPTURECHANGED`
+/// drops the reorder before the pointer can move the tab. The path tip stays up.
+/// A click that never leaves the slack still selects on button up. The folder on
+/// display stays where `moved_active` puts it.
+pub(crate) fn pane_reorder_switches(_cur: usize, _index: usize) -> bool {
+    false
+}
+
 /// Header or pane-tab strip, and not a control. The file list is below `view` and is left to OLE.
 /// An unlocked × and '+' stay clicks. A lock mark can still drag the tab. Address, filter and the icon buttons do too.
 pub(crate) fn pane_grab(pg: &PaneGeo, tabs: usize, locks: &[bool], x: i32, y: i32, dpi: i32) -> Option<PaneGrab> {
@@ -526,6 +536,15 @@ mod tests {
         assert_eq!(drag_slack(144), 6);
         assert_eq!(drag_slack(192), 8);
         assert_eq!(drag_slack(1), 4);
+    }
+
+    #[test]
+    fn dragging_a_pane_tab_does_not_open_it() {
+        // Third tab, first one on display: opening it browses, the shell takes capture,
+        // and the reorder is cancelled. The path tip stays up. A click still selects.
+        assert!(!pane_reorder_switches(0, 2));
+        assert!(!pane_reorder_switches(2, 0));
+        assert!(!pane_reorder_switches(2, 2));
     }
 
     #[test]

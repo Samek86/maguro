@@ -220,15 +220,14 @@ pub(crate) unsafe fn pane_drag_move(h: HWND, x: i32, y: i32) {
     match started {
         Some(PressStart::Reorder(pane, index)) => {
             hide_pane_tab_tip(h);
-            let switch = app(|a| {
+            let cur = app(|a| {
                 let list = a.s.pane_tab_list(pane);
-                let cur = if list.len() > 1 { a.s.pane_cur.get(pane).copied().unwrap_or(0).min(list.len() - 1) } else { 0 };
-                cur != index
+                if list.len() > 1 { a.s.pane_cur.get(pane).copied().unwrap_or(0).min(list.len() - 1) } else { 0 }
             });
-            if switch {
+            if pane_reorder_switches(cur, index) {
                 pick_pane_tab(pane, index);
             }
-            // A browse can take the capture. The reorder keeps this pane until the button comes up.
+            // The press already captured this pane. Take it back if hiding the tip let it go.
             app(|a| a.pane_tab_drag = Some(index));
             SetCapture(h);
             drag_pane_tabs(h, x, y);
