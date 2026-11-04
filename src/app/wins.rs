@@ -235,6 +235,8 @@ pub(crate) fn fresh_window_session() -> Session {
         n.cols = vec![String::new(); MAXP];
         n.pane_folders = vec![Vec::new(); MAXP];
         n.pane_cur = vec![0; MAXP];
+        n.pane_locks = vec![Vec::new(); MAXP];
+        n.pane_names = vec![Vec::new(); MAXP];
         let d = 32 * a.dpi.max(96) / 96;
         if let Some(w) = n.win.as_mut() {
             w[0] += d;
