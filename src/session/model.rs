@@ -757,6 +757,78 @@ pub(crate) fn layout_for_new_tab(layout_new: u8) -> (Vec<usize>, Vec<f64>, Vec<V
     (heights, colr, rowr)
 }
 
+/// Colour labels on screen now. A new tab reads this, not `tabs[tab].tints`.
+/// The saved copy keeps the previous colour until the grid is folded in.
+fn live_pane_tints(src: &Session) -> Vec<u8> {
+    let mut tints = src.tints.clone();
+    tints.resize(MAXP, 0);
+    tints.truncate(MAXP);
+    for c in &mut tints {
+        if *c > 6 {
+            *c = 0;
+        }
+    }
+    tints
+}
+
+/// Grid for a plain new tab. Pane colours come from the labels on screen.
+pub(crate) fn session_for_new_tab(src: &Session, first_path: &str) -> Session {
+    let (heights, colr, rowr) = layout_for_new_tab(src.layout_new);
+    let mut paths = vec![String::new(); MAXP];
+    if !first_path.is_empty() {
+        paths[0] = first_path.to_string();
+    }
+    Session {
+        heights,
+        colr,
+        rowr,
+        active: 0,
+        paths,
+        views: vec![(0, 0); MAXP],
+        cols: vec![String::new(); MAXP],
+        tints: live_pane_tints(src),
+        pane_folders: vec![Vec::new(); MAXP],
+        pane_cur: vec![0; MAXP],
+        pane_locks: vec![Vec::new(); MAXP],
+        pane_names: vec![Vec::new(); MAXP],
+        ..src.clone()
+    }
+}
+
+/// Write a pane colour into the grid on screen and the tab that is open.
+/// Publishing that tab would otherwise put the previous colour back.
+pub(crate) fn set_pane_tint(s: &mut Session, pane: usize, tint: u8) -> bool {
+    if pane >= MAXP {
+        return false;
+    }
+    let tint = if tint <= 6 { tint } else { 0 };
+    if s.tints.len() < MAXP {
+        s.tints.resize(MAXP, 0);
+    }
+    let saved = s.tabs.get(s.tab).and_then(|t| t.tints.get(pane)).copied();
+    if s.tints[pane] == tint && saved == Some(tint) {
+        return false;
+    }
+    s.tints[pane] = tint;
+    if let Some(t) = s.tabs.get_mut(s.tab) {
+        if t.tints.len() < MAXP {
+            t.tints.resize(MAXP, 0);
+        }
+        t.tints[pane] = tint;
+    }
+    true
+}
+
+/// Duplicate of `index`. The tab on screen takes the colours on screen.
+pub(crate) fn duplicated_tab(s: &Session, index: usize) -> Option<Tab> {
+    let src = s.tabs.get(index)?;
+    let mut t = fork_tab(src, duplicate_name(&s.tabs, &src.name));
+    if index == s.tab {
+        t.tints = live_pane_tints(s);
+    }
+    Some(t)
+}
+
 pub(crate) fn nums<T: std::str::FromStr>(v: &str) -> Vec<T> {
     v.split(',').filter_map(|x| x.trim().parse().ok()).collect()
 }
@@ -3158,6 +3230,52 @@ mod crumb_tests {
         assert_eq!(resolve(r"\\?\UNC\server\share".into()), r"\\?\UNC\server\share");
         let s = Session::parse("p0=\\\\10.255.255.2\\x\n");
         assert_eq!(s.paths[0], r"\\10.255.255.2\x");
+    }
+}
+
+#[cfg(test)]
+mod new_tab_colour_tests {
+    use super::*;
+
+    #[test]
+    fn new_tab_uses_the_colour_on_screen_not_the_saved_copy() {
+        let mut s = Session::default();
+        s.tints[0] = 1;
+        s.tints[1] = 2;
+        s.anchor();
+        // The colour menu used to write only the grid. The open tab kept 1.
+        s.tints[0] = 4;
+        assert_eq!(s.tabs[0].tints[0], 1);
+
+        let fresh = session_for_new_tab(&s, "");
+        let tab = Tab::from_live(&fresh, "2".into(), false, vec![]);
+        assert_eq!(tab.tints[0], 4);
+        assert_eq!(tab.tints[1], 2);
+        assert_eq!(fresh.paths[0], "");
+
+        assert!(set_pane_tint(&mut s, 0, 4));
+        assert!(!set_pane_tint(&mut s, 0, 4));
+        s.publish();
+        assert_eq!(s.tints[0], 4);
+        assert_eq!(s.tabs[0].tints[0], 4);
+
+        let dup = duplicated_tab(&s, 0).unwrap();
+        assert_eq!(dup.tints[0], 4);
+        assert!(!dup.locked);
+        assert!(dup.session.is_empty());
+
+        // A stale saved copy must not win for the tab on screen.
+        s.tabs[0].tints[0] = 1;
+        assert_eq!(duplicated_tab(&s, 0).unwrap().tints[0], 4);
+        assert_eq!(session_for_new_tab(&s, r"C:\work").tints[0], 4);
+        assert_eq!(session_for_new_tab(&s, r"C:\work").paths[0], r"C:\work");
+
+        // A tab that is not on screen keeps the colours it was saved with.
+        let mut other = s.tabs[0].clone();
+        other.tints[0] = 3;
+        other.name = "other".into();
+        s.tabs.push(other);
+        assert_eq!(duplicated_tab(&s, 1).unwrap().tints[0], 3);
     }
 }
 
