@@ -197,15 +197,35 @@ unsafe fn visible_label_edit(parent: HWND, depth: u8) -> HWND {
     HWND::default()
 }
 
-unsafe fn label_edit_open(svh: HWND) -> bool {
+unsafe fn label_edit_hwnd(svh: HWND) -> HWND {
     let lv = list_under(svh);
     if is_sys_list(lv) {
         let e = HWND(SendMessageW(lv, LVM_GETEDITCONTROL, None, None).0 as _);
         if !e.0.is_null() && IsWindowVisible(e).as_bool() {
-            return true;
+            return e;
         }
     }
-    !visible_label_edit(svh, 0).0.is_null()
+    visible_label_edit(svh, 0)
+}
+
+unsafe fn label_edit_open(svh: HWND) -> bool {
+    !label_edit_hwnd(svh).0.is_null()
+}
+
+unsafe fn shell_label_edit(pane: usize) -> HWND {
+    let Some(sv) = view_of::<IShellView>(pane) else { return HWND::default() };
+    let svh = sv.GetWindow().unwrap_or_default();
+    if svh.0.is_null() {
+        HWND::default()
+    } else {
+        label_edit_hwnd(svh)
+    }
+}
+
+/// Esc cancels a shell rename. It does not save.
+/// Deactivate still commits: the shell treats focus loss the way Explorer does, and this is not that path.
+pub(crate) fn label_esc_cancels(editing: bool, vk: VIRTUAL_KEY, ctrl: bool, alt: bool) -> bool {
+    editing && !ctrl && !alt && vk == VK_ESCAPE
 }
 
 unsafe fn msg_label_editing(msg: HWND, pane: usize) -> bool {
@@ -400,13 +420,35 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
         }
         return true;
     }
-    if m.hwnd == app(|a| a.side_edit) && !app(|a| a.side_edit_at.is_empty()) {
-        match VIRTUAL_KEY(vk) {
-            VK_RETURN => end_side_rename(true),
-            VK_ESCAPE => end_side_rename(false),
-            _ => return false,
+    // Favourites rename. A real Esc/Enter is often taken by a dialog filter before this
+    // loop when the edit does not ask for those keys; the edit subclass handles that copy.
+    // A key that lands on the panel (right-click never used to focus it) is posted to the
+    // edit, including VK_PROCESSKEY. Eating the process key here would stop Japanese IME.
+    if let Some((edit, host)) = side_rename_windows() {
+        // Resolve VK_PROCESSKEY first so an IME F6 is not typed into the edit.
+        let aim = side_aim_key(m.hwnd, vk);
+        if m.hwnd == host && m.hwnd != edit && side_key_belongs_to_edit(aim, ctrl, alt) {
+            focus_side_edit(edit);
+            // A posted VK_PROCESSKEY does not compose. Translate a copy aimed at the edit
+            // so WM_CHAR and WM_IME_* are queued for the edit, not the panel.
+            let mut copy = *m;
+            copy.hwnd = edit;
+            _ = TranslateMessage(&copy);
+            DispatchMessageW(&copy);
+            return true;
         }
-        return true;
+        if m.hwnd == edit {
+            let ch = VIRTUAL_KEY(vk);
+            if ch == VK_PROCESSKEY || side_ime_busy() {
+                return false;
+            }
+            match side_rename_key(vk, false, false) {
+                SideRenameKey::Commit => end_side_rename(true),
+                SideRenameKey::Cancel => end_side_rename(false),
+                SideRenameKey::Pass => return false,
+            }
+            return true;
+        }
     }
     // The tab list keeps arrows, Enter, Esc, and F2 (rename the selected row). Typing stays in its filter. Ctrl+Shift+L toggles it.
     if crate::tablist::captures(m.hwnd) {
@@ -488,6 +530,15 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
     // Only those keys look for the box, so a normal letter does not walk the view.
     let ch = VIRTUAL_KEY(vk);
     let label_editing = rename_edit_keeps_key(ch, ctrl, shift, alt) && msg_label_editing(m.hwnd, a);
+    if label_esc_cancels(label_editing, ch, ctrl, alt) {
+        // Cancel. Do not move focus first: focus loss commits the name.
+        let edit = shell_label_edit(a);
+        if !edit.0.is_null() && m.hwnd != edit {
+            _ = SendMessageW(edit, WM_KEYDOWN, Some(WPARAM(VK_ESCAPE.0 as usize)), Some(m.lParam));
+            return true;
+        }
+        return false;
+    }
     if route_label_key(label_editing, ch, ctrl, shift, alt) {
         return false;
     }
@@ -1253,7 +1304,7 @@ mod focus_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{label_edit_target, rename_edit_class, route_label_key, space_opens, space_peeks, types_char};
+    use super::{label_edit_target, label_esc_cancels, rename_edit_class, route_label_key, space_opens, space_peeks, types_char};
     use std::time::Duration;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         VK_7, VK_A, VK_BACK, VK_C, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F2, VK_F3, VK_F5, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP, VK_V, VK_X,
@@ -1326,6 +1377,12 @@ mod tests {
         assert!(!idle(VK_BACK, false, false, false));
         assert!(!idle(VK_A, true, false, false));
         assert!(!idle(VK_RETURN, false, false, false));
+        // Esc cancels the shell rename. It is not a save. Focus loss still commits in the shell.
+        assert!(label_esc_cancels(true, VK_ESCAPE, false, false));
+        assert!(!label_esc_cancels(false, VK_ESCAPE, false, false));
+        assert!(!label_esc_cancels(true, VK_RETURN, false, false));
+        assert!(!label_esc_cancels(true, VK_ESCAPE, true, false));
+        assert!(!label_esc_cancels(true, VK_ESCAPE, false, true));
     }
 
     #[test]

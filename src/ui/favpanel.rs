@@ -10,8 +10,11 @@ use crate::i18n::*;
 use crate::shell::*;
 use super::*;
 use windows::Win32::UI::Controls::{TTF_ABSOLUTE, TTF_TRACK, TTM_POP, TTM_TRACKACTIVATE, TTM_DELTOOLW};
+use windows::Win32::UI::Input::Ime::{ImmAssociateContextEx, ImmGetVirtualKey, GCS_COMPSTR, IACE_DEFAULT, HIMC};
 
 const ID_SIDE_EDIT: i32 = 209;
+/// Subclass id for the favourites rename edit. Per window, so it only has to be unique here.
+const SIDE_EDIT_SUB: usize = 9;
 /// Tracking tool for a row in the favourites panel. Lock is 7, tab paths 8, address 9.
 const FAV_TIP_ID: usize = 10;
 /// Tracking tool for a row in the favourites window.
@@ -280,6 +283,70 @@ pub(crate) fn fav_hover_paints(hot_changed: bool, edit_open: bool, composing: bo
     hot_changed && !edit_open && !composing
 }
 
+/// What a key does to the favourites rename edit.
+/// `process` is `VK_PROCESSKEY`: the IME owns that message, so it is never a commit or a cancel.
+/// `composing` is an open reading or syllable: Enter and Esc stay with the IME.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SideRenameKey {
+    /// The edit or the IME keeps the key.
+    Pass,
+    Commit,
+    Cancel,
+}
+
+pub(crate) fn side_rename_key(vk: u16, composing: bool, process: bool) -> SideRenameKey {
+    if process || composing || vk == VK_PROCESSKEY.0 {
+        return SideRenameKey::Pass;
+    }
+    match VIRTUAL_KEY(vk) {
+        VK_RETURN => SideRenameKey::Commit,
+        VK_ESCAPE => SideRenameKey::Cancel,
+        _ => SideRenameKey::Pass,
+    }
+}
+
+/// Keys that belong in the rename edit when they arrive on the panel instead.
+/// Pane chords (F6, Ctrl+Tab, Alt+arrows) stay with the window. `VK_PROCESSKEY` always
+/// belongs to the edit: swallowing it stops Japanese composition.
+/// Virtual key a favourites key should act on. A Japanese IME delivers the real key as
+/// `VK_PROCESSKEY`; `ImmGetVirtualKey` is the key the user pressed. Zero means leave it.
+pub(crate) fn side_aim_key(hwnd: HWND, vk: u16) -> u16 {
+    if vk != VK_PROCESSKEY.0 || hwnd.0.is_null() {
+        return vk;
+    }
+    unsafe {
+        let v = ImmGetVirtualKey(hwnd);
+        if v == 0 { vk } else { v as u16 }
+    }
+}
+
+pub(crate) fn side_key_belongs_to_edit(vk: u16, ctrl: bool, alt: bool) -> bool {
+    if vk == VK_PROCESSKEY.0 {
+        return true;
+    }
+    if alt {
+        return false;
+    }
+    if matches!(side_rename_key(vk, false, false), SideRenameKey::Cancel | SideRenameKey::Commit) {
+        return true;
+    }
+    if ctrl {
+        return matches!(VIRTUAL_KEY(vk), VK_A | VK_C | VK_V | VK_X | VK_Z | VK_Y | VK_BACK | VK_LEFT | VK_RIGHT);
+    }
+    matches!(
+        VIRTUAL_KEY(vk),
+        VK_BACK | VK_DELETE | VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN | VK_HOME | VK_END | VK_SPACE
+    ) || types_char(VIRTUAL_KEY(vk))
+}
+
+/// `WM_GETDLGCODE` for the rename edit. A single-line edit does not ask for Esc or Enter,
+/// so `IsDialogMessage` (and the shell's equivalent) drops the real key and never queues it.
+/// A posted `WM_KEYDOWN` skips that filter, which is why only the posted key cancelled.
+/// `WANTCHARS` keeps IME result characters. This does not strip the IME context.
+pub(crate) fn side_edit_dlg_code(base: u32) -> u32 {
+    base | DLGC_WANTALLKEYS | DLGC_WANTCHARS
+}
+
 /// Pointer over the favourites panel.
 /// A leaf opens on click, so the hand says so. A group header only expands or
 /// collapses, and empty space is not a row, so both keep the arrow.
@@ -357,6 +424,9 @@ thread_local! {
     /// Set while a tip is being hidden. Tooltip messages are synchronous and can deliver
     /// WM_MOUSEMOVE back into the panel; that must not show the tip again.
     static TIP_GUARD: Cell<bool> = const { Cell::new(false) };
+    /// TSF composition on the rename edit. `ImmGetContext` is null for the modern Japanese IME,
+    /// so the IMM composition string cannot be the signal. `WM_IME_STARTCOMPOSITION` still arrives.
+    static SIDE_COMPOSING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Clears `TIP_GUARD` on drop, including when hiding the tip panics.
@@ -743,23 +813,147 @@ pub(crate) unsafe fn place_side_edit() {
     place_edit(edit, outer, true);
 }
 
+/// The edit and its panel while a favourites rename is open.
+pub(crate) fn side_rename_windows() -> Option<(HWND, HWND)> {
+    let (edit, host, on) = app(|a| (a.side_edit, a.side_hwnd, !a.side_edit_at.is_empty()));
+    if !on || edit.0.is_null() || host.0.is_null() {
+        None
+    } else {
+        Some((edit, host))
+    }
+}
+
+/// Open TSF/IMM composition on the rename edit. IMM is null for the modern Japanese IME.
+pub(crate) fn side_ime_busy() -> bool {
+    if SIDE_COMPOSING.with(|c| c.get()) {
+        return true;
+    }
+    let Some((edit, _)) = side_rename_windows() else { return false };
+    ime_composing(edit)
+}
+
+/// The edit has to own the keyboard. A second `SetFocus` covers a parent that kept it.
+pub(crate) unsafe fn focus_side_edit(edit: HWND) {
+    if edit.0.is_null() {
+        return;
+    }
+    _ = SetFocus(Some(edit));
+    if GetFocus() != edit {
+        _ = SetFocus(Some(edit));
+    }
+}
+
+/// Attach the thread's default IME context. A null context would strip Japanese composition.
+unsafe fn keep_side_ime(edit: HWND) {
+    if edit.0.is_null() {
+        return;
+    }
+    _ = ImmAssociateContextEx(edit, HIMC(std::ptr::null_mut()), IACE_DEFAULT);
+}
+
+unsafe fn ensure_side_edit(host: HWND, font: HFONT) -> HWND {
+    let edit = app(|a| a.side_edit);
+    if !edit.0.is_null() && IsWindow(Some(edit)).as_bool() {
+        return edit;
+    }
+    let e = child(host, w!("EDIT"), w!(""), ES_AUTOHSCROLL as u32, WINDOW_EX_STYLE(0), ID_SIDE_EDIT, font);
+    if e.0.is_null() {
+        return e;
+    }
+    app(|a| a.side_edit = e);
+    _ = SetWindowSubclass(e, Some(side_edit_proc), SIDE_EDIT_SUB, 0);
+    keep_side_ime(e);
+    e
+}
+
+unsafe extern "system" fn side_edit_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, id: usize, data: usize) -> LRESULT {
+    crate::crash::catch_wnd(std::panic::AssertUnwindSafe(|| side_edit_proc_inner(h, msg, wp, lp, id, data)))
+}
+
+fn side_edit_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_NCDESTROY => {
+                SIDE_COMPOSING.with(|c| c.set(false));
+                _ = RemoveWindowSubclass(h, Some(side_edit_proc), SIDE_EDIT_SUB);
+            }
+            WM_GETDLGCODE => {
+                let base = DefSubclassProc(h, msg, wp, lp);
+                return LRESULT(side_edit_dlg_code(base.0 as u32) as isize);
+            }
+            WM_IME_STARTCOMPOSITION => {
+                SIDE_COMPOSING.with(|c| c.set(true));
+                return DefSubclassProc(h, msg, wp, lp);
+            }
+            WM_IME_ENDCOMPOSITION => {
+                let r = DefSubclassProc(h, msg, wp, lp);
+                SIDE_COMPOSING.with(|c| c.set(false));
+                return r;
+            }
+            WM_IME_COMPOSITION => {
+                // Pass the composition through. Only a still-open comp string keeps Esc with the IME.
+                let comp = lp.0 & GCS_COMPSTR.0 as isize != 0;
+                if comp {
+                    SIDE_COMPOSING.with(|c| c.set(true));
+                }
+                let r = DefSubclassProc(h, msg, wp, lp);
+                if !comp {
+                    SIDE_COMPOSING.with(|c| c.set(false));
+                }
+                return r;
+            }
+            WM_IME_KEYDOWN => {
+                // Do not swallow the IME key. A bare Esc/Enter, with no composition, still closes the edit.
+                let busy = side_ime_busy();
+                let r = DefSubclassProc(h, msg, wp, lp);
+                if !busy {
+                    apply_side_rename_key(wp.0 as u16);
+                }
+                return r;
+            }
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
+                let vk = wp.0 as u16;
+                let process = vk == VK_PROCESSKEY.0;
+                let busy = side_ime_busy();
+                let orig = side_aim_key(h, vk);
+                // VK_PROCESSKEY and every WM_IME_* go to the edit. Closing the rename on the
+                // process key itself would eat Japanese composition. Alt chords are WM_SYSKEYDOWN
+                // and stay with the edit (Alt+Enter must not commit the name).
+                let r = DefSubclassProc(h, msg, wp, lp);
+                if msg == WM_KEYDOWN && !busy && !(process && side_ime_busy()) {
+                    apply_side_rename_key(orig);
+                }
+                return r;
+            }
+            WM_CHAR if wp.0 == 0x1B && !side_ime_busy() => {
+                end_side_rename(false);
+                return LRESULT(0);
+            }
+            _ => {}
+        }
+        DefSubclassProc(h, msg, wp, lp)
+    }
+}
+
+fn apply_side_rename_key(vk: u16) {
+    match side_rename_key(vk, false, false) {
+        SideRenameKey::Cancel => unsafe { end_side_rename(false) },
+        SideRenameKey::Commit => unsafe { end_side_rename(true) },
+        SideRenameKey::Pass => {}
+    }
+}
+
 pub(crate) unsafe fn begin_side_rename(id: &[usize]) {
     // Gone before the edit takes focus, so the tip cannot sit under the IME candidate.
     hide_side_fav_tip();
+    SIDE_COMPOSING.with(|c| c.set(false));
     let list = rows();
     let label = list.iter().find(|r| r.in_tree() && r.id == id).map(|r| if r.name.is_empty() { short_name(&r.path) } else { r.name.clone() }).unwrap_or_default();
     let (host, font) = app(|a| (a.side_hwnd, a.font));
     if host.0.is_null() {
         return;
     }
-    let edit = app(|a| a.side_edit);
-    let edit = if edit.0.is_null() {
-        let e = child(host, w!("EDIT"), w!(""), ES_AUTOHSCROLL as u32, WINDOW_EX_STYLE(0), ID_SIDE_EDIT, font);
-        app(|a| a.side_edit = e);
-        e
-    } else {
-        edit
-    };
+    let edit = ensure_side_edit(host, font);
     if edit.0.is_null() {
         return;
     }
@@ -770,12 +964,16 @@ pub(crate) unsafe fn begin_side_rename(id: &[usize]) {
     _ = SetWindowTextW(edit, &HSTRING::from(label.as_str()));
     SendMessageW(edit, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
     place_side_edit();
-    _ = SetFocus(Some(edit));
+    // After the edit is on screen. A hidden or zero-size window does not take a TSF context.
+    keep_side_ime(edit);
+    focus_side_edit(edit);
     let len = GetWindowTextLengthW(edit) as usize;
     SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(len as isize)));
+    focus_side_edit(edit);
 }
 
 pub(crate) unsafe fn end_side_rename(save: bool) {
+    SIDE_COMPOSING.with(|c| c.set(false));
     let (edit, id, key) = app(|a| (a.side_edit, std::mem::take(&mut a.side_edit_at), a.side_edit_key.take()));
     if edit.0.is_null() || id.is_empty() {
         return;
@@ -793,10 +991,16 @@ pub(crate) unsafe fn end_side_rename(save: bool) {
             favs_changed();
         }
     }
+    // Cleared above, so the EN_KILLFOCUS this hide sends cannot save over a cancel.
     _ = ShowWindow(edit, SW_HIDE);
     let host = app(|a| a.side_hwnd);
     if !host.0.is_null() {
-        _ = InvalidateRect(Some(host), None, false);
+        // Esc returns to the panel. A focus-loss save must not pull focus back off the address bar.
+        if !save {
+            _ = SetFocus(Some(host));
+        }
+        // Invalidate without painting left the edit's white rectangle on the row.
+        _ = RedrawWindow(Some(host), None, None, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
     }
 }
 
@@ -1465,6 +1669,17 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 // CS_DBLCLKS delivers the second press here. Acting again would open
                 // twice, or expand a group and immediately collapse it.
             }
+            WM_RBUTTONDOWN => {
+                // Left click focuses the panel. Right click did not, so F2 after the menu
+                // hit the file list. Focus before the menu opens; TrackPopupMenu restores it.
+                hide_side_fav_tip();
+                let (_x, y) = xy(lp);
+                _ = SetFocus(Some(h));
+                if let Some(i) = row_at(y) {
+                    app(|a| a.side_sel = Some(i));
+                    _ = InvalidateRect(Some(h), None, false);
+                }
+            }
             WM_RBUTTONUP => {
                 // The menu opens at the pointer. The tip would sit on top of it.
                 hide_side_fav_tip();
@@ -1473,38 +1688,87 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if let Some(i) = i {
                     app(|a| a.side_sel = Some(i));
                 }
+                _ = SetFocus(Some(h));
                 side_menu(h, i, x, y);
+                // The menu restores focus to whoever had it. Rename moved it to the edit;
+                // anything else, including a dismissed menu, stays on this panel so F2 works.
+                let (editing, edit) = app(|a| (!a.side_edit_at.is_empty(), a.side_edit));
+                if editing && !edit.0.is_null() {
+                    focus_side_edit(edit);
+                } else {
+                    _ = SetFocus(Some(h));
+                }
             }
-            WM_KEYDOWN => match VIRTUAL_KEY(wp.0 as u16) {
-                VK_DELETE => {
-                    let row = app(|a| a.side_sel).and_then(|i| rows().get(i).cloned());
-                    if let Some(row) = row.filter(|r| r.in_tree()) {
-                        let links = servers_at(&row.id);
-                        app(|a| {
-                            delete_at(&mut a.s.tree, &row.id);
-                            a.s.sync_favs();
-                            a.side_sel = None;
-                        });
-                        release_servers(links);
-                        changed();
+            WM_KEYDOWN => {
+                // Japanese IME delivers F2 and Esc as VK_PROCESSKEY. A posted WM_KEYDOWN is the
+                // raw key, which is why only the posted key opened or closed the edit.
+                let renaming = side_rename_windows().is_some();
+                let raw = wp.0 as u16;
+                let process = raw == VK_PROCESSKEY.0;
+                let vk = side_aim_key(h, raw);
+                let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
+                let alt = GetKeyState(VK_MENU.0 as i32) < 0;
+                if process {
+                    let busy = side_ime_busy();
+                    let r = DefWindowProcW(h, msg, wp, lp);
+                    if busy || side_ime_busy() {
+                        if renaming {
+                            if let Some((edit, _)) = side_rename_windows() {
+                                focus_side_edit(edit);
+                            }
+                        }
+                        return r;
                     }
                 }
-                VK_F2 => {
-                    if let Some(row) = app(|a| a.side_sel).and_then(|i| rows().get(i).cloned()).filter(|r| r.in_tree()) {
-                        begin_side_rename(&row.id);
-                    }
-                }
-                VK_RETURN => {
-                    if let Some(row) = app(|a| a.side_sel).and_then(|i| rows().get(i).cloned()) {
-                        if row.group {
-                            toggle_row(&row);
-                        } else {
-                            open_fav_row(&row);
+                if renaming && side_key_belongs_to_edit(vk, ctrl, alt) {
+                    match side_rename_key(vk, false, false) {
+                        SideRenameKey::Cancel => end_side_rename(false),
+                        SideRenameKey::Commit => end_side_rename(true),
+                        SideRenameKey::Pass if !process => {
+                            if let Some((edit, _)) = side_rename_windows() {
+                                focus_side_edit(edit);
+                                _ = PostMessageW(Some(edit), WM_KEYDOWN, wp, lp);
+                            }
+                        }
+                        SideRenameKey::Pass => {
+                            if let Some((edit, _)) = side_rename_windows() {
+                                focus_side_edit(edit);
+                            }
                         }
                     }
+                } else if !renaming {
+                    match VIRTUAL_KEY(vk) {
+                        VK_DELETE => {
+                            let row = app(|a| a.side_sel).and_then(|i| rows().get(i).cloned());
+                            if let Some(row) = row.filter(|r| r.in_tree()) {
+                                let links = servers_at(&row.id);
+                                app(|a| {
+                                    delete_at(&mut a.s.tree, &row.id);
+                                    a.s.sync_favs();
+                                    a.side_sel = None;
+                                });
+                                release_servers(links);
+                                changed();
+                            }
+                        }
+                        VK_F2 => {
+                            if let Some(row) = app(|a| a.side_sel).and_then(|i| rows().get(i).cloned()).filter(|r| r.in_tree()) {
+                                begin_side_rename(&row.id);
+                            }
+                        }
+                        VK_RETURN => {
+                            if let Some(row) = app(|a| a.side_sel).and_then(|i| rows().get(i).cloned()) {
+                                if row.group {
+                                    toggle_row(&row);
+                                } else {
+                                    open_fav_row(&row);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                _ => {}
-            },
+            }
             WM_CTLCOLOREDIT => {
                 let dc = HDC(wp.0 as _);
                 SetBkColor(dc, cref(pal().card));
@@ -1931,7 +2195,12 @@ pub(crate) unsafe fn register_side_drop(h: HWND) {
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use super::{fav_hover_cursor, fav_hover_paints, fav_release, fav_row_at, fav_row_height, fav_sel_after_release, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text, mark_rows, FavCursor, FavRelease, FavRow, FavTipAct, RowKind};
+    use super::{
+        fav_hover_cursor, fav_hover_paints, fav_release, fav_row_at, fav_row_height, fav_sel_after_release, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text,
+        mark_rows, side_edit_dlg_code, side_key_belongs_to_edit, side_rename_key, FavCursor, FavRelease, FavRow, FavTipAct, RowKind, SideRenameKey,
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_A, VK_ESCAPE, VK_F2, VK_F5, VK_F6, VK_PROCESSKEY, VK_RETURN, VK_TAB};
+    use windows::Win32::UI::WindowsAndMessaging::{DLGC_WANTALLKEYS, DLGC_WANTCHARS};
     use crate::i18n::UI;
 
     #[test]
@@ -2057,6 +2326,32 @@ mod tests {
         assert_eq!(fav_sel_after_release(FavRelease::Toggle, Some(1)), Some(1));
         assert_eq!(fav_sel_after_release(FavRelease::None, Some(4)), Some(4));
         assert_eq!(fav_sel_after_release(FavRelease::None, None), None);
+    }
+
+    #[test]
+    fn side_rename_esc_cancels_enter_commits_and_ime_keys_pass() {
+        assert_eq!(side_rename_key(VK_ESCAPE.0, false, false), SideRenameKey::Cancel);
+        assert_eq!(side_rename_key(VK_RETURN.0, false, false), SideRenameKey::Commit);
+        // An open composition keeps Esc and Enter. The process key is never a rename command.
+        assert_eq!(side_rename_key(VK_ESCAPE.0, true, false), SideRenameKey::Pass);
+        assert_eq!(side_rename_key(VK_RETURN.0, true, false), SideRenameKey::Pass);
+        assert_eq!(side_rename_key(VK_PROCESSKEY.0, false, false), SideRenameKey::Pass);
+        assert_eq!(side_rename_key(VK_ESCAPE.0, false, true), SideRenameKey::Pass);
+        assert_eq!(side_rename_key(VK_A.0, false, false), SideRenameKey::Pass);
+        // Real Esc/Enter are dropped by a dialog filter unless the edit asks for every key.
+        let code = side_edit_dlg_code(0);
+        assert_eq!(code & DLGC_WANTALLKEYS, DLGC_WANTALLKEYS);
+        assert_eq!(code & DLGC_WANTCHARS, DLGC_WANTCHARS);
+        // The panel must hand the process key and Esc to the edit, and must leave F6 / F5 alone.
+        assert!(side_key_belongs_to_edit(VK_PROCESSKEY.0, false, false));
+        assert!(side_key_belongs_to_edit(VK_ESCAPE.0, false, false));
+        assert!(side_key_belongs_to_edit(VK_RETURN.0, false, false));
+        assert!(side_key_belongs_to_edit(VK_A.0, false, false));
+        assert!(!side_key_belongs_to_edit(VK_F2.0, false, false));
+        assert!(!side_key_belongs_to_edit(VK_F6.0, false, false));
+        assert!(!side_key_belongs_to_edit(VK_F5.0, false, false));
+        assert!(!side_key_belongs_to_edit(VK_TAB.0, false, false));
+        assert!(!side_key_belongs_to_edit(VK_A.0, false, true)); // Alt chord stays with the window
     }
 
     #[test]
