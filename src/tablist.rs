@@ -1734,6 +1734,7 @@ unsafe fn paint(dc: HDC, _rc: RECT) {
         mono: s.mono,
         icon: s.icon,
         search_focus: !s.edit.0.is_null() && unsafe { GetFocus() } == s.edit,
+        name_focus: s.renaming.is_some() && !s.name_edit.0.is_null() && unsafe { GetFocus() } == s.name_edit,
     });
     let p = pal();
     let dpi = st.dpi;
@@ -1836,6 +1837,7 @@ struct PaintSnap {
     mono: HFONT,
     icon: HFONT,
     search_focus: bool,
+    name_focus: bool,
 }
 
 unsafe fn kbd_piece_widths(dc: HDC, small: HFONT, mono: HFONT, dpi: i32) -> Vec<i32> {
@@ -1901,7 +1903,7 @@ unsafe fn paint_name(dc: HDC, row: RECT, data: &Row, dpi: i32, st: &PaintSnap, g
     }
     if st.renaming == Some(data.index) {
         let field = name_field(row, data.color.is_some(), dpi);
-        aa_rfill(dc, field, sc(dpi, crate::settings::FIELD_RADIUS_DIP).max(1), pal().card, Some(pal().line), ground);
+        paint_field(dc, field, dpi, st.name_focus);
         return;
     }
     let mut r = text_r;
