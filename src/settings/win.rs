@@ -575,6 +575,10 @@ unsafe fn move_clip(h: HWND, r: RECT, content: RECT) {
             let _ = DeleteObject(rgn.into());
         }
     }
+    // Repaint the parent under the cut-off strip, or stale button pixels stay there.
+    if let Ok(parent) = GetParent(h) {
+        let _ = InvalidateRect(Some(parent), Some(&r), false);
+    }
 }
 
 unsafe fn move_to(h: HWND, r: RECT, show: bool) {
