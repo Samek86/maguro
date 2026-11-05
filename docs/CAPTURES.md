@@ -61,15 +61,15 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 | feature_basket.ja.png | 파일 바구니 | MaguroBasket | light/ja | 데모 | 28005 B (544×513) | capture-features.ps1 | DWM |  |
 | feature_basket.ko.png | 파일 바구니 | MaguroBasket | light/ko | 데모 | 27101 B (544×513) | capture-features.ps1 | DWM |  |
 | feature_basket.png | 파일 바구니 | MaguroBasket | light/en | 데모 | 24121 B (546×513) | capture-features.ps1 | DWM |  |
-| feature_excel_readonly_tidy.ja.png | Excel 정리 | MaguroExcelTidy | light/ja | readme-excel-demo sheet.xlsx | 7225 B (422×244) | 컨텍스트 메뉴 id=0x8007 | DWM |  |
-| feature_excel_readonly_tidy.ko.png | Excel 정리 | MaguroExcelTidy | light/ko | readme-excel-demo sheet.xlsx | 5391 B (422×244) | 컨텍스트 메뉴 id=0x8007 | DWM |  |
-| feature_excel_readonly_tidy.png | Excel 정리 | MaguroExcelTidy | light/en | readme-excel-demo sheet.xlsx | 5837 B (422×244) | 컨텍스트 메뉴 id=0x8007 | DWM |  |
+| feature_excel_readonly_tidy.ja.png | Excel 정리 | MaguroExcelTidy | light/ja | readme-excel-demo sheet.xlsx | 7672 B (422×244) | 컨텍스트 메뉴 id=0x8007 (PR #312 shared UI) | DWM | images-v4 재촬영 |
+| feature_excel_readonly_tidy.ko.png | Excel 정리 | MaguroExcelTidy | light/ko | readme-excel-demo sheet.xlsx | 5797 B (422×244) | 컨텍스트 메뉴 id=0x8007 (PR #312 shared UI) | DWM | images-v4 재촬영 |
+| feature_excel_readonly_tidy.png | Excel 정리 | MaguroExcelTidy | light/en | readme-excel-demo sheet.xlsx | 6217 B (422×244) | 컨텍스트 메뉴 id=0x8007 (PR #312 shared UI) | DWM | images-v4 재촬영 |
 | feature_folder_watch.ja.png | 폴더 감시 | MaguroWatch | light/ja | 데모 | 20342 B (746×433) | capture-features.ps1 | DWM |  |
 | feature_folder_watch.ko.png | 폴더 감시 | MaguroWatch | light/ko | 데모 | 16051 B (746×433) | capture-features.ps1 | DWM |  |
 | feature_folder_watch.png | 폴더 감시 | MaguroWatch | light/en | 데모 | 15631 B (746×433) | capture-features.ps1 | DWM |  |
-| feature_win_shift_v.ja.png | Win+Alt+V | MaguroMain 새 탭 | light/ja | 클립보드=Photos 2026 경로 | 305006 B (1226×823) | Win+Alt+V 코드 (Folder Watch 닫은 뒤) | DWM | Folder Watch 오버레이 없이 Photos 2026 탭 |
-| feature_win_shift_v.ko.png | Win+Alt+V | MaguroMain 새 탭 | light/ko | 클립보드=Photos 2026 경로 | 303262 B (1226×823) | Win+Alt+V 코드 (Folder Watch 닫은 뒤) | DWM | Folder Watch 오버레이 없이 Photos 2026 탭 |
-| feature_win_shift_v.png | Win+Alt+V | MaguroMain 새 탭 | light/en | 클립보드=Photos 2026 경로 | 301386 B (1226×823) | Win+Alt+V 코드 (Folder Watch 닫은 뒤) | DWM | Folder Watch 오버레이 없이 Photos 2026 탭 |
+| feature_win_shift_v.ja.png | Win+Alt+V | MaguroMain 새 탭 | light/ja | 클립보드=Photos 2026 경로 | 26231 B (1226×833) | WM_HOTKEY CLIP_HOTKEY_ID=3 (sidebar off) | DWM | Photos 2026 새 탭 · 사이드바/실경로 없음 |
+| feature_win_shift_v.ko.png | Win+Alt+V | MaguroMain 새 탭 | light/ko | 클립보드=Photos 2026 경로 | 25784 B (1226×833) | WM_HOTKEY CLIP_HOTKEY_ID=3 (sidebar off) | DWM | Photos 2026 새 탭 · 사이드바/실경로 없음 |
+| feature_win_shift_v.png | Win+Alt+V | MaguroMain 새 탭 | light/en | 클립보드=Photos 2026 경로 | 25455 B (1226×833) | WM_HOTKEY CLIP_HOTKEY_ID=3 (sidebar off) | DWM | Photos 2026 새 탭 · 사이드바/실경로 없음 |
 | help.ja.png | 도움말 창 | MaguroHelp/브라우저 | light/ja | — | 29368 B (760×672) | F1 | DWM |  |
 | help.ko.png | 도움말 창 | MaguroHelp/브라우저 | light/ko | — | 22566 B (760×672) | F1 | DWM |  |
 | help.png | 도움말 창 | MaguroHelp/브라우저 | light/en | — | 24725 B (760×672) | F1 | DWM |  |
@@ -133,9 +133,9 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 | tabs.ja.png | 창 탭·패널 탭 | MaguroMain | light/ja | tabs.json | 61956 B (1226×823) | tabs cfg | DWM |  |
 | tabs.ko.png | 창 탭·패널 탭 | MaguroMain | light/ko | tabs.json | 60849 B (1226×823) | tabs cfg | DWM |  |
 | tabs.png | 창 탭·패널 탭 | MaguroMain | light/en | tabs.json | 58828 B (1226×823) | tabs cfg | DWM |  |
-| workspaces.ja.png | 워크스페이스 이름 | MaguroAsk 슬롯 이름 | light/ja | workspaces 시드 Desk | 2679 B (406×140) | Ctrl+Alt+Shift+1 → WM_COMMAND 1920 | DWM | MaguroAsk 제목=Rename/이름 바꾸기, 값=Desk |
-| workspaces.ko.png | 워크스페이스 이름 | MaguroAsk 슬롯 이름 | light/ko | workspaces 시드 Desk | 2279 B (406×140) | Ctrl+Alt+Shift+1 → WM_COMMAND 1920 | DWM | MaguroAsk 제목=Rename/이름 바꾸기, 값=Desk |
-| workspaces.png | 워크스페이스 이름 | MaguroAsk 슬롯 이름 | light/en | workspaces 시드 Desk | 2319 B (406×140) | Ctrl+Alt+Shift+1 → WM_COMMAND 1920 | DWM | MaguroAsk 제목=Rename/이름 바꾸기, 값=Desk |
+| images-v5/workspaces.ja.png | 워크스페이스 메뉴 | 톱니 메뉴 → 작업 공간 하위 메뉴 | light/ja | workspaces 시드 Photos/Docs/Work | 20925 B (618×491) | WM_COMMAND 207 → 메뉴 HWND에 VK_DOWN×3, VK_RIGHT PostMessage | 화면 복사(흰 배경) | 슬롯 1–3 이름, 4–9 빈 슬롯 |
+| images-v5/workspaces.ko.png | 워크스페이스 메뉴 | 톱니 메뉴 → 작업 공간 하위 메뉴 | light/ko | workspaces 시드 Photos/Docs/Work | 18119 B (525×491) | WM_COMMAND 207 → 메뉴 HWND에 VK_DOWN×3, VK_RIGHT PostMessage | 화면 복사(흰 배경) | 슬롯 1–3 이름, 4–9 빈 슬롯 |
+| images-v5/workspaces.png | 워크스페이스 메뉴 | 톱니 메뉴 → 작업 공간 하위 메뉴 | light/en | workspaces 시드 Photos/Docs/Work | 21624 B (622×491) | WM_COMMAND 207 → 메뉴 HWND에 VK_DOWN×3, VK_RIGHT PostMessage | 화면 복사(흰 배경) | 슬롯 1–3 이름, 4–9 빈 슬롯 |
 
 ## 톱니바퀴 메뉴 (gear popup) — 재촬영
 
@@ -185,6 +185,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 ## 변경 이력 (관련)
 
 - **2026-11-04:** 톱니바퀴 메뉴를 세션 / 도구 / 보기 / 모양 / 동작 / 설정으로 나눔. 열린 메뉴 샷은 images-v3에 없음 (위 절). 닫힌 톱니 단추만 있는 메인 창 샷은 다시 찍지 않음.
+- **2026-11-05:** docs/retake-15-12 — feature_win_shift_v* 재촬영(Photos 2026 새 탭, 사이드바·Folder Watch·실경로 제거). feature_excel_readonly_tidy* images-v4로 재촬영(PR #312 shared MaguroExcelTidy) + README §12 src를 v4로.
 - **2026-11-04:** UI 통일 1차. 폴더 감시, 파일 바구니, 탭 목록, 일괄 이름 바꾸기, 세션 목록의 버튼을 공유 페인터로 옮김. 위 캡처를 다시 찍을 것. 설정 토글은 유지.
 - **2026-11-04:** UI 통일 팝업·알림. 감시 토스트, 즐겨찾기 없음, 네트워크 실패, 빠른 복사 진행·충돌, 세션 목록, 단축키, 레이아웃 고르기, 선택 칸, 서버 연결 푸터를 공유 페인터로 옮김. 빠른 복사 진행 창은 480×148. 이름 묻기, 즐겨찾기 관리, 정보, Excel, 확인 창은 이전 배치 그대로다.
 - **2026-11-04:** images-v3 전체(90장) 포터블 재촬영. servers*=가짜 sftp.example.com. preview_peek*=F3 MaguroPeek+실 JPG. feature_win_shift_v*=클립보드 경로 새 탭(Folder Watch 없음). settings_ctxmenu*=CTX_PAGE=8 Right-click menu items. workspaces*=MaguroAsk 슬롯명 Desk. docs/capture/* 재사용 스크립트. CAPTURES 크기 실측 갱신.

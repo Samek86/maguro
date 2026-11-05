@@ -142,7 +142,7 @@ Space または F3 で画像、PDF、Office、HTML、Markdown、コード、CSV�
 
 `.xlsx` / `.xlsm` を右クリック → **読み取り専用で開く** でロックせずに Excel を開きます。**A1・100% に整理** は選択を A1、ズームを 100% に合わせ、必要なら先頭シートを選び、`.bak.xlsx` バックアップも残せます。
 
-<p align="center"><img width="420" alt="Excel を A1・100% に整理" src="docs/images-v3/feature_excel_readonly_tidy.ja.png"></p>
+<p align="center"><img width="420" alt="Excel を A1・100% に整理" src="docs/images-v4/feature_excel_readonly_tidy.ja.png"></p>
 
 ### 13. ファイル・バスケット
 
@@ -166,13 +166,13 @@ Maguro が起動していれば **Win+Alt+V** で、ほかのアプリが前面�
 
 **Ctrl+Shift+L**、タブ行右端の一覧ボタン、またはタブ右クリックの **タブ一覧…** で、各タブの配置・ペイン・フォルダーを見ます。名前で絞り込み、Enter かダブルクリックで移動し、F2 で名前を変えます。各タブは代表フォルダーと残りの `+N` だけの一行から始まり、**Right** で展開、**Left** で折りたたみます。現在のタブは最初から開いています。フィルターは一致するタブだけを展開します。
 
-<p align="center"><img width="560" alt="各タブの配置・ペイン・フォルダーを示すタブ一覧" src="docs/images-v4/tab_list.png"></p>
+<p align="center"><img width="560" alt="各タブの配置・ペイン・フォルダーを示すタブ一覧" src="docs/images-v4/tab_list.ja.png"></p>
 
 ### 17. ワークスペース
 
 名前付きレイアウトを最大九つ。**Ctrl+Alt+1…9** でスロットを開き、**Ctrl+Alt+Shift+1…9** で今のタブ・ペイン・フォルダーをそのスロットに保存します。歯車メニュー → **ワークスペース** で保存・読み込み・名前の変更・消去ができます。スロットは `maguro.json` にあります。
 
-<p align="center"><img width="420" alt="ワークスペースに名前を付ける" src="docs/images-v4/workspaces.ja.png"></p>
+<p align="center"><img width="480" alt="歯車メニュー → ワークスペース" src="docs/images-v5/workspaces.ja.png"></p>
 
 ### 18. ダイアログジャンプ
 

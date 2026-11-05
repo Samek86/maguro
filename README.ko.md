@@ -142,7 +142,7 @@ Space 또는 F3으로 그림, PDF, Office, HTML, Markdown, 코드, CSV, ZIP, HWP
 
 `.xlsx` / `.xlsm`을 우클릭 → **읽기 모드로 열기**로 잠그지 않고 Excel을 엽니다. **A1·100%로 정리**는 선택을 A1로, 확대를 100%로 맞추고, 필요하면 첫 시트를 고르며 `.bak.xlsx` 백업도 남길 수 있습니다.
 
-<p align="center"><img width="420" alt="Excel을 A1·100%로 정리" src="docs/images-v3/feature_excel_readonly_tidy.ko.png"></p>
+<p align="center"><img width="420" alt="Excel을 A1·100%로 정리" src="docs/images-v4/feature_excel_readonly_tidy.ko.png"></p>
 
 ### 13. 파일 바구니
 
@@ -166,13 +166,13 @@ Maguro가 켜져 있으면 **Win+Alt+V**로 다른 창이 앞에 있어도 클�
 
 **Ctrl+Shift+L**, 탭 줄 오른쪽 끝의 목록 버튼, 또는 탭 우클릭의 **탭 목록…**으로 각 탭의 배치·패널·폴더를 봅니다. 이름으로 거르고, Enter나 두 번 클릭으로 이동하고, F2로 이름을 바꿉니다. 각 탭은 대표 폴더와 나머지 `+N`만 보이는 한 줄로 시작하고, **Right**로 펼치고 **Left**로 접습니다. 현재 탭은 처음부터 펼쳐집니다. 필터는 맞는 탭만 펼칩니다.
 
-<p align="center"><img width="560" alt="각 탭의 배치·패널·폴더를 보여주는 탭 목록" src="docs/images-v4/tab_list.png"></p>
+<p align="center"><img width="560" alt="각 탭의 배치·패널·폴더를 보여주는 탭 목록" src="docs/images-v4/tab_list.ko.png"></p>
 
 ### 17. 작업 공간
 
 이름 있는 레이아웃을 최대 아홉 개. **Ctrl+Alt+1…9**로 슬롯을 불러오고, **Ctrl+Alt+Shift+1…9**로 현재 탭·패널·폴더를 그 슬롯에 저장합니다. 톱니바퀴 메뉴 → **작업 공간**에서 저장·불러오기·이름 바꾸기·지우기가 됩니다. 슬롯은 `maguro.json`에 있습니다.
 
-<p align="center"><img width="420" alt="작업 공간 이름 짓기" src="docs/images-v4/workspaces.ko.png"></p>
+<p align="center"><img width="480" alt="톱니 메뉴 → 작업 공간" src="docs/images-v5/workspaces.ko.png"></p>
 
 ### 18. 대화 상자 점프
 
