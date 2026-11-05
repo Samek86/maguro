@@ -1,6 +1,6 @@
 # images-v0.2.6 targets
 Fresh Windows captures of Maguro 0.2.6. This folder is the only place README and help image links point.
-The PNG files are not in git yet. Do not copy `docs/images-v3`, `docs/images-v4`, or `docs/images-v5` into this folder.
+These 86 PNGs are the Windows 0.2.6 captures (2026-11-06, exe SHA-256 `C38B2B835EA7026A09FD6010F002260142E291417DDFD83ED6022D37153156B6`). They were not copied from `docs/images-v3`, `docs/images-v4`, or `docs/images-v5`.
 UI language is the directory: `en`, `ja`, `ko`. Shots that carry no translated UI text are in `common` and are linked from every language.
 Brand assets stay where they are: `assets/maguro-icon.svg`, `docs/help/maguro.png`.
 Count: 86 paths. Each path below is referenced. A file that is not in this list is not a README or help target.
