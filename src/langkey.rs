@@ -819,7 +819,6 @@ pub(crate) enum Key {
     FolderTotalSkipped,
     OpenInEditor,
     OpenInTerminalAdministrator,
-    CloseTabsToTheRight,
     FavMgrHint,
     FavExpandAll,
     FavManage,
@@ -828,7 +827,7 @@ pub(crate) enum Key {
     RecycleBinFolder,
 }
 
-pub(crate) const KEY_COUNT: usize = 823;
+pub(crate) const KEY_COUNT: usize = 822;
 
 const _: () = assert!((Key::RecycleBinFolder as usize) + 1 == KEY_COUNT);
 
@@ -1648,7 +1647,6 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Total size is not computed for this place",
     "Open in editor",
     "Open in Terminal (Administrator)",
-    "Close tabs to the right",
     "Add a folder or a group from the toolbar. Removing a row leaves the original folder in place.",
     "Expand all",
     "Manage favourites\u{2026}",
@@ -2475,7 +2473,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "folder_total_skipped",
     "open_in_editor",
     "open_in_terminal_administrator",
-    "close_tabs_to_the_right",
     "fav_mgr_hint",
     "fav_expand_all",
     "fav_manage",
