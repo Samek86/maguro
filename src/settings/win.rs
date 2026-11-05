@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Once;
 use windows::core::{w, BOOL, HSTRING, PCWSTR};
-use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn};
+use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, ExtSelectClipRgn, GetWindowRgn, SetWindowRgn, GDI_REGION_TYPE, RGN_AND};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWINDOWATTRIBUTE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT, WM_MOUSELEAVE};
@@ -1930,7 +1930,17 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_REVEAL => reveal(h),
             WM_DRAWITEM => {
-                draw_btn(&*(lp.0 as *const DRAWITEMSTRUCT));
+                let d = &*(lp.0 as *const DRAWITEMSTRUCT);
+                // BUTTON has CS_PARENTDC: its DC ignores the window region `move_clip`
+                // sets, so clip the paint to that region here.
+                let saved = SaveDC(d.hDC);
+                let rgn = CreateRectRgn(0, 0, 0, 0);
+                if GetWindowRgn(d.hwndItem, rgn) != GDI_REGION_TYPE(0) {
+                    let _ = ExtSelectClipRgn(d.hDC, Some(rgn), RGN_AND);
+                }
+                let _ = DeleteObject(rgn.into());
+                draw_btn(d);
+                let _ = RestoreDC(d.hDC, saved);
                 return LRESULT(1);
             }
             WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORSTATIC => {
