@@ -1524,7 +1524,7 @@ mod tests {
         }
         // Neither: no plate, so the grid starts at the pad.
         assert_eq!(side_tree_h(0, plate_h, 0.5, gap, min, false, false), 0);
-        assert_eq!(client_min(&[1], 96, false, true, true, false).0 < client_min(&[1], 96, true, true, true, false).0, true);
+        assert_eq!(client_min(&[2, 2], 96, false, true, true, false).0 + 120, client_min(&[2, 2], 96, true, true, true, false).0);
     }
 
     #[test]
