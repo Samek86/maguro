@@ -277,9 +277,9 @@ mod tests {
                 vec![
                     "This PC",
                     "Desktop",
-                    "Local Disk (C:)",
-                    "Removable Drive (D:)",
-                    "Removable Drive (E:)",
+                    "Local disk (C:)",
+                    "Removable drive (D:)",
+                    "Removable drive (E:)",
                     "Recycle Bin",
                 ]
             );
