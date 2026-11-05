@@ -13,10 +13,6 @@ use windows::Win32::UI::Controls::{TTF_ABSOLUTE, TTF_TRACK, TTM_POP, TTM_TRACKAC
 use windows::Win32::UI::Input::Ime::{GCS_COMPSTR, GCS_RESULTSTR};
 
 const ID_SIDE_EDIT: i32 = 209;
-/// Posted to the rename edit to remove the keyboard hook. Not handled inside the hook.
-const WM_SIDE_UNHOOK: u32 = WM_APP + 88;
-/// Side-window timer. The hook stays up briefly after a rename so the next F2 is not eaten.
-const TIMER_SIDE_UNHOOK: usize = 30;
 /// Subclass id for the favourites rename edit. Per window, so it only has to be unique here.
 const SIDE_EDIT_SUB: usize = 9;
 /// Tracking tool for a row in the favourites panel. Lock is 7, tab paths 8, address 9.
@@ -925,220 +921,6 @@ pub(crate) unsafe fn deliver_side_key(edit: HWND, message: u32, wp: WPARAM, lp: 
     DispatchMessageW(&copy);
 }
 
-thread_local! {
-    /// Edit that should receive keys while a favourites rename is open.
-    /// The low-level hook reads this and does not call `app()`.
-    static SIDE_HOOK_EDIT: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
-    static SIDE_KB_HOOK: Cell<HHOOK> = const { Cell::new(HHOOK(std::ptr::null_mut())) };
-    /// Non-zero while `side_kb_hook` is on the stack. Unhooking from there drops the next key.
-    static SIDE_HOOK_DEPTH: Cell<u32> = const { Cell::new(0) };
-    /// Bumped when a rename arms the hook, so a stale unhook message cannot remove the next one.
-    static SIDE_HOOK_GEN: Cell<u32> = const { Cell::new(0) };
-    /// After a rename ends inside the hook, keep delivering keys to the focus window
-    /// until the timer removes the hook. The Japanese IME still eats a bare F2.
-    static SIDE_HOOK_PASSTHRU: Cell<bool> = const { Cell::new(false) };
-    /// Modifiers this hook swallowed. The system never sees them, so `GetAsyncKeyState`
-    /// stays up and the next letter would be lower case. Bit 0 shift, bit 1 ctrl, bit 2 alt.
-    static SIDE_HOOK_MODS: Cell<u8> = const { Cell::new(0) };
-    /// The rename committed on the hook stack. `note_save`'s timer does not arrive from there.
-    static SIDE_SAVE_NUDGE: Cell<bool> = const { Cell::new(false) };
-}
-
-struct SideHookDepth;
-impl Drop for SideHookDepth {
-    fn drop(&mut self) {
-        let left = SIDE_HOOK_DEPTH.with(|c| {
-            let n = c.get().saturating_sub(1);
-            c.set(n);
-            n
-        });
-        // The window proc has returned, so this write is not nested in `app()`.
-        // Doing it here is what puts the new name in maguro.json. The timer armed
-        // from the hook does not fire.
-        if left == 0 && SIDE_SAVE_NUDGE.with(|c| c.replace(false)) {
-            unsafe { save_session(); }
-        }
-    }
-}
-
-fn hook_mod_bit(vk: u32) -> Option<u8> {
-    if vk == VK_SHIFT.0 as u32 || vk == VK_LSHIFT.0 as u32 || vk == VK_RSHIFT.0 as u32 {
-        Some(1)
-    } else if vk == VK_CONTROL.0 as u32 || vk == VK_LCONTROL.0 as u32 || vk == VK_RCONTROL.0 as u32 {
-        Some(2)
-    } else if vk == VK_MENU.0 as u32 || vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32 {
-        Some(4)
-    } else {
-        None
-    }
-}
-
-/// Mirror modifier state into this thread before `TranslateMessage`.
-/// A swallowed Shift never updates `GetAsyncKeyState`. The next key would clear the bit
-/// the previous call set, so Shift+letter comes out lower case. The latch is the record.
-unsafe fn side_hook_keyboard_state(vk: u32, up: bool) {
-    if let Some(bit) = hook_mod_bit(vk) {
-        SIDE_HOOK_MODS.with(|c| {
-            let now = c.get();
-            c.set(if up { now & !bit } else { now | bit });
-        });
-    }
-    let mut ks = [0u8; 256];
-    let _ = GetKeyboardState(&mut ks);
-    for mod_vk in [VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_MENU, VK_LMENU, VK_RMENU] {
-        let down = GetAsyncKeyState(mod_vk.0 as i32) < 0;
-        if down {
-            ks[mod_vk.0 as usize] |= 0x80;
-        } else {
-            ks[mod_vk.0 as usize] &= !0x80;
-        }
-    }
-    let mods = SIDE_HOOK_MODS.with(|c| c.get());
-    if mods & 1 != 0 {
-        ks[VK_SHIFT.0 as usize] |= 0x80;
-        ks[VK_LSHIFT.0 as usize] |= 0x80;
-    }
-    if mods & 2 != 0 {
-        ks[VK_CONTROL.0 as usize] |= 0x80;
-        ks[VK_LCONTROL.0 as usize] |= 0x80;
-    }
-    if mods & 4 != 0 {
-        ks[VK_MENU.0 as usize] |= 0x80;
-        ks[VK_LMENU.0 as usize] |= 0x80;
-    }
-    if (vk as usize) < ks.len() {
-        if up {
-            ks[vk as usize] &= !0x80;
-        } else {
-            ks[vk as usize] |= 0x80;
-        }
-    }
-    _ = SetKeyboardState(&ks);
-}
-
-unsafe extern "system" fn side_kb_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if code >= 0 {
-        let edit = SIDE_HOOK_EDIT.with(|c| c.get());
-        let passthru = SIDE_HOOK_PASSTHRU.with(|c| c.get());
-        let fg = GetForegroundWindow();
-        let mut fg_pid = 0u32;
-        let _ = GetWindowThreadProcessId(fg, Some(&mut fg_pid));
-        let ours = fg_pid == windows::Win32::System::Threading::GetCurrentProcessId();
-        let target = if !ours {
-            HWND(std::ptr::null_mut())
-        } else if !edit.0.is_null() && IsWindow(Some(edit)).as_bool() {
-            edit
-        } else if passthru {
-            let focus = GetFocus();
-            let mut pid = 0u32;
-            let _ = GetWindowThreadProcessId(focus, Some(&mut pid));
-            if pid == fg_pid && !focus.0.is_null() { focus } else { HWND(std::ptr::null_mut()) }
-        } else {
-            HWND(std::ptr::null_mut())
-        };
-        let info = unsafe { &*(lp.0 as *const KBDLLHOOKSTRUCT) };
-        let flags = info.flags.0;
-        let up = flags & 0x80 != 0;
-        if target.0.is_null() {
-            // This key reaches the system, so its modifier must not stay latched.
-            if !ours {
-                SIDE_HOOK_MODS.with(|c| c.set(0));
-            } else if up {
-                if let Some(bit) = hook_mod_bit(info.vkCode) {
-                    SIDE_HOOK_MODS.with(|c| c.set(c.get() & !bit));
-                }
-            }
-        } else {
-            // SendInput leaves the scan at 0. TranslateMessage still needs one to apply Shift.
-            let mut scan = info.scanCode & 0xff;
-            if scan == 0 {
-                scan = MapVirtualKeyW(info.vkCode, MAPVK_VK_TO_VSC) & 0xff;
-            }
-            let mut packed = 1u32 | (scan << 16);
-            if flags & 0x01 != 0 {
-                packed |= 1 << 24;
-            }
-            if up {
-                packed |= (1 << 30) | (1 << 31);
-            }
-            let msg = if up {
-                WM_KEYUP
-            } else if wp.0 == WM_SYSKEYDOWN as usize {
-                WM_SYSKEYDOWN
-            } else {
-                WM_KEYDOWN
-            };
-            side_hook_keyboard_state(info.vkCode, up);
-            let copy = MSG {
-                hwnd: target,
-                message: msg,
-                wParam: WPARAM(info.vkCode as usize),
-                lParam: LPARAM(packed as i32 as isize),
-                ..MSG::default()
-            };
-            SIDE_HOOK_DEPTH.with(|c| c.set(c.get().saturating_add(1)));
-            let _depth = SideHookDepth;
-            if !up {
-                _ = TranslateMessage(&copy);
-            }
-            DispatchMessageW(&copy);
-            // Swallow. The Japanese IME otherwise consumes the key before GetMessage
-            // and never turns it into WM_CHAR for this edit.
-            return LRESULT(1);
-        }
-    }
-    CallNextHookEx(None, code, wp, lp)
-}
-
-unsafe fn arm_side_kb_hook(edit: HWND) {
-    SIDE_HOOK_GEN.with(|c| c.set(c.get().wrapping_add(1)));
-    SIDE_HOOK_PASSTHRU.with(|c| c.set(false));
-    SIDE_HOOK_MODS.with(|c| c.set(0));
-    SIDE_HOOK_EDIT.with(|c| c.set(edit));
-    let host = GetParent(edit).unwrap_or_default();
-    if !host.0.is_null() {
-        _ = KillTimer(Some(host), TIMER_SIDE_UNHOOK);
-    }
-    SIDE_KB_HOOK.with(|c| {
-        if !c.get().0.is_null() {
-            return;
-        }
-        if let Ok(h) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(side_kb_hook), None, 0) {
-            c.set(h);
-        }
-    });
-}
-
-unsafe fn unhook_side_kb_now() {
-    SIDE_HOOK_EDIT.with(|c| c.set(HWND(std::ptr::null_mut())));
-    SIDE_HOOK_PASSTHRU.with(|c| c.set(false));
-    SIDE_HOOK_MODS.with(|c| c.set(0));
-    SIDE_KB_HOOK.with(|c| {
-        let h = c.replace(HHOOK(std::ptr::null_mut()));
-        if !h.0.is_null() {
-            _ = UnhookWindowsHookEx(h);
-        }
-    });
-}
-
-/// Stop delivering keys to the edit.
-/// From inside the hook, keep the hook and hand the next keys to whatever has focus.
-/// Removing it here drops the following F2, and once it is gone the Japanese IME eats that F2.
-unsafe fn disarm_side_kb_hook(edit: HWND) {
-    let inside = SIDE_HOOK_DEPTH.with(|c| c.get()) > 0;
-    SIDE_HOOK_EDIT.with(|c| c.set(HWND(std::ptr::null_mut())));
-    if inside {
-        SIDE_HOOK_PASSTHRU.with(|c| c.set(true));
-        let host = GetParent(edit).unwrap_or_default();
-        if !host.0.is_null() {
-            _ = SetTimer(Some(host), TIMER_SIDE_UNHOOK, 8000, None);
-        }
-        return;
-    }
-    SIDE_HOOK_PASSTHRU.with(|c| c.set(false));
-    unhook_side_kb_now();
-}
-
 /// The edit has to own the keyboard. A second `SetFocus` covers a parent that kept it.
 pub(crate) unsafe fn focus_side_edit(edit: HWND) {
     if edit.0.is_null() {
@@ -1155,8 +937,9 @@ unsafe fn ensure_side_edit(host: HWND, font: HFONT) -> HWND {
     if !edit.0.is_null() && IsWindow(Some(edit)).as_bool() {
         return edit;
     }
-    // Hidden until the subclass is attached. Once this edit is focused, the Japanese
-    // IME eats injected keys before GetMessage. The low-level hook delivers them.
+    // Hidden until the subclass is attached. Keys reach this edit through the normal
+    // message loop. Never intercept them earlier (for example with a WH_KEYBOARD_LL hook):
+    // the IME has to see the raw keystroke, or Japanese composition never starts.
     let e = CreateWindowExW(
         WINDOW_EX_STYLE(0),
         w!("EDIT"),
@@ -1190,16 +973,7 @@ fn side_edit_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _
         match msg {
             WM_NCDESTROY => {
                 clear_comp();
-                unhook_side_kb_now();
                 _ = RemoveWindowSubclass(h, Some(side_edit_proc), SIDE_EDIT_SUB);
-            }
-            WM_SIDE_UNHOOK => {
-                let gen = SIDE_HOOK_GEN.with(|c| c.get());
-                let live = SIDE_HOOK_EDIT.with(|c| !c.get().0.is_null());
-                if !live && wp.0 as u32 == gen {
-                    unhook_side_kb_now();
-                }
-                return LRESULT(0);
             }
             // Do not add DLGC_WANTALLKEYS. Nothing in this process calls IsDialogMessage.
             // Drop a deactivate only while the rename hold is set, and clear that hold
@@ -1317,7 +1091,6 @@ pub(crate) unsafe fn begin_side_rename(id: &[usize]) {
     }
     // Before the edit is shown or focused, so the FALSE that focus generates is kept.
     set_side_ime_hold(edit);
-    arm_side_kb_hook(edit);
     app(|a| {
         a.side_edit_at = id.to_vec();
         a.side_edit_key = node_key(&a.s.tree, id);
@@ -1335,8 +1108,6 @@ pub(crate) unsafe fn begin_side_rename(id: &[usize]) {
 
 pub(crate) unsafe fn end_side_rename(save: bool) {
     // Before the hide, so the IME deactivate is delivered and the next F2 still gets keys.
-    let edit_for_unhook = SIDE_HOOK_EDIT.with(|c| c.get());
-    disarm_side_kb_hook(edit_for_unhook);
     set_side_ime_hold(HWND(std::ptr::null_mut()));
     clear_comp();
     let (edit, id, key) = app(|a| (a.side_edit, std::mem::take(&mut a.side_edit_at), a.side_edit_key.take()));
@@ -1353,10 +1124,6 @@ pub(crate) unsafe fn end_side_rename(save: bool) {
             true
         });
         if done {
-            // Armed before favs_changed so a re-entry there still writes on the way out.
-            if SIDE_HOOK_DEPTH.with(|c| c.get()) > 0 {
-                SIDE_SAVE_NUDGE.with(|c| c.set(true));
-            }
             favs_changed();
         }
     }
@@ -1749,8 +1516,6 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         note_pins_hwnd(h);
         match msg {
             WM_DESTROY => {
-                SIDE_HOOK_PASSTHRU.with(|c| c.set(false));
-                unhook_side_kb_now();
                 hide_side_fav_tip();
                 drop_side(h);
                 drop_pins_hwnd(h);
@@ -1776,14 +1541,6 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     } else if app(|a| a.fav_tip_shown) {
                         hide_side_fav_tip();
                     }
-                }
-            }
-            WM_TIMER if wp.0 == TIMER_SIDE_UNHOOK => {
-                _ = KillTimer(Some(h), TIMER_SIDE_UNHOOK);
-                let live = SIDE_HOOK_EDIT.with(|c| !c.get().0.is_null());
-                if !live {
-                    SIDE_HOOK_PASSTHRU.with(|c| c.set(false));
-                    unhook_side_kb_now();
                 }
             }
             WM_TIMER if wp.0 == TIMER_ICON => {
@@ -2786,5 +2543,16 @@ mod tests {
         assert_eq!(fav_hover_cursor(true, Some(false)), FavCursor::Keep);
         assert_eq!(fav_hover_cursor(true, Some(true)), FavCursor::Keep);
         assert_eq!(fav_hover_cursor(true, None), FavCursor::Keep);
+    }
+
+    /// Japanese input in the favourites rename needs the IME to see the raw keystroke.
+    /// A low-level keyboard hook that swallows keys and re-dispatches them to the edit
+    /// bypasses the IME, so no composition ever starts.
+    #[test]
+    fn rename_never_hooks_the_keyboard() {
+        let src = include_str!("favpanel.rs");
+        let hook = concat!("SetWindows", "HookEx");
+        let ll = concat!("WH_KEYBOARD", "_LL");
+        assert!(!src.contains(hook) && !src.contains(ll));
     }
 }
