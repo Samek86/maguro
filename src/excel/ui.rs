@@ -306,7 +306,7 @@ fn pref_set(p: &mut Prefs, id: i32, on: bool) {
 }
 
 fn sc(dpi: i32, dip: i32) -> i32 {
-    dip * dpi.max(96) / 96
+    crate::px(dpi, dip)
 }
 
 fn ask_style() -> WINDOW_STYLE {

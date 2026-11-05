@@ -93,4 +93,19 @@ mod tests {
         assert_ne!(hover.fill, rest.fill);
         assert_ne!(pressed.fill, hover.fill);
     }
+
+    #[test]
+    fn disabled_chip_fades_toward_the_ground_and_drops_bold() {
+        let rest = segment_colors(true, ButtonState::Normal, false);
+        let off = segment_colors(true, ButtonState::Disabled, false);
+        let dark_rest = segment_colors(false, ButtonState::Normal, true);
+        let idle = segment_colors(false, ButtonState::Disabled, true);
+        assert!(rest.bold);
+        assert!(!off.bold);
+        assert!(!idle.bold);
+        assert_ne!(off.fill, rest.fill);
+        assert_ne!(off.ink, WHITE);
+        assert_ne!(idle.fill, dark_rest.fill);
+        assert_ne!(idle.ink, dark_rest.ink);
+    }
 }

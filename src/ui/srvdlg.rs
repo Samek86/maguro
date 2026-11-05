@@ -1,4 +1,6 @@
-//! Add / edit server connection. Owner-drawn card, standard edit fields, bold accent Save.
+//! Add / edit server connection.
+//! Chips, fields, the HTTPS check, and the footer are painted by this module.
+//! A field is one 1px border: the token line at rest, cerulean while that edit has focus.
 //! The password stays in the edit and in Credential Manager. It is not written onto the favourite.
 
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -330,7 +332,8 @@ unsafe extern "system" fn srv_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
             let hit = DefWindowProcW(h, msg, wp, lp);
             if hit.0 == HTCLIENT as isize {
                 let (_x, y) = lp_xy(lp);
-                if y < sc(dpi_of(h), 32) {
+                // The painted title band. Dragging it moves the popup; the chips sit below it.
+                if y < sc(dpi_of(h), PAD_BODY_X + FONT_PX + SPACE_4) {
                     return LRESULT(HTCAPTION as isize);
                 }
             }
@@ -680,5 +683,17 @@ mod tests {
         assert_eq!(g.kind_r[0].left, crate::PAD_BODY_X);
         assert!(g.kind_r[3].right <= 400 - crate::PAD_BODY_X);
         assert_eq!(super::client_height(96, 400), g.save_r.bottom + crate::PAD_BODY_Y);
+    }
+
+    #[test]
+    fn server_dialog_metrics_scale_with_dpi() {
+        let dpi = 144;
+        let width = super::sc(dpi, 400);
+        let g = super::geom(dpi, width);
+        assert_eq!(g.edits[0].bottom - g.edits[0].top, super::sc(dpi, crate::FIELD_H));
+        assert_eq!(g.kind_r[0].bottom - g.kind_r[0].top, super::sc(dpi, crate::BTN_H_FOOTER));
+        assert_eq!(g.kind_r[1].left - g.kind_r[0].right, super::sc(dpi, crate::SPACE_8));
+        assert_eq!(g.save_r.bottom - g.save_r.top, super::sc(dpi, crate::BTN_H_FOOTER));
+        assert_eq!(g.cancel_r.left - g.save_r.right, super::sc(dpi, crate::BTN_GAP));
     }
 }

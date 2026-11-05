@@ -13,6 +13,8 @@ mod srvdlg;
 mod keys;
 mod ficons;
 mod font;
+#[cfg(test)]
+mod guard;
 pub(crate) mod combo;
 mod layout;
 mod panedrag;
