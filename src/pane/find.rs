@@ -1179,12 +1179,12 @@ pub(crate) struct HeaderGeom {
 }
 
 /// Header controls from measured label widths (already in pixels) plus a small DIP pad.
-/// The checkbox square sits in `sub` (it starts at 8 DIP and is 14 DIP wide; the label starts at 26).
+/// The checkbox square sits in `sub` (it starts at 8 DIP and is 16 DIP wide, the shared check box; the label starts at 32).
 /// `scope` is the pill, only while the search includes subfolders, inset 3 DIP from the header row.
 pub(crate) fn header_geom(dpi: i32, width: i32, header_h: i32, sub_text: i32, scope_text: i32, recursive: bool) -> HeaderGeom {
     let s = |v: i32| v.saturating_mul(dpi.max(1)) / 96;
     let width = width.max(0);
-    let sub_right = (s(26) + sub_text.max(0) + s(8)).min(width);
+    let sub_right = (s(32) + sub_text.max(0) + s(8)).min(width);
     let sub = RECT { left: 0, top: 0, right: sub_right, bottom: header_h.max(0) };
     if !recursive {
         return HeaderGeom { sub, scope: None, status_left: (width / 2).max(sub_right) };
@@ -1730,7 +1730,7 @@ unsafe fn find_context(pane: HWND, y: Option<i32>, screen: POINT) {
 }
 
 unsafe fn paint_find(h: HWND, pane: HWND) {
-    let (dpi, font, icon_font, small, accent, sort, cols) = app(|a| (a.dpi, a.font, a.icon_font, a.small_font, a.s.accent_now(), a.s.ev_sort, a.s.ev_cols));
+    let (dpi, font, small, accent, sort, cols) = app(|a| (a.dpi, a.font, a.small_font, a.s.accent_now(), a.s.ev_sort, a.s.ev_cols));
     let snap = {
         let map = find_map();
         map.get(&(pane.0 as isize)).map(|u| (u.query.clone(), u.root.clone(), u.recursive, u.everywhere, u.engine, u.hits.clone(), u.more, u.running, u.sel, u.scroll, u.hot_col))
@@ -1787,14 +1787,12 @@ unsafe fn paint_find(h: HWND, pane: HWND) {
         let head = RECT { left: 0, top: 0, right: rc.right, bottom: rh };
         fill(dc, head, pal().bg);
         let g = header_now(h, Some(dc), dpi, rh, rc.right, recursive, all);
-        let mark = RECT { left: s(8), top: (rh - s(14)) / 2, right: s(8) + s(14), bottom: (rh - s(14)) / 2 + s(14) };
-        fill(dc, mark, if recursive { accent } else { pal().card });
-        frame(dc, mark, 1, if recursive { accent } else { pal().line });
-        if recursive {
-            text(dc, mark, "\u{E73E}", icon_font, on_color(accent), DT_CENTER);
-        }
+        // 16 DIP, the shared painter's box (Settings). At 14 the icon-font tick is wider than the box and DT_END_ELLIPSIS swaps it for a stub.
+        let mark = RECT { left: s(8), top: (rh - s(16)) / 2, right: s(8) + s(16), bottom: (rh - s(16)) / 2 + s(16) };
+        // Shared painter (Settings, folder watch): rounded box and the shared icon font's tick.
+        crate::paint_check(dc, mark, recursive, false, dpi, pal().bg);
         let sub_label = tr(crate::Key::Subfolders);
-        text(dc, RECT { left: s(26), right: g.sub.right, ..head }, sub_label, font, pal().text, DT_LEFT);
+        text(dc, RECT { left: s(32), right: g.sub.right, ..head }, sub_label, font, pal().text, DT_LEFT);
         if let Some(pill) = g.scope {
             fill(dc, pill, pal().card);
             frame(dc, pill, 1, if all { accent } else { pal().line });
@@ -1884,21 +1882,21 @@ mod tests {
         // 96 dpi. 52px is about "하위 폴더", 84px about "모든 드라이브", in the UI font.
         // The old hit ran to 146 and the old pill was 142 wide, with empty space after the words.
         let g = header_geom(96, 800, 22, 52, 84, true);
-        assert_eq!(g.sub, RECT { left: 0, top: 0, right: 86, bottom: 22 });
+        assert_eq!(g.sub, RECT { left: 0, top: 0, right: 92, bottom: 22 });
         assert!(g.sub.right <= 146 * 70 / 100);
         let pill = g.scope.unwrap();
-        assert_eq!((pill.left, pill.right, pill.top, pill.bottom), (92, 192, 3, 19));
+        assert_eq!((pill.left, pill.right, pill.top, pill.bottom), (98, 198, 3, 19));
         assert_eq!(pill.right - pill.left, 100); // text 84 + 8 DIP of pad on each side; the old pill was 142
         assert!(pill.left >= g.sub.right);
-        assert_eq!(g.status_left, 198);
+        assert_eq!(g.status_left, 204);
         assert_eq!(header_hit(0, 10, &g), HeaderHit::Sub);
         assert_eq!(header_hit(8, 10, &g), HeaderHit::Sub);
-        assert_eq!(header_hit(85, 10, &g), HeaderHit::Sub);
-        assert_eq!(header_hit(86, 10, &g), HeaderHit::None);
-        assert_eq!(header_hit(91, 10, &g), HeaderHit::None);
-        assert_eq!(header_hit(92, 10, &g), HeaderHit::Scope);
-        assert_eq!(header_hit(191, 10, &g), HeaderHit::Scope);
-        assert_eq!(header_hit(192, 10, &g), HeaderHit::None);
+        assert_eq!(header_hit(91, 10, &g), HeaderHit::Sub);
+        assert_eq!(header_hit(92, 10, &g), HeaderHit::None);
+        assert_eq!(header_hit(97, 10, &g), HeaderHit::None);
+        assert_eq!(header_hit(98, 10, &g), HeaderHit::Scope);
+        assert_eq!(header_hit(197, 10, &g), HeaderHit::Scope);
+        assert_eq!(header_hit(198, 10, &g), HeaderHit::None);
         // The pill is inset; the row above and below it is not the button.
         assert_eq!(header_hit(100, 0, &g), HeaderHit::None);
         assert_eq!(header_hit(100, 2, &g), HeaderHit::None);
@@ -1909,27 +1907,27 @@ mod tests {
         // No pill until the search includes subfolders. The label stays fitted.
         let flat = header_geom(96, 800, 22, 52, 84, false);
         assert!(flat.scope.is_none());
-        assert_eq!(flat.sub.right, 86);
+        assert_eq!(flat.sub.right, 92);
         assert_eq!(flat.status_left, 400);
         assert_eq!(header_hit(92, 10, &flat), HeaderHit::None);
         // 192 dpi doubles the pads and the insets. Text width is already in physical pixels.
         let hi = header_geom(192, 1600, 44, 104, 168, true);
-        assert_eq!(hi.sub.right, 172);
+        assert_eq!(hi.sub.right, 184);
         let hi_pill = hi.scope.unwrap();
-        assert_eq!((hi_pill.left, hi_pill.right, hi_pill.top, hi_pill.bottom), (184, 384, 6, 38));
-        assert_eq!(header_hit(183, 20, &hi), HeaderHit::None);
-        assert_eq!(header_hit(184, 20, &hi), HeaderHit::Scope);
-        assert_eq!(header_hit(184, 5, &hi), HeaderHit::None);
-        // 120 dpi truncates the same way the paint scale does: 26*120/96 = 32, 8*120/96 = 10, 6*120/96 = 7, 3*120/96 = 3.
+        assert_eq!((hi_pill.left, hi_pill.right, hi_pill.top, hi_pill.bottom), (196, 396, 6, 38));
+        assert_eq!(header_hit(195, 20, &hi), HeaderHit::None);
+        assert_eq!(header_hit(196, 20, &hi), HeaderHit::Scope);
+        assert_eq!(header_hit(196, 5, &hi), HeaderHit::None);
+        // 120 dpi truncates the same way the paint scale does: 32*120/96 = 40, 8*120/96 = 10, 6*120/96 = 7, 3*120/96 = 3.
         let mid = header_geom(120, 1000, 27, 65, 105, true);
-        assert_eq!(mid.sub.right, 107);
+        assert_eq!(mid.sub.right, 115);
         let mid_pill = mid.scope.unwrap();
-        assert_eq!((mid_pill.left, mid_pill.right, mid_pill.top, mid_pill.bottom), (114, 239, 3, 24));
-        assert_eq!(header_hit(113, 10, &mid), HeaderHit::None);
-        assert_eq!(header_hit(114, 10, &mid), HeaderHit::Scope);
-        assert_eq!(header_hit(238, 10, &mid), HeaderHit::Scope);
-        assert_eq!(header_hit(239, 10, &mid), HeaderHit::None);
-        assert_eq!(header_hit(114, 10, &header_geom(120, 1000, 27, 65, 105, false)), HeaderHit::None);
+        assert_eq!((mid_pill.left, mid_pill.right, mid_pill.top, mid_pill.bottom), (122, 247, 3, 24));
+        assert_eq!(header_hit(121, 10, &mid), HeaderHit::None);
+        assert_eq!(header_hit(122, 10, &mid), HeaderHit::Scope);
+        assert_eq!(header_hit(246, 10, &mid), HeaderHit::Scope);
+        assert_eq!(header_hit(247, 10, &mid), HeaderHit::None);
+        assert_eq!(header_hit(122, 10, &header_geom(120, 1000, 27, 65, 105, false)), HeaderHit::None);
     }
 
     #[test]
