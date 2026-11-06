@@ -494,6 +494,9 @@ unsafe fn defer_spots(spots: &[Spot]) {
 
 unsafe fn redraw_scrolled(h: HWND) {
     let _ = RedrawWindow(Some(h), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    // Native COMBOBOX children can stay blank/stale for a frame after DeferWindowPos
+    // + SWP_NOREDRAW even when the parent was redrawn with RDW_ALLCHILDREN.
+    crate::ui::combo::repaint_now_in(h);
 }
 
 unsafe fn place(h: HWND, g: &Geo, sn: &Snap) {
