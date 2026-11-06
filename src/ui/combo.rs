@@ -105,6 +105,21 @@ pub(crate) unsafe fn invalidate_in(parent: HWND) {
     }
 }
 
+/// Synchronous paint after a parent scroll layout. Parent `RDW_ALLCHILDREN` alone
+/// can leave a native COMBOBOX (and its child edit) blank/stale for a frame.
+pub(crate) unsafe fn repaint_now_in(parent: HWND) {
+    if parent.0.is_null() {
+        return;
+    }
+    let mut c = FindWindowExW(Some(parent), None, w!("ComboBox"), PCWSTR::null()).unwrap_or_default();
+    while !c.0.is_null() {
+        if IsWindowVisible(c).as_bool() {
+            let _ = RedrawWindow(Some(c), None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+        }
+        c = FindWindowExW(Some(parent), Some(c), w!("ComboBox"), PCWSTR::null()).unwrap_or_default();
+    }
+}
+
 /// Subclass `hwnd` and its parent. `face` is read on each paint.
 pub(crate) unsafe fn adopt(hwnd: HWND, face: FaceFn) {
     if hwnd.0.is_null() {
@@ -621,10 +636,8 @@ unsafe fn combo_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
         WM_NCPAINT => return LRESULT(0),
         WM_ERASEBKGND => return LRESULT(1),
         WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            let dc = BeginPaint(h, &mut ps);
-            paint_closed(h, dc);
-            let _ = EndPaint(h, &ps);
+            // Buffer the closed face so a scroll-time sync paint does not tear mid-fill.
+            super::buffered_solid(h, |dc, _| paint_closed(h, dc));
             return LRESULT(0);
         }
         WM_MOUSEMOVE => {

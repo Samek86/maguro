@@ -2,7 +2,10 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Once;
 use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, ExtSelectClipRgn, GetWindowRgn, SetWindowRgn, GDI_REGION_TYPE, RGN_AND};
+use windows::Win32::Graphics::Gdi::{
+    CreateRectRgn, DeleteObject, ExtSelectClipRgn, GetWindowRgn, GetWindowRgnBox, RedrawWindow, SetWindowRgn, GDI_REGION_TYPE, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW, RGN_AND,
+    RGN_ERROR,
+};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT, WM_MOUSELEAVE};
@@ -429,44 +432,121 @@ fn layout(h: HWND) {
     unsafe { place(h, &g, &sn); }
 }
 
-unsafe fn place(h: HWND, g: &Geo, sn: &Snap) {
-    let hide = |id: i32| {
-        let c = ctl(h, id);
-        if !c.0.is_null() {
-            let _ = ShowWindow(c, SW_HIDE);
+/// One deferred move. Hides keep their position (`SWP_NOMOVE | SWP_NOSIZE`).
+struct Spot {
+    hwnd: HWND,
+    rect: RECT,
+    show: bool,
+}
+
+/// No per-window redraw and no copied bits: a scroll used to repaint every combo as it moved.
+const PLACE_FLAGS: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(SWP_NOREDRAW.0 | SWP_NOCOPYBITS.0 | SWP_NOZORDER.0 | SWP_NOACTIVATE.0);
+
+fn spot_flags(show: bool) -> SET_WINDOW_POS_FLAGS {
+    if show {
+        PLACE_FLAGS | SWP_SHOWWINDOW
+    } else {
+        PLACE_FLAGS | SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE
+    }
+}
+
+fn spot_xywh(s: &Spot) -> (i32, i32, i32, i32) {
+    if s.show {
+        (s.rect.left, s.rect.top, (s.rect.right - s.rect.left).max(1), (s.rect.bottom - s.rect.top).max(1))
+    } else {
+        (0, 0, 0, 0)
+    }
+}
+
+unsafe fn set_spot(s: &Spot) {
+    let (x, y, w, ht) = spot_xywh(s);
+    let _ = SetWindowPos(s.hwnd, None, x, y, w, ht, spot_flags(s.show));
+}
+
+/// Batch the pass. A null `HDWP` from `BeginDeferWindowPos` or `DeferWindowPos` places the rest one by one.
+unsafe fn defer_spots(spots: &[Spot]) {
+    let live: Vec<&Spot> = spots.iter().filter(|s| !s.hwnd.0.is_null() && (s.show || IsWindowVisible(s.hwnd).as_bool())).collect();
+    if live.is_empty() {
+        return;
+    }
+    let Ok(mut dwp) = BeginDeferWindowPos(live.len() as i32) else {
+        for s in &live {
+            set_spot(s);
         }
+        return;
     };
-    for id in [S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE] {
-        hide(id);
-    }
-    let n = fav_tree_rows().len().min(FAV_MAX as usize) as i32;
-    let made = FAV_MADE.load(std::sync::atomic::Ordering::Relaxed);
-    for base in [S_FAV0, S_REN0] {
-        for i in 0..made {
-            let c = ctl(h, base + i);
-            if c.0.is_null() {
-                continue;
-            }
-            if i >= n {
-                let _ = DestroyWindow(c);
-            } else {
-                let _ = ShowWindow(c, SW_HIDE);
+    for (i, s) in live.iter().enumerate() {
+        let (x, y, w, ht) = spot_xywh(s);
+        match DeferWindowPos(dwp, s.hwnd, None, x, y, w, ht, spot_flags(s.show)) {
+            Ok(next) => dwp = next,
+            Err(_) => {
+                // The previous handle is still the one to finish. Then place whatever was not queued.
+                _ = EndDeferWindowPos(dwp);
+                for s in &live[i..] {
+                    set_spot(s);
+                }
+                return;
             }
         }
     }
-    crate::place_edit(ctl(h, S_SEARCH), inset(g.search, sc(sn.dpi, FIELD_INSET_DIP)), true);
-    move_to(ctl(h, S_CLOSE), g.close, true);
+    _ = EndDeferWindowPos(dwp);
+}
+
+unsafe fn redraw_scrolled(h: HWND) {
+    let _ = RedrawWindow(Some(h), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    // Native COMBOBOX children can stay blank/stale for a frame after DeferWindowPos
+    // + SWP_NOREDRAW even when the parent was redrawn with RDW_ALLCHILDREN.
+    crate::ui::combo::repaint_now_in(h);
+}
+
+unsafe fn place(h: HWND, g: &Geo, sn: &Snap) {
+    let mut spots: Vec<Spot> = Vec::new();
+    let mut clips: Vec<(HWND, RECT)> = Vec::new();
+    let mut kept: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    // A macro, not a closure: the hide pass below borrows `kept` while queueing.
+    macro_rules! put {
+        ($id:expr, $hwnd:expr, $rect:expr, $show:expr, $clip:expr) => {{
+            let hwnd = $hwnd;
+            if !hwnd.0.is_null() {
+                let rect = $rect;
+                let show = $show;
+                kept.insert($id);
+                spots.push(Spot { hwnd, rect, show });
+                if show && $clip {
+                    clips.push((hwnd, rect));
+                }
+            }
+        }};
+    }
+
+    let search = ctl(h, S_SEARCH);
+    put!(S_SEARCH, search, crate::edit_window_rect(search, inset(g.search, sc(sn.dpi, FIELD_INSET_DIP))), true, false);
+    put!(S_CLOSE, ctl(h, S_CLOSE), g.close, true, false);
+
+    // Buttons past the tree are gone. The ones this pass does not place are hidden below, not up front.
+    let n = fav_tree_rows().len().min(FAV_MAX as usize) as i32;
+    let made = FAV_MADE.load(Ordering::Relaxed);
+    for base in [S_FAV0, S_REN0] {
+        for i in n..made {
+            let c = ctl(h, base + i);
+            if !c.0.is_null() {
+                let _ = DestroyWindow(c);
+            }
+        }
+    }
     let content = g.content;
     for item in &g.items {
         match item {
             Item::Card(c) => {
                 if let Some(id) = ctl_id(c.spec.ctl) {
-                    move_clip(ctl(h, id), c.ctl, content);
+                    let show = intersects(c.ctl, content);
+                    put!(id, ctl(h, id), c.ctl, show, true);
                 }
                 if c.spec.ctl == Ctl::Adv {
                     let ids = [S_ADV_OPEN, S_ADV_EX, S_ADV_IM];
                     for (i, id) in ids.iter().enumerate() {
-                        move_clip(ctl(h, *id), c.adv[i], content);
+                        let show = intersects(c.adv[i], content);
+                        put!(*id, ctl(h, *id), c.adv[i], show, true);
                     }
                 }
                 if matches!(c.spec.ctl, Ctl::AdvReset | Ctl::FolderDefault | Ctl::FolderReset | Ctl::FolderClear) {
@@ -476,49 +556,86 @@ unsafe fn place(h: HWND, g: &Geo, sn: &Snap) {
                         Ctl::FolderClear => S_FV_CLEAR,
                         _ => S_ADV_RESET,
                     };
-                    move_clip(ctl(h, id), c.adv[0], content);
+                    let show = intersects(c.adv[0], content);
+                    put!(id, ctl(h, id), c.adv[0], show, true);
                 }
                 if c.spec.ctl == Ctl::EvAct {
                     let b = ctl(h, S_EV);
                     let _ = SetWindowTextW(b, &HSTRING::from(ev_button_label()));
                     let _ = EnableWindow(b, !crate::everything::busy());
                     if crate::everything::action().is_some() {
-                        move_clip(b, c.ctl, content);
+                        let show = intersects(c.ctl, content);
+                        put!(S_EV, b, c.ctl, show, true);
                     } else {
-                        move_to(b, c.ctl, false);
+                        put!(S_EV, b, c.ctl, false, false);
                     }
                 }
                 if c.spec.ctl == Ctl::WmPath {
-                    move_clip(ctl(h, S_WM_BROWSE), c.adv[0], content);
-                    crate::place_edit(ctl(h, S_WM), inset(c.ctl, sc(sn.dpi, FIELD_INSET_DIP)), intersects(c.ctl, content));
+                    let browse = intersects(c.adv[0], content);
+                    put!(S_WM_BROWSE, ctl(h, S_WM_BROWSE), c.adv[0], browse, true);
+                    let wm = ctl(h, S_WM);
+                    let show = intersects(c.ctl, content);
+                    put!(S_WM, wm, crate::edit_window_rect(wm, inset(c.ctl, sc(sn.dpi, FIELD_INSET_DIP))), show, false);
                 }
             }
             Item::CtxBar { reset, refresh } => {
-                move_clip(ctl(h, S_CTX_REFRESH), *refresh, content);
-                move_clip(ctl(h, S_CTX_RESET), *reset, content);
+                let show_f = intersects(*refresh, content);
+                put!(S_CTX_REFRESH, ctl(h, S_CTX_REFRESH), *refresh, show_f, true);
+                let show_s = intersects(*reset, content);
+                put!(S_CTX_RESET, ctl(h, S_CTX_RESET), *reset, show_s, true);
             }
             Item::KeyBar { edit, reset } => {
-                crate::place_edit(ctl(h, S_KEYQ), inset(*edit, sc(sn.dpi, FIELD_INSET_DIP)), intersects(*edit, content));
-                move_clip(ctl(h, S_RESET), *reset, content);
+                let k = ctl(h, S_KEYQ);
+                let show = intersects(*edit, content);
+                put!(S_KEYQ, k, crate::edit_window_rect(k, inset(*edit, sc(sn.dpi, FIELD_INSET_DIP))), show, false);
+                let show_r = intersects(*reset, content);
+                put!(S_RESET, ctl(h, S_RESET), *reset, show_r, true);
             }
             Item::FavRow { i, rename, btn, .. } if *i != usize::MAX && *i < FAV_MAX as usize && btn.right > btn.left => {
                 let id = S_FAV0 + *i as i32;
-                FAV_MADE.fetch_max(*i as i32 + 1, std::sync::atomic::Ordering::Relaxed);
+                FAV_MADE.fetch_max(*i as i32 + 1, Ordering::Relaxed);
                 let mut b = ctl(h, id);
                 if b.0.is_null() {
                     b = child_at(h, w!("BUTTON"), tx(crate::Key::Delete), 0xB | 0x00010000, id, sn.font);
                 }
                 let _ = SetWindowTextW(b, &HSTRING::from(tx(crate::Key::Delete)));
-                move_clip(b, *btn, content);
+                let show = intersects(*btn, content);
+                put!(id, b, *btn, show, true);
                 let rid = S_REN0 + *i as i32;
                 let mut r = ctl(h, rid);
                 if r.0.is_null() {
                     r = child_at(h, w!("BUTTON"), tx(crate::Key::Rename2), 0xB | 0x00010000, rid, sn.font);
                 }
                 let _ = SetWindowTextW(r, &HSTRING::from(tx(crate::Key::Rename2)));
-                move_clip(r, *rename, content);
+                let show_r = intersects(*rename, content);
+                put!(rid, r, *rename, show_r, true);
             }
             _ => {}
+        }
+    }
+    // Other page, scrolled off without a row, or a favourite button this page did not use.
+    for id in [S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE] {
+        if !kept.contains(&id) {
+            put!(id, ctl(h, id), RECT::default(), false, false);
+        }
+    }
+    let made_now = FAV_MADE.load(Ordering::Relaxed);
+    for base in [S_FAV0, S_REN0] {
+        for i in 0..made_now.min(n) {
+            let id = base + i;
+            if !kept.contains(&id) {
+                put!(id, ctl(h, id), RECT::default(), false, false);
+            }
+        }
+    }
+    defer_spots(&spots);
+    for &(hwnd, rect) in &clips {
+        move_clip(hwnd, rect, content);
+    }
+    // `SWP_NOREDRAW` skipped the child paint. Scroll calls `redraw_scrolled`; other layouts only invalidate the parent.
+    for s in &spots {
+        if s.show && !s.hwnd.0.is_null() {
+            let _ = InvalidateRect(Some(s.hwnd), None, false);
         }
     }
 }
@@ -531,30 +648,45 @@ fn inset(r: RECT, d: i32) -> RECT {
     RECT { left: r.left + d, top: r.top + d, right: (r.right - d).max(r.left + d), bottom: (r.bottom - d).max(r.top + d) }
 }
 
-/// Place a scrolled-content control and clip it to the content viewport, so a row
-/// that is only partly scrolled into view never paints over the footer or header.
+/// Clip a control that `place` already moved. A row only partly in view must not paint over the footer or header.
+/// `bRedraw` stays false, and `SetWindowRgn` runs only when `GetWindowRgnBox` differs from the clip we want.
 unsafe fn move_clip(h: HWND, r: RECT, content: RECT) {
     if h.0.is_null() {
         return;
     }
-    let show = intersects(r, content);
-    move_to(h, r, show);
-    if !show {
+    let vis = RECT { left: r.left.max(content.left), top: r.top.max(content.top), right: r.right.min(content.right), bottom: r.bottom.min(content.bottom) };
+    let want = if vis == r {
+        None
+    } else {
+        Some(RECT { left: vis.left - r.left, top: vis.top - r.top, right: vis.right - r.left, bottom: vis.bottom - r.top })
+    };
+    if !clip_changed(h, want) {
         return;
     }
-    let vis = RECT { left: r.left.max(content.left), top: r.top.max(content.top), right: r.right.min(content.right), bottom: r.bottom.min(content.bottom) };
-    if vis == r {
-        let _ = SetWindowRgn(h, None, true);
-    } else {
-        let rgn = CreateRectRgn(vis.left - r.left, vis.top - r.top, vis.right - r.left, vis.bottom - r.top);
-        // The system owns the region after a successful call.
-        if SetWindowRgn(h, Some(rgn), true) == 0 {
-            let _ = DeleteObject(rgn.into());
+    match want {
+        None => {
+            let _ = SetWindowRgn(h, None, false);
+        }
+        Some(c) => {
+            let rgn = CreateRectRgn(c.left, c.top, c.right, c.bottom);
+            // The system owns the region after a successful call.
+            if SetWindowRgn(h, Some(rgn), false) == 0 {
+                let _ = DeleteObject(rgn.into());
+            }
         }
     }
     // Repaint the parent under the cut-off strip, or stale button pixels stay there.
     if let Ok(parent) = GetParent(h) {
         let _ = InvalidateRect(Some(parent), Some(&r), false);
+    }
+}
+
+unsafe fn clip_changed(h: HWND, want: Option<RECT>) -> bool {
+    let mut cur = RECT::default();
+    let kind = GetWindowRgnBox(h, &mut cur);
+    match want {
+        None => kind != RGN_ERROR,
+        Some(r) => kind == RGN_ERROR || cur != r,
     }
 }
 
@@ -1878,7 +2010,7 @@ unsafe fn on_click(h: HWND, x: i32, y: i32) {
                 st.scroll = (st.scroll + dir * page).clamp(0, max);
             });
             layout(h);
-            let _ = InvalidateRect(Some(h), None, false);
+            redraw_scrolled(h);
         }
     }
 }
@@ -2023,7 +2155,7 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let scroll = if max == 0 { 0 } else { (top - track.top) * max / span };
                     ST.with(|s| s.borrow_mut().scroll = scroll.clamp(0, max));
                     layout(h);
-                    let _ = InvalidateRect(Some(h), None, false);
+                    redraw_scrolled(h);
                 } else {
                     let sn = snap();
                     let mut rc = RECT::default();
@@ -2078,7 +2210,7 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     if next != scroll {
                         ST.with(|s| s.borrow_mut().scroll = next);
                         layout(h);
-                        let _ = InvalidateRect(Some(h), None, false);
+                        redraw_scrolled(h);
                     }
                 }
             }
