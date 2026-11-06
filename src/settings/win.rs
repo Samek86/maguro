@@ -2812,26 +2812,30 @@ unsafe fn draw_ask_btn(d: &DRAWITEMSTRUCT) {
     crate::paint_button(d.hDC, d.rcItem, kind, visual, &crate::text_of(d.hwndItem), font, dpi, crate::ui_tokens().bg, crate::FocusRing::Inside);
 }
 
-/// One-line prompt. None means cancel.
+/// One-line prompt. None means cancel. The caret opens at the end of `initial`.
 pub(crate) unsafe fn ask(owner: HWND, title: &str, initial: &str) -> Option<String> {
-    ask_with(owner, title, initial, false)
+    ask_with(owner, title, initial)
 }
 
-/// Like [`ask`], but selects the stem (before the last extension) like Explorer F2.
+/// Like [`ask`]. Kept for the file-rename caller. Open still places the caret at the end.
 pub(crate) unsafe fn ask_stem(owner: HWND, title: &str, initial: &str) -> Option<String> {
-    ask_with(owner, title, initial, true)
+    ask_with(owner, title, initial)
 }
 
-fn stem_utf16_len(name: &str) -> isize {
-    let p = std::path::Path::new(name);
-    match (p.file_stem(), p.extension()) {
-        (Some(stem), Some(_)) => stem.to_string_lossy().encode_utf16().count() as isize,
-        _ => -1,
-    }
+/// UTF-16 code units in `text`. `EM_SETSEL` counts those, not Unicode scalar values.
+fn ask_utf16_len(text: &str) -> isize {
+    text.encode_utf16().count() as isize
 }
 
-/// One-line prompt. None means cancel. When `select_stem`, highlights the name stem.
-unsafe fn ask_with(owner: HWND, title: &str, initial: &str, select_stem: bool) -> Option<String> {
+/// `EM_SETSEL` range on MaguroAsk open: caret at the end, nothing highlighted.
+/// `(0, -1)` would select all. `(0, 0)` on a non-empty name would leave the caret at the start.
+fn ask_open_sel(initial: &str) -> (isize, isize) {
+    let len = ask_utf16_len(initial);
+    (len, len)
+}
+
+/// One-line prompt. None means cancel. The caret opens at the UTF-16 end of `initial`.
+unsafe fn ask_with(owner: HWND, title: &str, initial: &str) -> Option<String> {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let Ok(m) = GetModuleHandleW(None) else { return };
@@ -2874,10 +2878,10 @@ unsafe fn ask_with(owner: HWND, title: &str, initial: &str, select_stem: bool) -
     crate::keys::set_modal(true);
     let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(owner, false);
     let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(edit));
-    if select_stem {
-        // EM_SETSEL = 0xB1; Explorer F2 selects the stem only.
-        let _ = SendMessageW(edit, 0xB1, Some(WPARAM(0)), Some(LPARAM(stem_utf16_len(initial))));
-    }
+    // ask() and ask_stem() both land here. Open always ends the caret; stem highlight is not used.
+    // EM_SETSEL = 0xB1. A collapsed range (len, len) places the caret and selects nothing.
+    let (sel_start, sel_end) = ask_open_sel(initial);
+    let _ = SendMessageW(edit, 0xB1, Some(WPARAM(sel_start as usize)), Some(LPARAM(sel_end)));
     let mut msg = MSG::default();
     while ASK_OUT.with(|o| o.borrow().is_none()) {
         if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -3185,5 +3189,35 @@ mod tests {
         assert_eq!(dst[5], 0);
         assert_eq!(dst[6], (255u32 * 3 / 9) as u8);
         assert_eq!(dst[7], 255);
+    }
+
+    #[test]
+    fn ask_open_sel_is_the_utf16_end_not_select_all_or_the_start() {
+        // Empty text has nowhere else to put the caret.
+        assert_eq!(ask_utf16_len(""), 0);
+        assert_eq!(ask_open_sel(""), (0, 0));
+
+        let name = "report.pdf";
+        let len = ask_utf16_len(name);
+        assert_eq!(len, 10);
+        let sel = ask_open_sel(name);
+        assert_eq!(sel, (len, len));
+        assert_ne!(sel, (0, -1)); // select-all
+        assert_ne!(sel, (0, 0)); // caret at the start
+
+        // Hangul: one UTF-16 unit per scalar.
+        assert_eq!(ask_open_sel("즐겨찾기"), (4, 4));
+
+        // Emoji is a surrogate pair. EM_SETSEL counts UTF-16 units, not chars.
+        let marked = "a😀b";
+        assert_eq!(marked.chars().count(), 3);
+        assert_eq!(ask_utf16_len(marked), 4);
+        assert_eq!(ask_open_sel(marked), (4, 4));
+
+        // File rename used to highlight the stem. Open is still a caret at the end.
+        let file = "notes.tar.gz";
+        let file_len = ask_utf16_len(file);
+        assert_eq!(ask_open_sel(file), (file_len, file_len));
+        assert_ne!(ask_open_sel(file).0, 0);
     }
 }
