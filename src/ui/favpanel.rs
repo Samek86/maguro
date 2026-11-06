@@ -279,8 +279,24 @@ pub(crate) fn fav_sel_after_release(release: FavRelease, sel: Option<usize>) -> 
 /// The panel blits its whole client over the rename edit. While that edit is open, or an IME
 /// composition is up, a hover wash or a pin timer covers the composition and the candidate window.
 /// `hot_changed` is false when the pointer stayed on the same row, so there is nothing to paint.
+/// A modal `MaguroAsk` counts as `edit_open`: the dialog sits on this panel.
 pub(crate) fn fav_hover_paints(hot_changed: bool, edit_open: bool, composing: bool) -> bool {
     hot_changed && !edit_open && !composing
+}
+
+/// Real `WM_MOUSELEAVE` work (clear hover, paint). False while the pointer is still
+/// in the client: that leave is synthetic (tip, menu, owned dialog, disabled owner).
+/// Re-arming `TME_LEAVE` from it posts another leave at once, and the queue never
+/// drains, so the rename edit's `WM_PAINT` never runs until the pointer exits.
+pub(crate) fn fav_leave_paints(cursor_inside: bool) -> bool {
+    !cursor_inside
+}
+
+/// The panel blit is not clipped to an owned popup that overlaps it, so one paint
+/// covers `MaguroAsk` and a later paint of the dialog does not put those pixels back.
+/// While a modal prompt is up, validate the panel and draw nothing.
+pub(crate) fn fav_panel_draws(modal: bool) -> bool {
+    !modal
 }
 
 /// Pointer over the favourites panel.
@@ -459,17 +475,11 @@ pub(crate) unsafe fn hide_side_fav_tip() {
     if back.is_none() {
         let paint = app(|a| a.side_hot.take().is_some());
         // Same freeze as a hover wash: this blit covers the rename edit and the IME window.
-        if paint && !owner.0.is_null() && !ime_composing(app(|a| a.side_hwnd)) {
+        // Do not re-arm TME_LEAVE here. Doing it while the pointer is still inside the
+        // client (the branch this replaced) posts WM_MOUSELEAVE forever and starves the dialog.
+        if paint && !owner.0.is_null() && fav_panel_draws(crate::keys::modal()) && !ime_composing(app(|a| a.side_hwnd)) {
             _ = InvalidateRect(Some(owner), None, false);
         }
-    } else if !owner.0.is_null() && !app(|a| a.fav_tip_after_drop) {
-        let mut t = TRACKMOUSEEVENT {
-            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-            dwFlags: TME_LEAVE,
-            hwndTrack: owner,
-            dwHoverTime: 0,
-        };
-        _ = TrackMouseEvent(&mut t);
     }
 }
 
@@ -486,7 +496,7 @@ fn side_tip_quiet() -> bool {
     if after_drop {
         return true;
     }
-    fav_tip_blocked(false, ime_composing(hwnd), false)
+    fav_tip_blocked(crate::keys::modal(), ime_composing(hwnd), false)
 }
 
 /// `x` and `y` are client coordinates. `row_i` is the visible row index for anchoring.
@@ -1134,7 +1144,7 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_FAV_ICON => {
                 clear_icon_refresh();
-                if !ime_composing(app(|a| a.side_hwnd)) {
+                if fav_panel_draws(crate::keys::modal()) && !ime_composing(app(|a| a.side_hwnd)) {
                     _ = InvalidateRect(Some(h), None, false);
                 }
                 // A row may have just been marked missing. Refresh the note if the pointer is still on it.
@@ -1174,8 +1184,8 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     dismiss_side_fav_tip();
                 }
                 clamp_side_scroll();
-                // A pin retry paints every 700ms. That blit sits on the IME candidate while renaming.
-                if !ime_composing(app(|a| a.side_hwnd)) {
+                // A pin retry paints every 700ms. That blit sits on the rename dialog and the IME candidate.
+                if fav_panel_draws(crate::keys::modal()) && !ime_composing(app(|a| a.side_hwnd)) {
                     _ = InvalidateRect(Some(h), None, false);
                     _ = UpdateWindow(h);
                 }
@@ -1183,7 +1193,17 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     _ = SetTimer(Some(h), TIMER_PINS, 700, None);
                 }
             }
-            WM_PAINT => paint_side(h),
+            WM_PAINT => {
+                // BeginPaint validates either way. Drawing while a modal prompt is up
+                // writes the panel over that popup; the popup's own paint does not undo it.
+                if fav_panel_draws(crate::keys::modal()) {
+                    paint_side(h);
+                } else {
+                    let mut ps = PAINTSTRUCT::default();
+                    let _dc = BeginPaint(h, &mut ps);
+                    let _ = EndPaint(h, &ps);
+                }
+            }
             WM_ERASEBKGND => return LRESULT(1),
             WM_SETCURSOR => {
                 // The scrollbar is not a row. A drag (reorder or a file dropped from outside)
@@ -1269,7 +1289,7 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         a.side_hot = next;
                         paint
                     });
-                    if paint && !ime_composing(app(|a| a.side_hwnd)) {
+                    if fav_hover_paints(paint, crate::keys::modal(), ime_composing(app(|a| a.side_hwnd))) {
                         _ = InvalidateRect(Some(h), None, false);
                     }
                     match act {
@@ -1283,21 +1303,23 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_MOUSELEAVE => {
                 // The post-drop hold ends only once the pointer has actually left after a
-                // real post-drop hover. OLE drop and tip hide can synthesize a leave while
-                // the cursor is still inside (or still owned by the drag source); ignore
-                // those so the tip stays down until a real exit.
-                if cursor_in_client(h).is_none() {
+                // real post-drop hover. OLE drop, the tip, the menu, and MaguroAsk all
+                // synthesize a leave while the cursor is still inside the client. Acting
+                // on that leave, or re-arming TME_LEAVE from it, posts another leave
+                // immediately. Typed characters then sit in the edit until the pointer
+                // finally exits and the queue can paint.
+                if fav_leave_paints(cursor_in_client(h).is_some()) {
                     app(|a| {
                         if a.fav_tip_leave_armed {
                             a.fav_tip_after_drop = false;
                             a.fav_tip_leave_armed = false;
                         }
                     });
-                }
-                hide_side_fav_tip();
-                app(|a| a.side_hot = None);
-                if !ime_composing(app(|a| a.side_hwnd)) {
-                    _ = InvalidateRect(Some(h), None, false);
+                    hide_side_fav_tip();
+                    app(|a| a.side_hot = None);
+                    if fav_panel_draws(crate::keys::modal()) && !ime_composing(app(|a| a.side_hwnd)) {
+                        _ = InvalidateRect(Some(h), None, false);
+                    }
                 }
             }
             WM_MOUSEWHEEL => {
@@ -1891,7 +1913,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::{
-        fav_hover_cursor, fav_hover_paints, fav_release, fav_row_at, fav_row_height, fav_sel_after_release, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text,
+        fav_hover_cursor, fav_hover_paints, fav_leave_paints, fav_panel_draws, fav_release, fav_row_at, fav_row_height, fav_sel_after_release, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text,
         mark_rows, FavCursor, FavRelease, FavRow, FavTipAct, RowKind,
     };
     use crate::i18n::UI;
@@ -2021,6 +2043,19 @@ mod tests {
         assert_eq!(fav_sel_after_release(FavRelease::None, None), None);
     }
 
+
+    #[test]
+    fn a_leave_that_is_still_inside_the_panel_does_not_paint_or_rearm_tracking() {
+        assert!(fav_leave_paints(false));
+        assert!(!fav_leave_paints(true));
+        assert!(fav_panel_draws(false));
+        assert!(!fav_panel_draws(true));
+        let src = include_str!("favpanel.rs");
+        let start = src.find("fn hide_side_fav_tip()").expect("hide_side_fav_tip");
+        let tail = &src[start..];
+        let end = tail.find("fn dismiss_side_fav_tip").expect("dismiss");
+        assert!(!tail[..end].contains("TrackMouseEvent"));
+    }
 
     #[test]
     fn hover_paint_stays_down_while_renaming_or_composing() {
