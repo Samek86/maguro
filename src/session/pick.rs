@@ -261,7 +261,7 @@ pub(crate) fn pick_layout(w: i32, h: i32, dpi: i32, row_count: usize, scroll: i3
     let pad = dip(dpi, 16);
     let gap = dip(dpi, 12);
     let search_h = dip(dpi, 32);
-    let btn_h = dip(dpi, 32);
+    let btn_h = dip(dpi, crate::BTN_H_FOOTER);
     let row_h = dip(dpi, 52);
     let row_gap = dip(dpi, 4);
     let inner = dip(dpi, 8);

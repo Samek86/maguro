@@ -15,7 +15,7 @@ use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 use super::model::{format_civil, status_color, Row, Status};
 use crate::imports::*;
-use crate::{px, BTN_GAP, BTN_H_TOOL, BTN_MIN_W, BTN_PAD_X, FONT_META_PX, FONT_PX, PAD_BODY_X, PAD_BODY_Y, RADIUS, SPACE_4, SPACE_8};
+use crate::{px, BTN_GAP, BTN_H_FOOTER, BTN_MIN_W, BTN_PAD_X, FONT_META_PX, FONT_PX, PAD_BODY_X, PAD_BODY_Y, RADIUS, SPACE_4, SPACE_8};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Hover {
@@ -483,7 +483,7 @@ unsafe fn layout(h: HWND, rows: &[Row]) -> Lay {
     let height = rc.bottom - rc.top;
     let hint_top = px(dpi, PAD_BODY_Y);
     let hint = RECT { left: pad, top: hint_top, right: (w - pad).max(pad), bottom: hint_top + px(dpi, FONT_PX + SPACE_8) };
-    let btn_h = px(dpi, BTN_H_TOOL);
+    let btn_h = px(dpi, BTN_H_FOOTER);
     let btn_y = hint.bottom + tight;
     let add_w = button_width(measure(dc, font, crate::tr(crate::Key::AddFolder)), dpi);
     let file_w = button_width(measure(dc, font, crate::tr(crate::Key::AddFile)), dpi);
