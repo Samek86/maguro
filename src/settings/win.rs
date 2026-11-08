@@ -2299,7 +2299,6 @@ pub(crate) struct AboutLay {
 const ABOUT_W_DIP: i32 = 440;
 const ABOUT_ICON_DIP: i32 = 48;
 const ABOUT_BTN_W_DIP: i32 = 88;
-const ABOUT_BTN_H_DIP: i32 = 28;
 
 /// Client height for the stacked About body. Heights are already in pixels.
 pub(crate) fn about_client_h(dpi: i32, desc_h: i32, lic_h: i32, repo_h: i32) -> i32 {
@@ -2309,7 +2308,7 @@ pub(crate) fn about_client_h(dpi: i32, desc_h: i32, lic_h: i32, repo_h: i32) -> 
         + desc_h
         + lic_h
         + repo_h
-        + sc(dpi, ABOUT_BTN_H_DIP)
+        + sc(dpi, crate::BTN_H_FOOTER)
         + m * 2
         + sc(dpi, 16)
         + sc(dpi, 8)
@@ -2337,7 +2336,7 @@ pub(crate) fn about_lay(client_w: i32, client_h: i32, dpi: i32, desc_h: i32, lic
     let license = RECT { left: m, top: lic_top, right: text_r, bottom: lic_top + lic_h.max(1) };
     let repo_top = license.bottom + s(4);
     let repo = RECT { left: m, top: repo_top, right: text_r, bottom: repo_top + repo_h.max(1) };
-    let btn_h = s(ABOUT_BTN_H_DIP);
+    let btn_h = s(crate::BTN_H_FOOTER);
     let btn_w = s(ABOUT_BTN_W_DIP).min((cw - 2 * m).max(1));
     let ok_top = repo.bottom + s(16);
     let ok = RECT { left: (cw - m - btn_w).max(0), top: ok_top, right: (cw - m).max(1), bottom: ok_top + btn_h };
@@ -2989,7 +2988,7 @@ mod tests {
             assert_eq!(lay.ok.top, lay.repo.bottom + m);
             assert_eq!(lay.ok.right, cw - m);
             assert_eq!(ch - lay.ok.bottom, m);
-            assert_eq!(lay.ok.bottom - lay.ok.top, sc(dpi, ABOUT_BTN_H_DIP));
+            assert_eq!(lay.ok.bottom - lay.ok.top, sc(dpi, crate::BTN_H_FOOTER));
             assert_eq!(lay.ok.right - lay.ok.left, sc(dpi, ABOUT_BTN_W_DIP));
             assert!(lay.desc.left == m && lay.license.left == m && lay.repo.left == m);
             assert!(lay.ok.top >= lay.repo.bottom);

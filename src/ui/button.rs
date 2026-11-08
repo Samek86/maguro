@@ -33,8 +33,9 @@ pub(crate) struct ButtonVisual {
     pub focus: bool,
 }
 
-/// Where the focus ring is drawn. Parent-painted buttons have room outside the face.
-/// An owner-draw control clips to its window, so the ring is kept inside the rect.
+/// Owner-draw controls clip to their window, so they clear that rect before the face.
+/// Parent-painted buttons already have the ground behind them. Focus does not add a
+/// second frame: the face stays the full rect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FocusRing {
     Outside,
@@ -246,16 +247,17 @@ impl<T: Copy + Eq> Tracker<T> {
     }
 }
 
-fn reach(dpi: i32) -> i32 {
-    px(dpi, FOCUS_GAP) + 1
-}
-
-fn inflate(r: RECT, d: i32) -> RECT {
-    RECT { left: r.left - d, top: r.top - d, right: r.right + d, bottom: r.bottom + d }
-}
-
-fn deflate(r: RECT, d: i32) -> RECT {
-    RECT { left: r.left + d, top: r.top + d, right: r.right - d, bottom: r.bottom - d }
+/// Focus keeps the same rounded face. A secondary or danger border turns accent.
+/// A primary face is already accent, so focus does not add another line.
+fn focus_colors(mut colors: ButtonColors, focused: bool) -> ButtonColors {
+    if focused {
+        if let Some(border) = colors.border {
+            if colors.fill != Some(border) {
+                colors.border = Some(ACCENT);
+            }
+        }
+    }
+    colors
 }
 
 /// Paint one button. `ground` is the colour already behind `rect` (or the colour
@@ -266,30 +268,20 @@ pub(crate) unsafe fn paint_button(dc: HDC, rect: RECT, kind: ButtonKind, visual:
         return;
     }
     let dark = ui_tokens().dark;
-    let colors = button_colors(kind, visual.state, dark, ground);
     let focused = visual.focus && visual.state != ButtonState::Disabled;
-    let inset = reach(dpi);
-    let face = if ring == FocusRing::Inside && focused { deflate(rect, inset) } else { rect };
+    let colors = focus_colors(button_colors(kind, visual.state, dark, ground), focused);
     if ring == FocusRing::Inside {
         crate::fill(dc, rect, ground);
     }
-    if focused && ring == FocusRing::Inside {
-        crate::frame(dc, rect, 1, ACCENT);
+    if let Some(fill) = colors.fill {
+        let border = colors.border.filter(|c| *c != fill);
+        crate::aa_rfill(dc, rect, px(dpi, RADIUS).max(1), fill, border, ground);
     }
-    if face.right > face.left && face.bottom > face.top {
-        if let Some(fill) = colors.fill {
-            let border = colors.border.filter(|c| *c != fill);
-            crate::aa_rfill(dc, face, px(dpi, RADIUS).max(1), fill, border, ground);
+    if !label.is_empty() {
+        crate::text(dc, rect, label, font, colors.ink, DT_CENTER);
+        if colors.underline {
+            underline(dc, rect, label, font, colors.ink);
         }
-        if !label.is_empty() {
-            crate::text(dc, face, label, font, colors.ink, DT_CENTER);
-            if colors.underline {
-                underline(dc, face, label, font, colors.ink);
-            }
-        }
-    }
-    if focused && ring == FocusRing::Outside {
-        crate::frame(dc, inflate(rect, inset), 1, ACCENT);
     }
 }
 
@@ -383,6 +375,15 @@ mod tests {
         let link_down = button_colors(ButtonKind::Link, ButtonState::Pressed, true, BG_DARK);
         assert_eq!(link_down.ink, ACCENT_PRESSED);
         assert!(link_down.underline);
+
+        let focused_primary = focus_colors(button_colors(ButtonKind::Primary, ButtonState::Normal, false, GROUND), true);
+        assert_eq!(focused_primary.fill, Some(ACCENT));
+        assert_eq!(focused_primary.border, Some(ACCENT));
+        let focused_secondary = focus_colors(button_colors(ButtonKind::Secondary, ButtonState::Normal, false, GROUND), true);
+        assert_eq!(focused_secondary.border, Some(ACCENT));
+        assert_ne!(focused_secondary.fill, Some(ACCENT));
+        let resting_secondary = focus_colors(button_colors(ButtonKind::Secondary, ButtonState::Normal, false, GROUND), false);
+        assert_eq!(resting_secondary.border, Some(LINE_LIGHT));
 
         let faded = button_colors(ButtonKind::Primary, ButtonState::Disabled, false, GROUND);
         assert_eq!(faded.fill, Some(crate::blend(GROUND, ACCENT, DISABLED_ALPHA)));

@@ -580,7 +580,7 @@ fn geo(rc: RECT, sn: &Snap) -> Geo {
     let footer = RECT { left: 0, top: rc.bottom - foot_h, right: rc.right, bottom: rc.bottom };
     let content = RECT { left: nav_w, top: 0, right: rc.right, bottom: footer.top };
     let search = RECT { left: sc(dpi, 8), top: sc(dpi, SEARCH_TOP_DIP), right: nav_w - sc(dpi, 8), bottom: sc(dpi, SEARCH_TOP_DIP + SEARCH_FRAME_DIP) };
-    let close = right_box(footer, sc(dpi, 88), sc(dpi, 32), sc(dpi, 16));
+    let close = right_box(footer, sc(dpi, 88), sc(dpi, crate::BTN_H_FOOTER), sc(dpi, 16));
     let hint = RECT { left: sc(dpi, 16), top: footer.top, right: close.left - sc(dpi, 8), bottom: footer.bottom };
     let q = sn.query.as_str();
     let mut show = [false; PAGE_N];
@@ -753,7 +753,7 @@ fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str
     let pack_rows = if win11_view { crate::shell::ctxpack::ui_rows(&pack_on, rq) } else { Vec::new() };
     let reset_w = sc(dpi, 220);
     let refresh_w = sc(dpi, 140);
-    let bh = sc(dpi, 32);
+    let bh = sc(dpi, crate::BTN_H_FOOTER);
     let reset = RECT { left: (right - reset_w).max(left), top: y, right, bottom: y + bh };
     let refresh = RECT {
         left: (reset.left - gap - refresh_w).max(left),
@@ -884,11 +884,12 @@ fn card_item(rect: RECT, spec: Spec, dpi: i32) -> CardItem {
     let ctl = match spec.ctl {
         Ctl::Toggle(_) => right_box(rect, sc(dpi, 40), sc(dpi, 20), pad),
         Ctl::EvStatus | Ctl::WmStatus => RECT { left: rect.right - pad, top: rect.top, right: rect.right - pad, bottom: rect.bottom },
-        Ctl::EvAct => right_box(rect, sc(dpi, 200), sc(dpi, 32), pad),
+        Ctl::EvAct => right_box(rect, sc(dpi, 200), sc(dpi, crate::BTN_H_FOOTER), pad),
         Ctl::WmPath => {
             let bw = sc(dpi, 108);
             let top = rect.top + sc(dpi, 12);
-            adv[0] = RECT { left: rect.right - pad - bw, top, right: rect.right - pad, bottom: top + sc(dpi, 32) };
+            let btn_h = sc(dpi, crate::BTN_H_FOOTER);
+            adv[0] = RECT { left: rect.right - pad - bw, top, right: rect.right - pad, bottom: top + btn_h };
             let eh = sc(dpi, 32);
             RECT { left: rect.left + pad, top: rect.bottom - sc(dpi, 12) - eh, right: rect.right - pad, bottom: rect.bottom - sc(dpi, 12) }
         }
@@ -896,10 +897,10 @@ fn card_item(rect: RECT, spec: Spec, dpi: i32) -> CardItem {
         Ctl::Lang | Ctl::Face | Ctl::Start | Ctl::Theme | Ctl::ViewMode | Ctl::StartDir | Ctl::DelMode | Ctl::NewName | Ctl::Drop | Ctl::Layout | Ctl::SideOrder => {
             right_box(rect, sc(dpi, 230), sc(dpi, 32), pad)
         }
-        Ctl::Sess => right_box(rect, sc(dpi, 108), sc(dpi, 32), pad),
+        Ctl::Sess => right_box(rect, sc(dpi, 108), sc(dpi, crate::BTN_H_FOOTER), pad),
         Ctl::About => RECT { left: rect.right - pad, top: rect.top, right: rect.right - pad, bottom: rect.top },
         Ctl::Accent => {
-            let btn = right_box(rect, sc(dpi, 108), sc(dpi, 32), pad);
+            let btn = right_box(rect, sc(dpi, 108), sc(dpi, crate::BTN_H_FOOTER), pad);
             let mut x = btn.left - sc(dpi, 10) - sc(dpi, 22);
             for _ in 0..6 {
                 sw.push(RECT { left: x, top: (rect.top + rect.bottom) / 2 - sc(dpi, 11), right: x + sc(dpi, 22), bottom: (rect.top + rect.bottom) / 2 + sc(dpi, 11) });
@@ -919,9 +920,10 @@ fn card_item(rect: RECT, spec: Spec, dpi: i32) -> CardItem {
             let total = bw * n + gap * (n - 1);
             let mut x = rect.right - pad - total;
             // The settings-file card is taller so the path can use the full width under the buttons.
-            let top = if spec.ctl == Ctl::Adv { rect.top + sc(dpi, 14) } else { (rect.top + rect.bottom) / 2 - sc(dpi, 16) };
+            let btn_h = sc(dpi, crate::BTN_H_FOOTER);
+            let top = if spec.ctl == Ctl::Adv { rect.top + sc(dpi, 14) } else { (rect.top + rect.bottom) / 2 - btn_h / 2 };
             for i in 0..n as usize {
-                adv[i] = RECT { left: x, top, right: x + bw, bottom: top + sc(dpi, 32) };
+                adv[i] = RECT { left: x, top, right: x + bw, bottom: top + btn_h };
                 x += bw + gap;
             }
             RECT { left: adv[0].left, top: adv[0].top, right: rect.right - pad, bottom: adv[0].bottom }
@@ -981,7 +983,7 @@ fn key_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str
     let rows: Vec<usize> = (0..crate::keys::len()).filter(|&i| {
         (rq.is_empty() || key_hit_i(i, rq)) && (sn.keyq.is_empty() || key_hit_i(i, &sn.keyq))
     }).collect();
-    let reset = right_box(RECT { left, top: y, right, bottom: y + sc(dpi, 40) }, sc(dpi, 210), sc(dpi, 32), 0);
+    let reset = right_box(RECT { left, top: y, right, bottom: y + sc(dpi, 40) }, sc(dpi, 210), sc(dpi, crate::BTN_H_FOOTER), 0);
     let edit = RECT { left, top: reset.top, right: reset.left - sc(dpi, 8), bottom: reset.bottom };
     g.items.push(Item::KeyBar { edit, reset });
     y += sc(dpi, 48);
@@ -1434,8 +1436,8 @@ mod tests {
         }).expect("ctx bar");
         assert_eq!(reset.right - reset.left, 220);
         assert_eq!(refresh.right - refresh.left, 140);
-        assert_eq!(reset.bottom - reset.top, 32);
-        assert_eq!(refresh.bottom - refresh.top, 32);
+        assert_eq!(reset.bottom - reset.top, crate::BTN_H_FOOTER);
+        assert_eq!(refresh.bottom - refresh.top, crate::BTN_H_FOOTER);
         assert_eq!(refresh.top, reset.top);
         assert_eq!(reset.left - refresh.right, 8);
         assert!(refresh.left >= g.content.left);
