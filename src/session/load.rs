@@ -220,11 +220,12 @@ pub(crate) fn rename_session(old: &Path, stem: &str) -> Result<PathBuf> {
 /// ✕ or Delete. The shell deletes it (Recycle Bin when it can, with its confirmation when that is on).
 /// Those dialogs run a modal loop, so the current session is read again afterwards. True means the file is gone.
 pub(crate) unsafe fn delete_session(path: &Path) -> bool {
-    let (main, before_paths) = app(|a| {
+    let (main, before_paths, file_before) = app(|a| {
         let paths: Vec<String> = a.s.tabs.iter().map(|t| t.session.clone()).collect();
-        (a.main, paths)
+        (a.main, paths, a.s.file.clone())
     });
     let linked: Vec<bool> = before_paths.iter().map(|p| same_file(path, p)).collect();
+    let file_linked = same_file(path, &file_before);
     let op = (|| -> Result<IFileOperation> {
         let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
         op.SetOwnerWindow(main)?;
@@ -249,13 +250,12 @@ pub(crate) unsafe fn delete_session(path: &Path) -> bool {
             a.lost = 0;
         }
         let now: Vec<String> = a.s.tabs.iter().map(|t| t.session.clone()).collect();
-        let Some(next) = sessions_after_delete(&before_paths, &now, &linked, deleted) else { return false };
-        for (i, p) in next.into_iter().enumerate() {
-            if let Some(t) = a.s.tabs.get_mut(i) {
-                t.session = p;
-            }
+        let next = sessions_after_delete(&before_paths, &now, &linked, deleted);
+        let clear_file = deleted && file_linked && a.s.file == file_before;
+        if next.is_none() && !clear_file {
+            return false;
         }
-        settle_sessions(&mut a.s);
+        forget_deleted_session(&mut a.s, &file_before, clear_file, next);
         true
     });
     if relinked {

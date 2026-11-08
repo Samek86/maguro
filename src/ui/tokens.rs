@@ -209,7 +209,7 @@ pub(crate) fn px(dpi: i32, dip: i32) -> i32 {
 impl Tokens {
     /// Accent mixed into the card. Light uses white, which is the light card.
     pub(crate) fn sel_mist(self) -> u32 {
-        crate::blend(self.card, ACCENT, self.mist)
+        crate::blend(self.card, crate::live_accent(), self.mist)
     }
 }
 

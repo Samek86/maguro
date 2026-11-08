@@ -744,7 +744,7 @@ unsafe fn draw(dc: HDC, rc: RECT, g: &Geo, sn: &Snap, h: HWND) {
         }
         if on {
             let bar = RECT { left: r.left, top: r.top + sc(dpi, 10), right: r.left + sc(dpi, 3), bottom: r.bottom - sc(dpi, 10) };
-            crate::paint_wash(dc, bar, dpi, crate::ACCENT, t.bg);
+            crate::paint_wash(dc, bar, dpi, crate::live_accent(), t.bg);
         }
         crate::paint_label(dc, RECT { left: r.left + sc(dpi, 14), ..r }, tx(PAGES[i]), sn.font);
     }
@@ -1046,7 +1046,7 @@ unsafe fn draw_tick(dc: HDC, r: RECT, tick: crate::shell::ctxmenu::Tick, dpi: i3
     match tick {
         crate::shell::ctxmenu::Tick::On => crate::paint_check(dc, r, true, hot, dpi, ground),
         crate::shell::ctxmenu::Tick::Off => crate::paint_check(dc, r, false, hot, dpi, ground),
-        crate::shell::ctxmenu::Tick::Mixed => crate::draw_tick(dc, r, tick, crate::ACCENT, dpi, crate::icon_font(), ground, hot),
+        crate::shell::ctxmenu::Tick::Mixed => crate::draw_tick(dc, r, tick, crate::live_accent(), dpi, crate::icon_font(), ground, hot),
     }
 }
 

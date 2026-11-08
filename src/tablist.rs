@@ -124,7 +124,6 @@ struct State {
     dpi: i32,
     hint: RECT,
     search: RECT,
-    chord: RECT,
     frame: RECT,
     head: RECT,
     list: RECT,
@@ -163,7 +162,6 @@ impl State {
             dpi: 96,
             hint: RECT::default(),
             search: RECT::default(),
-            chord: RECT::default(),
             frame: RECT::default(),
             head: RECT::default(),
             list: RECT::default(),
@@ -526,6 +524,11 @@ pub(crate) fn fit_marked_path(text: &str, query: &str, avail: i32, measure: impl
     fit_marked_end(&mark_runs(&shown, query), avail, measure)
 }
 
+/// The list shortcut belongs in the description, not beside the filter.
+pub(crate) fn hint_with_chord(hint: &str, chord: &str) -> String {
+    if chord.is_empty() { hint.to_string() } else { format!("{hint} ({chord})") }
+}
+
 /// Chip rectangles inside the folder cell. `widths` are already capped at the cell width.
 pub(crate) fn place_chips(widths: &[i32], avail: i32, chip_h: i32, gap: i32) -> Vec<RECT> {
     let avail = avail.max(1);
@@ -692,28 +695,19 @@ pub(crate) struct FooterPlan {
 /// `width` is the status bar. `text_w` is the count string. `piece_w` are key-hint segments.
 /// `gap` sits between the count and the keys when they share a row.
 ///
-/// Keys that fit on one line stay on that line and the count shrinks. Keys that do not fit wrap,
-/// and the count takes the row above them.
-pub(crate) fn plan_footer(width: i32, text_w: i32, piece_w: &[i32], gap: i32) -> FooterPlan {
+/// The count takes the top row. Key chips wrap on the rows under it, so they are not
+/// pushed against the window edge to make room for the count.
+pub(crate) fn plan_footer(width: i32, text_w: i32, piece_w: &[i32], _gap: i32) -> FooterPlan {
     let width = width.max(1);
     let text_w = text_w.max(0);
-    let gap = gap.max(0);
     let keys: i32 = piece_w.iter().map(|w| (*w).max(0)).sum();
     if piece_w.is_empty() || keys == 0 {
         return FooterPlan { count_w: width.min(text_w), count_on_keys: true, key_rows: Vec::new(), rows: 1 };
     }
-    if keys <= width {
-        let room = if text_w == 0 { 0 } else { width.saturating_sub(keys).saturating_sub(gap) };
-        return FooterPlan {
-            count_w: room.min(text_w),
-            count_on_keys: true,
-            key_rows: vec![FooterRow { start: 0, end: piece_w.len(), width: keys }],
-            rows: 1,
-        };
-    }
     let key_rows = wrap_runs(piece_w, width);
     let n = key_rows.len().max(1) as i32;
-    FooterPlan { count_w: width.min(text_w), count_on_keys: false, key_rows, rows: n + 1 }
+    let count_row = if text_w > 0 { 1 } else { 0 };
+    FooterPlan { count_w: width.min(text_w), count_on_keys: false, key_rows, rows: n + count_row }
 }
 
 fn status_caption(n: usize, q: &str) -> String {
@@ -1162,30 +1156,20 @@ unsafe fn layout(hwnd: HWND) {
     let btn_h = px(dpi, BTN_H_FOOTER);
     let y0 = px(dpi, PAD_BODY_Y);
     let hint = RECT { left: pad, top: y0, right: width - pad, bottom: y0 + hint_h };
-    let search = RECT { left: pad, top: hint.bottom + gap, right: width - pad, bottom: hint.bottom + gap + search_h };
+    let search_top = hint.bottom + gap;
+    let search = RECT { left: pad, top: search_top, right: width - pad, bottom: search_top + search_h };
 
     let dc = GetDC(Some(hwnd));
     let font = body_font();
     let bold = bold_ui_font();
     let small = meta_font();
-    let chord = chord_label();
-    let inner = field_edit_rect(search, dpi);
-    let chord_w = if chord.is_empty() { 0 } else { text_px(dc, small, &chord) + px(dpi, BTN_PAD_X) };
-    let chord_r = if chord_w == 0 {
-        RECT::default()
-    } else {
-        let right = inner.right;
-        let h = px(dpi, 16);
-        let top = search.top + (search_h - h) / 2;
-        RECT { left: (right - chord_w).max(inner.left), top, right, bottom: top + h }
-    };
-    let edit_left = inner.left + px(dpi, 18);
-    let edit_right = if chord_r.right > chord_r.left { chord_r.left - px(dpi, SPACE_4) } else { inner.right };
-    let edit_r = RECT { left: edit_left, top: inner.top, right: edit_right.max(edit_left + 1), bottom: inner.bottom };
-
-    let rows_all = snapshot();
     let (edit, prev_q, prev_sel) = with_st(|s| (s.edit, s.query.clone(), s.sel));
     let q = if edit.0.is_null() { prev_q.clone() } else { text_of(edit) };
+    let inner = field_edit_rect(search, dpi);
+    let edit_left = inner.left + px(dpi, 18);
+    let edit_r = RECT { left: edit_left, top: inner.top, right: inner.right.max(edit_left + 1), bottom: inner.bottom };
+
+    let rows_all = snapshot();
     let current = rows_all.iter().find(|r| r.current).map(|r| r.index).unwrap_or(0);
     let mut collapsed = with_st(|s| s.collapsed.clone());
     if prev_q.trim() != q.trim() {
@@ -1374,7 +1358,6 @@ unsafe fn layout(hwnd: HWND) {
         s.scroll = scroll;
         s.hint = hint;
         s.search = search;
-        s.chord = chord_r;
         s.frame = frame;
         s.head = head;
         s.list = list;
@@ -1692,7 +1675,6 @@ unsafe fn paint(dc: HDC, _rc: RECT) {
         dpi: s.dpi,
         hint: s.hint,
         search: s.search,
-        chord: s.chord,
         frame: s.frame,
         head: s.head,
         list: s.list,
@@ -1718,14 +1700,10 @@ unsafe fn paint(dc: HDC, _rc: RECT) {
     let t = ui_tokens();
     let dpi = st.dpi;
     paint_window(dc, _rc);
-    paint_meta(dc, st.hint, tr(Key::TabListHint), st.small);
+    paint_meta(dc, st.hint, &hint_with_chord(tr(Key::TabListHint), &chord_label()), st.small);
     paint_field(dc, st.search, dpi, st.search_focus);
     let glyph = RECT { left: st.search.left + px(dpi, FIELD_INSET), top: st.search.top, right: st.search.left + px(dpi, 22), bottom: st.search.bottom };
     text(dc, glyph, ICON_SEARCH, st.icon, t.sub, DT_CENTER);
-    if st.chord.right > st.chord.left {
-        paint_chip(dc, st.chord, dpi, t.field_bg);
-        text(dc, st.chord, &chord_label(), st.small, t.sub, DT_CENTER);
-    }
     if st.frame.bottom > st.frame.top {
         crate::ui::paint_card(dc, st.frame, dpi);
     }
@@ -1751,7 +1729,7 @@ unsafe fn paint(dc: HDC, _rc: RECT) {
         fill(dc, r, bg);
         if row.current {
             let inset = px(dpi, 3).min((r.bottom - r.top) / 4);
-            fill(dc, RECT { left: r.left, top: r.top + inset, right: r.left + px(dpi, 3).max(2), bottom: r.bottom - inset }, crate::basket::CERULEAN);
+            fill(dc, RECT { left: r.left, top: r.top + inset, right: r.left + px(dpi, 3).max(2), bottom: r.bottom - inset }, crate::live_accent());
         }
         fill(dc, RECT { top: r.bottom - 1, bottom: r.bottom, ..r }, t.line);
         let mark = if row.open { "\u{E70D}" } else { "\u{E76C}" };
@@ -1781,7 +1759,6 @@ struct PaintSnap {
     dpi: i32,
     hint: RECT,
     search: RECT,
-    chord: RECT,
     frame: RECT,
     head: RECT,
     list: RECT,
@@ -1809,8 +1786,9 @@ unsafe fn kbd_piece_widths(dc: HDC, small: HFONT, dpi: i32) -> Vec<i32> {
     kbd_segs(tr(Key::TabListKeys))
         .iter()
         .map(|seg| match seg {
-            KbdSeg::Text(s) => text_px(dc, small, s),
-            KbdSeg::Key(s) => text_px(dc, small, s) + sc(dpi, 8),
+            // Extra room so DrawText does not ellipsize a label that measured exact.
+            KbdSeg::Text(s) => text_px(dc, small, s) + sc(dpi, 8),
+            KbdSeg::Key(s) => text_px(dc, small, s) + sc(dpi, 12),
         })
         .collect()
 }
@@ -1829,24 +1807,22 @@ unsafe fn paint_footer(dc: HDC, status: RECT, caption: &str, st: &PaintSnap) {
         let count = RECT { left: status.left, top: status.top, right: status.left + plan.count_w, bottom };
         paint_meta(dc, count, caption, st.small);
     }
-    let mut y = if plan.count_on_keys { status.top } else { status.top + line_h };
+    let mut y = if plan.count_w > 0 && !plan.count_on_keys { status.top + line_h } else { status.top };
     let saved = SaveDC(dc);
     IntersectClipRect(dc, status.left, status.top, status.right, status.bottom);
     for row in &plan.key_rows {
         let fits = row.width <= width;
         let mut x = if fits { status.right - row.width } else { status.left };
-        let row_bot = y + line_h;
         for i in row.start..row.end {
             let w = widths.get(i).copied().unwrap_or(0);
-            let r = RECT { left: x, top: y, right: x + w, bottom: row_bot };
+            let band = sc(dpi, 18);
+            let top = y + (line_h - band) / 2;
+            let r = RECT { left: x, top, right: x + w, bottom: top + band };
             match segs.get(i) {
-                Some(KbdSeg::Text(s)) => paint_meta(dc, r, s, st.small),
+                Some(KbdSeg::Text(s)) => crate::text_visible(dc, r, s, st.small, t.sub, DT_LEFT),
                 Some(KbdSeg::Key(s)) => {
-                    let h = sc(dpi, 14);
-                    let top = y + (line_h - h) / 2;
-                    let kr = RECT { left: r.left, top, right: r.right, bottom: top + h };
-                    paint_chip(dc, kr, dpi, t.bg);
-                    text(dc, kr, s, st.small, t.sub, DT_CENTER);
+                    paint_chip(dc, r, dpi, t.bg);
+                    crate::text_visible(dc, r, s, st.small, t.sub, DT_CENTER);
                 }
                 None => {}
             }
@@ -1957,13 +1933,16 @@ unsafe fn paint_chips(dc: HDC, row: &Row, st: &PaintSnap, ground: u32) {
                 let Some(leaf) = chip.tabs.iter().find(|t| t.index == k) else { continue };
                 let label = path_text(&leaf.name, &leaf.tip);
                 let bar = sc(dpi, 2).max(2);
-                let mark_w = sc(dpi, 14);
-                let text_r = RECT { left: r.left + bar + mark_w, right: r.right - sc(dpi, 4), ..r };
+                let glyph = "\u{E73E}";
+                let glyph_w = text_px(dc, st.icon, glyph).max(sc(dpi, 14));
+                let gap = sc(dpi, 6);
+                let text_r = RECT { left: r.left + bar + glyph_w + gap, right: r.right - sc(dpi, 4), ..r };
                 if leaf.current {
-                    paint_wash(dc, r, dpi, blend(ground, crate::basket::CERULEAN, 0.18), ground);
-                    fill(dc, RECT { right: r.left + bar, ..r }, crate::basket::CERULEAN);
-                    let mark = RECT { left: r.left + bar, right: r.left + bar + mark_w, ..r };
-                    text(dc, mark, "\u{E73E}", st.icon, crate::basket::CERULEAN, DT_CENTER);
+                    let accent = crate::live_accent();
+                    paint_wash(dc, r, dpi, blend(ground, accent, 0.18), ground);
+                    fill(dc, RECT { right: r.left + bar, ..r }, accent);
+                    let mark = RECT { left: r.left + bar, right: r.left + bar + glyph_w, ..r };
+                    text(dc, mark, glyph, st.icon, accent, DT_CENTER);
                     paint_marked(dc, text_r, label, st.bold, &st.query, ground);
                 } else {
                     paint_chip(dc, r, dpi, ground);
@@ -1994,8 +1973,9 @@ unsafe fn paint_summary(dc: HDC, row: &Row, st: &PaintSnap, ground: u32) {
     }
     let Some(label) = extra_label(row.extra) else { return };
     let dark = ui_tokens().dark;
-    let wash = if dark { blend(ground, crate::basket::CERULEAN, 0.45) } else { blend(ground, crate::basket::CERULEAN, 0.20) };
-    let ink = if dark { crate::basket::CERULEAN_MIST } else { crate::basket::CERULEAN_DEEP };
+    let accent = crate::live_accent();
+    let wash = if dark { blend(ground, accent, 0.45) } else { blend(ground, accent, 0.20) };
+    let ink = if dark { blend(accent, 0xFFFFFF, 0.55) } else { blend(accent, 0x000000, 0.28) };
     for b in st.badges.iter().filter(|b| b.tab == row.index) {
         let r = b.rect;
         if r.bottom <= st.list.top || r.top >= st.list.bottom || r.right <= r.left {
@@ -2018,16 +1998,17 @@ unsafe fn paint_marked(dc: HDC, r: RECT, s: &str, font: HFONT, query: &str, grou
     let t = ui_tokens();
     if runs.iter().all(|run| !run.hit) {
         if path {
-            text_path(dc, r, s, font, t.text, DT_LEFT);
+            text_chip(dc, r, s, font, t.text, DT_LEFT | DT_PATH_ELLIPSIS);
         } else {
-            paint_label(dc, r, s, font);
+            text_chip(dc, r, s, font, t.text, DT_LEFT | DT_END_ELLIPSIS);
         }
         return;
     }
     let saved = SaveDC(dc);
     IntersectClipRect(dc, r.left, r.top, r.right, r.bottom);
-    let wash = if t.dark { blend(ground, crate::basket::CERULEAN, 0.32) } else { blend(t.card, crate::basket::CERULEAN, 0.28) };
-    let ink = if t.dark { crate::basket::CERULEAN_MIST } else { crate::basket::CERULEAN_DEEP };
+    let accent = crate::live_accent();
+    let wash = if t.dark { blend(ground, accent, 0.32) } else { blend(t.card, accent, 0.28) };
+    let ink = if t.dark { blend(accent, 0xFFFFFF, 0.55) } else { blend(accent, 0x000000, 0.28) };
     let mut x = r.left;
     for run in &runs {
         if run.text.is_empty() {
@@ -2040,13 +2021,11 @@ unsafe fn paint_marked(dc: HDC, r: RECT, s: &str, font: HFONT, query: &str, grou
         let piece = RECT { left: x, top: r.top, right: (x + w).min(r.right), bottom: r.bottom };
         if run.hit {
             let m = line_metrics(dc, font);
-            let top = ink_line_top(r.top, r.bottom - r.top, m, ink_kind(&run.text));
+            let top = chip_ink_top(r.top, r.bottom - r.top, m);
             let band = RECT { left: x, top, right: x + w, bottom: top + m.height().max(1) };
             fill(dc, band, wash);
-            draw_ink_line(dc, piece, &run.text, font, ink, DT_LEFT | DT_NOCLIP);
-        } else {
-            draw_ink_line(dc, piece, &run.text, font, t.text, DT_LEFT | DT_NOCLIP);
         }
+        text_chip(dc, piece, &run.text, font, if run.hit { ink } else { t.text }, DT_LEFT | DT_NOCLIP);
         x += w;
     }
     let _ = RestoreDC(dc, saved);
@@ -2124,13 +2103,11 @@ fn tablist_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     });
                     SetCapture(h);
                     _ = InvalidateRect(Some(h), None, false);
+                    _ = SetFocus(Some(h));
                 } else if let Some(tab) = hit_chevron(x, y) {
                     with_st(|s| s.arm = None);
                     apply_fold(tab, None);
-                    let edit = with_st(|s| s.edit);
-                    if !edit.0.is_null() {
-                        _ = SetFocus(Some(edit));
-                    }
+                    _ = SetFocus(Some(h));
                 } else if let Some(chip) = hit_chip(x, y) {
                     with_st(|s| {
                         s.sel = chip.tab;
@@ -2138,16 +2115,14 @@ fn tablist_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     });
                     SetCapture(h);
                     _ = InvalidateRect(Some(h), None, false);
+                    _ = SetFocus(Some(h));
                 } else if let Some(tab) = hit_row(x, y) {
                     with_st(|s| {
                         s.sel = tab;
                         s.arm = None;
                     });
                     _ = InvalidateRect(Some(h), None, false);
-                    let edit = with_st(|s| s.edit);
-                    if !edit.0.is_null() {
-                        _ = SetFocus(Some(edit));
-                    }
+                    _ = SetFocus(Some(h));
                 }
             }
             WM_LBUTTONUP => {
@@ -2384,10 +2359,19 @@ unsafe fn place_name_edit() {
     place_edit(edit, field_edit_rect(field, dpi), true);
 }
 
+fn caret_end(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+unsafe fn select_end(edit: HWND, text: &str) {
+    let n = caret_end(text);
+    SendMessageW(edit, EM_SETSEL, Some(WPARAM(n)), Some(LPARAM(n as isize)));
+}
+
 unsafe fn begin_name_edit() {
     if name_editing() {
         let edit = with_st(|s| s.name_edit);
-        SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+        select_end(edit, &text_of(edit));
         return;
     }
     if with_st(|s| s.renaming.is_some()) {
@@ -2417,7 +2401,7 @@ unsafe fn begin_name_edit() {
     _ = SetWindowTextW(edit, &HSTRING::from(label.as_str()));
     layout(h);
     _ = SetFocus(Some(edit));
-    SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+    select_end(edit, &label);
     _ = InvalidateRect(Some(h), None, false);
 }
 
@@ -2619,29 +2603,34 @@ mod tests {
     }
 
     #[test]
-    fn footer_shrinks_the_count_before_clipping_keys() {
-        // The client is 840 DIP. 8 DIP of padding on each side leaves 824 for the status bar.
-        // The count keeps its width; the keys stay on the right. The extra client width is the folder column.
+    fn footer_keeps_the_keys_on_their_own_rows() {
         let wide_bar = plan_footer(824, 192, &[70, 80, 70, 64], 8);
-        assert_eq!(wide_bar.rows, 1);
-        assert!(wide_bar.count_on_keys);
+        assert!(!wide_bar.count_on_keys);
+        assert_eq!(wide_bar.rows, 2);
         assert_eq!(wide_bar.count_w, 192);
         assert_eq!(wide_bar.key_rows[0].width, 284);
 
-        // The old 560-wide bar (544 DIP) still fits the count beside the keys.
         let plan = plan_footer(544, 192, &[70, 80, 70, 64], 8);
-        assert_eq!(plan.rows, 1);
-        assert!(plan.count_on_keys);
-        assert_eq!(plan.count_w, 192);
-        assert_eq!(plan.key_rows[0].width, 284);
+        assert_eq!(plan.rows, 2);
         assert_eq!(plan.key_rows[0].end, 4);
 
-        // A long count gives up space. The three key pieces stay on the one row.
         let tight = plan_footer(360, 200, &[100, 100, 100], 8);
-        assert_eq!(tight.rows, 1);
-        assert!(tight.count_on_keys);
-        assert_eq!(tight.count_w, 52);
+        assert_eq!(tight.rows, 2);
+        assert_eq!(tight.count_w, 200);
         assert_eq!(tight.key_rows[0].width, 300);
+    }
+
+    #[test]
+    fn hint_puts_the_shortcut_in_the_description() {
+        assert_eq!(hint_with_chord("각 탭을 봅니다.", "Ctrl+Shift+L"), "각 탭을 봅니다. (Ctrl+Shift+L)");
+        assert_eq!(hint_with_chord("각 탭을 봅니다.", ""), "각 탭을 봅니다.");
+    }
+
+    #[test]
+    fn rename_caret_opens_at_the_utf16_end() {
+        assert_eq!(caret_end("Docs"), 4);
+        assert_eq!(caret_end("한글"), 2);
+        assert_eq!(caret_end("a\u{1F600}"), 3);
     }
 
     #[test]

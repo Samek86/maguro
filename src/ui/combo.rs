@@ -473,7 +473,7 @@ fn arrow_rgb(dark: bool, face_ink: u32) -> u32 {
 
 fn edge_of(hwnd: HWND, face: Face) -> u32 {
     let live = unsafe { IsWindowEnabled(hwnd).as_bool() && (is_hot(hwnd) || focused(hwnd) || dropped(hwnd)) };
-    if live { CERULEAN_BRAND } else { face.edge }
+    if live { crate::live_accent() } else { face.edge }
 }
 
 unsafe fn font_of(hwnd: HWND) -> HFONT {
@@ -557,11 +557,12 @@ unsafe fn paint_item(d: &DRAWITEMSTRUCT) {
     let face = current_face(d.hwndItem);
     let disabled = d.itemState.0 & ODS_DISABLED.0 != 0 || !IsWindowEnabled(d.hwndItem).as_bool();
     let selected = !disabled && d.itemState.0 & ODS_SELECTED.0 != 0;
-    let fill = if selected { CERULEAN_BRAND } else { face.fill };
+    let accent = crate::live_accent();
+    let fill = if selected { accent } else { face.fill };
     let ink = if disabled {
         super::pal().sub
     } else if selected {
-        on_color(CERULEAN_BRAND)
+        on_color(accent)
     } else {
         face.ink
     };

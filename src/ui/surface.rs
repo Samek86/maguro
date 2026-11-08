@@ -3,7 +3,7 @@
 //! [`paint_section_header`] is the name prompt's label, and the hook for later batches
 //! (favourites group titles, confirm headings).
 //!
-//! A text box is one 1px border: the token line at rest, cerulean when focused.
+//! A text box is one 1px border: the token line at rest, the current accent when focused.
 //! There is no second ring outside the field.
 
 use super::tokens::*;
@@ -35,10 +35,10 @@ pub(crate) unsafe fn paint_card_fill(dc: HDC, r: RECT, dpi: i32, fill: u32) {
     crate::aa_rfill(dc, r, px(dpi, RADIUS).max(1), fill, Some(t.line), t.bg);
 }
 
-/// The one border colour of a field. Focused is cerulean. Rest is the token line.
+/// The one border colour of a field. Focused is the current accent. Rest is the token line.
 /// Callers paint this on `r` itself. Nothing is drawn outside `r`.
-pub(crate) fn field_border(focused: bool, dark: bool) -> u32 {
-    if focused { ACCENT } else { tokens_for(dark).line }
+pub(crate) fn field_border(focused: bool, dark: bool, accent: u32) -> u32 {
+    if focused { accent } else { tokens_for(dark).line }
 }
 
 /// How a field is painted. `outset` is always 0: a focus state does not grow a second ring.
@@ -47,11 +47,11 @@ pub(crate) struct FieldChrome {
     pub outset: i32,
 }
 
-pub(crate) fn field_chrome(focused: bool, dark: bool) -> FieldChrome {
-    FieldChrome { border: field_border(focused, dark), outset: 0 }
+pub(crate) fn field_chrome(focused: bool, dark: bool, accent: u32) -> FieldChrome {
+    FieldChrome { border: field_border(focused, dark, accent), outset: 0 }
 }
 
-/// Single-line field. One 1px border on `r`: token line at rest, cerulean when focused.
+/// Single-line field. One 1px border on `r`: token line at rest, the current accent when focused.
 /// Corners blend into the window ground.
 pub(crate) unsafe fn paint_field(dc: HDC, r: RECT, dpi: i32, focused: bool) {
     paint_field_on(dc, r, dpi, focused, ui_tokens().bg);
@@ -63,7 +63,8 @@ pub(crate) unsafe fn paint_field_on(dc: HDC, r: RECT, dpi: i32, focused: bool, g
         return;
     }
     let t = ui_tokens();
-    let chrome = field_chrome(focused, t.dark);
+    let accent = crate::app(|a| a.s.accent_now());
+    let chrome = field_chrome(focused, t.dark, accent);
     let rad = px(dpi, RADIUS).max(1);
     crate::aa_rfill(dc, r, rad, t.field_bg, Some(chrome.border), ground);
 }
@@ -288,16 +289,18 @@ mod tests {
 
     #[test]
     fn field_is_one_border_and_never_grows_a_ring() {
-        let rest = field_chrome(false, false);
-        let focus = field_chrome(true, false);
-        let focus_dark = field_chrome(true, true);
+        let rest = field_chrome(false, false, ACCENT);
+        let focus = field_chrome(true, false, ACCENT);
+        let focus_dark = field_chrome(true, true, ACCENT);
+        let lavender = 0xA99BE0;
         assert_eq!(rest.outset, 0);
         assert_eq!(focus.outset, 0);
         assert_eq!(focus_dark.outset, 0);
         assert_eq!(rest.border, LINE_LIGHT);
-        assert_eq!(field_chrome(false, true).border, LINE_DARK);
+        assert_eq!(field_chrome(false, true, ACCENT).border, LINE_DARK);
         assert_eq!(focus.border, ACCENT);
         assert_eq!(focus_dark.border, ACCENT);
+        assert_eq!(field_chrome(true, false, lavender).border, lavender);
         assert_ne!(focus.border, ACCENT_HOVER_LIGHT);
         assert_ne!(focus.border, 0x2EC4A6);
     }

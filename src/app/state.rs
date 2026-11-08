@@ -802,6 +802,11 @@ fn refuse_reenter(msg: String) -> ! {
 /// In a release build, a nested call from a window proc is logged and that proc
 /// returns its fallback instead of crashing. See `app_try` for paint and hit-test.
 #[track_caller]
+/// The accent the user picked, light or dark. Paint uses this, not the cerulean constant.
+pub(crate) fn live_accent() -> u32 {
+    app(|a| a.s.accent_now())
+}
+
 pub(crate) fn app<R>(f: impl FnOnce(&mut App) -> R) -> R {
     let here = std::panic::Location::caller();
     match borrow_app(here, f) {

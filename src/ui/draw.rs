@@ -49,6 +49,33 @@ pub(crate) unsafe fn text_path(dc: HDC, mut r: RECT, s: &str, font: HFONT, rgb: 
     draw_line(dc, &mut r, s, font, rgb, align | DT_PATH_ELLIPSIS);
 }
 
+/// Folder-chip label. Same ellipsis rules as [`text`] / [`text_path`], placed by [`chip_ink_top`].
+pub(crate) unsafe fn text_chip(dc: HDC, r: RECT, s: &str, font: HFONT, rgb: u32, align: DRAW_TEXT_FORMAT) {
+    let mut w: Vec<u16> = s.encode_utf16().collect();
+    if w.is_empty() {
+        return;
+    }
+    let old = SelectObject(dc, font.into());
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, cref(rgb));
+    let m = line_metrics(dc, font);
+    let flags = without_vertical(align) | DT_SINGLELINE | DT_NOPREFIX;
+    let top = if m.ascent <= 0 { r.top } else { chip_ink_top(r.top, r.bottom - r.top, m) };
+    let mut placed = RECT { top, bottom: top.saturating_add(m.height().max(1)), ..r };
+    let noclip = align.0 & DT_NOCLIP.0 != 0;
+    let saved = if noclip { 0 } else { SaveDC(dc) };
+    if saved != 0 {
+        IntersectClipRect(dc, r.left, r.top, r.right, r.bottom);
+    }
+    DrawTextW(dc, &mut w, &mut placed, flags | DT_TOP);
+    if saved != 0 {
+        let _ = RestoreDC(dc, saved);
+    }
+    if !old.is_invalid() {
+        SelectObject(dc, old);
+    }
+}
+
 /// Which ink box `ink_line_top` centers. Chosen from the string, because one face
 /// (and one cached `HFONT`) draws Hangul, kana, and Latin with different ink.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +157,62 @@ pub(crate) fn ink_line_top(cell_top: i32, cell_h: i32, m: LineMetrics, kind: Ink
         InkKind::Em => 0,
     };
     vtop + nudge
+}
+
+/// DrawText top that centers the visible glyph in the cell.
+/// Latin uses the cap height, not the em box. The em box includes empty leading,
+/// so centering it leaves the letters high in a short key chip.
+pub(crate) fn visible_ink_top(cell_top: i32, cell_h: i32, m: LineMetrics, kind: InkKind) -> i32 {
+    if cell_h <= 0 || m.ascent <= 0 {
+        return cell_top;
+    }
+    match kind {
+        InkKind::Latin => {
+            let leading = m.internal_leading.clamp(0, m.ascent);
+            let cap = (m.ascent - leading).max(1);
+            let ink_top = cell_top + (cell_h - cap) / 2;
+            ink_top - leading
+        }
+        _ => cell_top + (cell_h - m.height().max(1)) / 2,
+    }
+}
+
+/// Top of a chip label. Centers the em square (`ascent` minus internal leading),
+/// so the shift follows the face: Malgun, Yu Gothic, and Segoe each measure differently.
+/// `ink_line_top` lifts Latin caps and leaves CJK on the em box, which sits high in a folder chip.
+pub(crate) fn chip_ink_top(cell_top: i32, cell_h: i32, m: LineMetrics) -> i32 {
+    if cell_h <= 0 || m.ascent <= 0 {
+        return cell_top;
+    }
+    let leading = m.internal_leading.clamp(0, m.ascent);
+    let ink_h = (m.ascent - leading).max(1);
+    cell_top + (cell_h - ink_h) / 2 - leading
+}
+
+/// One line centered on its visible ink. `ink_line_top` is for buttons and fields.
+pub(crate) unsafe fn text_visible(dc: HDC, r: RECT, s: &str, font: HFONT, rgb: u32, align: DRAW_TEXT_FORMAT) {
+    let mut w: Vec<u16> = s.encode_utf16().collect();
+    if w.is_empty() || r.bottom <= r.top {
+        return;
+    }
+    let old = SelectObject(dc, font.into());
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, cref(rgb));
+    let m = line_metrics(dc, font);
+    let flags = without_vertical(align) | DT_SINGLELINE | DT_NOPREFIX;
+    let top = if m.ascent <= 0 { r.top } else { visible_ink_top(r.top, r.bottom - r.top, m, ink_kind(s)) };
+    let mut placed = RECT { top, bottom: top.saturating_add(m.height().max(1)), ..r };
+    let saved = SaveDC(dc);
+    if saved != 0 {
+        IntersectClipRect(dc, r.left, r.top, r.right, r.bottom);
+    }
+    DrawTextW(dc, &mut w, &mut placed, flags | DT_TOP);
+    if saved != 0 {
+        let _ = RestoreDC(dc, saved);
+    }
+    if !old.is_invalid() {
+        SelectObject(dc, old);
+    }
 }
 
 /// Half of `descent / 2`, kept only when the tm box is off by more than that.
@@ -260,7 +343,7 @@ pub(crate) unsafe fn draw_tick(dc: HDC, r: RECT, tick: crate::shell::ctxmenu::Ti
 /// Checkbox on the token ground. On is cerulean. The mark is the shared icon font.
 pub(crate) unsafe fn paint_check(dc: HDC, r: RECT, on: bool, hot: bool, dpi: i32, ground: u32) {
     let tick = if on { crate::shell::ctxmenu::Tick::On } else { crate::shell::ctxmenu::Tick::Off };
-    draw_tick(dc, r, tick, super::ACCENT, dpi, super::icon_font(), ground, hot);
+    draw_tick(dc, r, tick, crate::live_accent(), dpi, super::icon_font(), ground, hot);
 }
 
 /// Multi-line text wrapped at `r`'s width. `calc` only measures, with the same font and flags.
@@ -1610,7 +1693,7 @@ mod kids_tests {
 
 #[cfg(test)]
 mod ink_tests {
-    use super::{ink_kind, ink_line_top, InkKind};
+    use super::{chip_ink_top, ink_kind, ink_line_top, visible_ink_top, InkKind};
     use crate::LineMetrics;
 
     fn m(ascent: i32, descent: i32, internal_leading: i32) -> LineMetrics {
@@ -1629,6 +1712,36 @@ mod ink_tests {
     }
     fn face12() -> LineMetrics {
         m(12, 3, 3)
+    }
+
+    #[test]
+    fn folder_chip_text_drops_by_the_face_metrics() {
+        // Visible em square, not the Latin lift. A taller leading (Yu vs Malgun) drops further.
+        let drop = |metrics: LineMetrics, cell: i32| {
+            chip_ink_top(0, cell, metrics) - ink_line_top(0, cell, metrics, InkKind::Latin)
+        };
+        assert!(drop(malgun11(), 22) > 0);
+        assert!(drop(yu11(), 22) > 0);
+        assert!(drop(segoe11(), 22) > 0);
+        assert_ne!(drop(malgun11(), 22), drop(face12(), 24));
+        let face = malgun11();
+        let top = chip_ink_top(0, 22, face);
+        let ink_top = top + face.internal_leading;
+        let ink_h = face.ascent - face.internal_leading;
+        let above = ink_top;
+        let below = 22 - (ink_top + ink_h);
+        assert!((above - below).abs() <= 1, "above {above} below {below}");
+    }
+
+    #[test]
+    fn latin_caps_are_centered_in_an_18px_key_chip() {
+        let face = face12();
+        let top = visible_ink_top(0, 18, face, InkKind::Latin);
+        let cap_top = top + face.internal_leading;
+        let cap_h = face.ascent - face.internal_leading;
+        let above = cap_top;
+        let below = 18 - (cap_top + cap_h);
+        assert!((above - below).abs() <= 1, "above {above} below {below}");
     }
 
     #[test]

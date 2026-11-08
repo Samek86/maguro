@@ -13,13 +13,13 @@ pub(crate) struct SegmentColors {
 }
 
 pub(crate) fn segment_colors(selected: bool, state: ButtonState, dark: bool) -> SegmentColors {
+    segment_colors_for(selected, state, dark, ACCENT)
+}
+
+pub(crate) fn segment_colors_for(selected: bool, state: ButtonState, dark: bool, accent: u32) -> SegmentColors {
     let t = tokens_for(dark);
     let (fill, border, ink, bold) = if selected {
-        let c = match state {
-            ButtonState::Hover => t.accent_hover,
-            ButtonState::Pressed => ACCENT_PRESSED,
-            _ => ACCENT,
-        };
+        let c = crate::accent_face(accent, state, dark);
         (c, Some(c), WHITE, true)
     } else {
         let (fill, border) = match state {
@@ -45,7 +45,7 @@ pub(crate) unsafe fn paint_segment(dc: HDC, r: RECT, label: &str, selected: bool
         return;
     }
     let dark = ui_tokens().dark;
-    let colors = segment_colors(selected, visual.state, dark);
+    let colors = segment_colors_for(selected, visual.state, dark, crate::live_accent());
     let rad = px(dpi, RADIUS).max(1);
     crate::aa_rfill(dc, r, rad, colors.fill, colors.border.filter(|c| *c != colors.fill), ground);
     if label.is_empty() {

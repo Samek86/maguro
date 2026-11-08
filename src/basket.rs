@@ -1458,7 +1458,7 @@ unsafe fn paint(h: HWND, dc: HDC, rc: RECT) {
                 right: row.left + px(dpi, 3).max(2),
                 bottom: row.bottom - inset,
             };
-            fill(dc, bar, ACCENT);
+            fill(dc, bar, crate::live_accent());
         }
         let (icon, name_r, path_r, kind_r) = row_cols(row, dpi);
         let file = entry_is_file(path, gone);

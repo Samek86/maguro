@@ -1943,6 +1943,23 @@ pub(crate) fn fork_tab(src: &Tab, name: String) -> Tab {
     t
 }
 
+/// Clear the window path when it still names the file just deleted, then apply tab
+/// links and settle. Settle would otherwise copy that window path back onto the
+/// active tab, and the next save would write the missing file again.
+pub(crate) fn forget_deleted_session(s: &mut Session, file_before: &str, clear_file: bool, next_tabs: Option<Vec<String>>) {
+    if clear_file && s.file == file_before {
+        s.file.clear();
+    }
+    if let Some(next) = next_tabs {
+        for (i, p) in next.into_iter().enumerate() {
+            if let Some(t) = s.tabs.get_mut(i) {
+                t.session = p;
+            }
+        }
+    }
+    settle_sessions(s);
+}
+
 /// Tabs that still point at a deleted session lose that link.
 /// `linked[i]` was true when the delete began. A path that changed during the dialog stays.
 pub(crate) fn sessions_after_delete(before: &[String], now: &[String], linked: &[bool], deleted: bool) -> Option<Vec<String>> {
@@ -3647,6 +3664,21 @@ mod session_assoc_tests {
         // Tab 1 was pointed somewhere else while the dialog was up, so the rename leaves it.
         let moved_b = vec![before[0].clone(), r"E:\s\elsewhere.maguro".into()];
         assert!(sessions_after_rename(&before, &moved_b, &[false, true], r"D:\s\b2.maguro").is_none());
+    }
+
+    #[test]
+    fn deleted_session_is_not_restored_from_the_window_path() {
+        let mut s = Session::default();
+        s.paths[0] = r"C:\a".into();
+        s.anchor();
+        assert!(bind_tab_session(&mut s, 0, r"C:\s\qa.maguro"));
+        assert_eq!(s.file, r"C:\s\qa.maguro");
+        let before = vec![s.tabs[0].session.clone()];
+        let next = sessions_after_delete(&before, &before, &[true], true).unwrap();
+        let file_before = s.file.clone();
+        forget_deleted_session(&mut s, &file_before, true, Some(next));
+        assert_eq!(s.tabs[0].session, "");
+        assert_eq!(s.file, "");
     }
 
     #[test]

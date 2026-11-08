@@ -1749,11 +1749,20 @@ unsafe fn combo_face(hwnd: HWND) -> crate::ui::combo::Face {
 
 /// Changed-span wash. Light is 28% cerulean on white. Dark is 32% cerulean on the card.
 fn mark_wash(dark: bool, card: u32) -> u32 {
-    if dark { crate::blend(card, CERULEAN, 0.32) } else { crate::blend(0xFFFFFF, CERULEAN, 0.28) }
+    let accent = crate::live_accent();
+    let base = if accent == CERULEAN { CERULEAN } else { accent };
+    if dark { crate::blend(card, base, 0.32) } else { crate::blend(0xFFFFFF, base, 0.28) }
 }
 
 fn mark_ink(dark: bool) -> u32 {
-    if dark { MARK_INK_DARK } else { CERULEAN_DEEP }
+    let accent = crate::live_accent();
+    if accent == CERULEAN {
+        if dark { MARK_INK_DARK } else { CERULEAN_DEEP }
+    } else if dark {
+        crate::blend(accent, 0xFFFFFF, 0.40)
+    } else {
+        crate::blend(accent, 0x000000, 0.25)
+    }
 }
 
 fn row_hover(dark: bool) -> u32 {
@@ -2178,7 +2187,7 @@ unsafe fn paint_host(h: HWND) {
                 y += rule_stride(rule, dpi);
             }
             let _ = from;
-            crate::fill(dc, RECT { left: sc(dpi, 8), top: y, right: width - sc(dpi, 8), bottom: y + sc(dpi, 2) }, CERULEAN);
+            crate::fill(dc, RECT { left: sc(dpi, 8), top: y, right: width - sc(dpi, 8), bottom: y + sc(dpi, 2) }, crate::live_accent());
         }
         let content = rules_span(&rules, dpi);
         let view = rc.bottom - rc.top;

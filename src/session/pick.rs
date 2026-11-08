@@ -499,7 +499,7 @@ fn row_wash(on: bool, marked: bool, hot: bool, dark: bool) -> Option<u32> {
     if on {
         Some(t.sel_mist())
     } else if marked {
-        Some(crate::blend(t.card, crate::ACCENT, 0.10))
+        Some(crate::blend(t.card, crate::live_accent(), 0.10))
     } else if hot {
         Some(crate::blend(t.card, t.text, 0.04))
     } else {
@@ -850,7 +850,7 @@ unsafe fn paint(h: HWND) {
                 crate::paint_wash(dc, b.rect(), dpi, fill, t.card);
             }
             if on || marked {
-                crate::fill(dc, RECT { left: b.left, top: b.top + dip(dpi, 8), right: b.left + dip(dpi, 3), bottom: b.bottom - dip(dpi, 8) }, crate::ACCENT);
+                crate::fill(dc, RECT { left: b.left, top: b.top + dip(dpi, 8), right: b.left + dip(dpi, 3), bottom: b.bottom - dip(dpi, 8) }, crate::live_accent());
             }
             let name_r = RECT { left: b.left + dip(dpi, 12), top: b.top + dip(dpi, 6), right: b.right - dip(dpi, 8), bottom: b.top + dip(dpi, 28) };
             crate::paint_label(dc, name_r, &row.name, font);

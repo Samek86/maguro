@@ -1531,7 +1531,7 @@ pub(crate) unsafe fn paint_favs(h: HWND) {
                         right: row.left + s(3).max(2),
                         bottom: row.bottom - inset,
                     };
-                    fill(dc, bar, ACCENT);
+                    fill(dc, bar, crate::live_accent());
                 }
             }
             let indent = s(12) * f.depth.min(6) as i32;
@@ -1560,7 +1560,7 @@ pub(crate) unsafe fn paint_favs(h: HWND) {
             fill(dc, g.manage, t.sel_mist());
         }
         let manage = RECT { left: g.manage.left + s(8), ..g.manage };
-        text(dc, manage, tr(crate::Key::FavManage), font, ACCENT, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        text(dc, manage, tr(crate::Key::FavManage), font, crate::live_accent(), DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     });
 }
 

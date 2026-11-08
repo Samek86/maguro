@@ -633,7 +633,7 @@ unsafe fn paint_toast(h: HWND, dc: HDC, rc: RECT) {
     let t = crate::ui_tokens();
     let lay = toast_layout((rc.right - rc.left).max(0), (rc.bottom - rc.top).max(0), dpi);
     crate::paint_window(dc, rc);
-    crate::fill(dc, RECT { bottom: rc.top + crate::px(dpi, 3).max(2), ..rc }, crate::ACCENT);
+    crate::fill(dc, RECT { bottom: rc.top + crate::px(dpi, 3).max(2), ..rc }, crate::live_accent());
     crate::ui::paint_card(dc, lay.icon, dpi);
     if let Some((list, idx, dim)) = crate::shell_icon(&path, file) {
         let icon_px = crate::px(dpi, 16);

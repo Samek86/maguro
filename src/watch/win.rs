@@ -13,7 +13,7 @@ use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificL
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
-use super::model::{format_civil, status_color, Row, Status, CHROME};
+use super::model::{format_civil, status_color, Row, Status};
 use crate::imports::*;
 use crate::{px, BTN_GAP, BTN_H_TOOL, BTN_MIN_W, BTN_PAD_X, FONT_META_PX, FONT_PX, PAD_BODY_X, PAD_BODY_Y, RADIUS, SPACE_4, SPACE_8};
 
@@ -668,7 +668,7 @@ unsafe fn paint(h: HWND, dc: HDC, rc: RECT) {
     crate::paint_meta(dc, left, &summary, small);
     crate::text(dc, right, crate::tr(crate::Key::WatchFoot), small, t.sub, DT_RIGHT);
     if drag {
-        crate::frame(dc, rc, px(dpi, 2).max(2), CHROME);
+        crate::frame(dc, rc, px(dpi, 2).max(2), crate::live_accent());
     }
 }
 

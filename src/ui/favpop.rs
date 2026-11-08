@@ -13,7 +13,7 @@ use super::{
     blend, buffered, button_colors, clear_icon_refresh, drop_pop_fav_tip, drop_side, fav_chevron_rect, fav_popup_can_drop, fav_row_editable, files_section_label, fill, hide_pop_fav_tip, note_side,
     paint_button, paint_card, paint_fav_head, paint_fav_row, paint_field, paint_window, pal, pins_section_label, place_edit, popup_rows, show_pop_fav_tip, text, tip_drop, tip_enter, tip_leave,
     draw_line_icon, LineIcon,
-    tip_screen_rect, ui_tokens, ACCENT, BTN_GAP, BTN_H_FOOTER, BTN_H_TOOL, BTN_MIN_W, ButtonKind, ButtonVisual, FIELD_H, FIELD_PAD_X, FONT_ICON_PX, FONT_META_PX, FONT_PX, FocusRing, PAD_BODY_X, PAD_BODY_Y, RADIUS,
+    tip_screen_rect, ui_tokens, BTN_GAP, BTN_H_FOOTER, BTN_H_TOOL, BTN_MIN_W, ButtonKind, ButtonVisual, FIELD_H, FIELD_PAD_X, FONT_ICON_PX, FONT_META_PX, FONT_PX, FocusRing, PAD_BODY_X, PAD_BODY_Y, RADIUS,
     TrackEffect, Tracker, TipSide,
 };
 
@@ -1013,7 +1013,7 @@ unsafe fn paint(h: HWND) {
                     right: rect.left + px(dpi, 3).max(2),
                     bottom: rect.bottom - inset,
                 };
-                fill(dc, bar, ACCENT);
+                fill(dc, bar, crate::live_accent());
             } else if group {
                 fill(dc, *rect, blend(t.card, t.bg, 0.55));
             } else if hot_row == Some(i) {

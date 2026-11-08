@@ -202,47 +202,11 @@ pub(crate) unsafe fn add_file(path: &str) -> Option<&'static crate::Key> {
     None
 }
 
+/// One row for the folder the active pane is showing. Selected files stay out of
+/// this list. Add file is the button that watches those one by one.
 pub(crate) unsafe fn add_active() -> Option<&'static crate::Key> {
-    let selected = selected_paths();
-    if selected.is_empty() {
-        let path = crate::app(|a| a.s.paths.get(a.s.active).cloned().unwrap_or_default());
-        return add_folder(&path);
-    }
-    let mut err = None;
-    for path in selected {
-        let one = match engine::classify(&path) {
-            engine::Entry::File | engine::Entry::Unknown => add_file(&path),
-            engine::Entry::Dir => add_folder(&path),
-            engine::Entry::Missing => {
-                if leaf_name(&path).contains('.') {
-                    Some(&crate::Key::WatchFileMissing)
-                } else {
-                    Some(&crate::Key::WatchMissing)
-                }
-            }
-        };
-        if err.is_none() {
-            err = one;
-        }
-    }
-    err
-}
-
-unsafe fn selected_paths() -> Vec<String> {
-    let i = crate::active_pane();
-    let Some(fv) = crate::view_of::<IFolderView2>(i) else { return Vec::new() };
-    let Ok(arr) = fv.GetSelection(false) else { return Vec::new() };
-    let n = arr.GetCount().unwrap_or(0).min(10_000);
-    let mut out = Vec::new();
-    for k in 0..n {
-        let Ok(it) = arr.GetItemAt(k) else { continue };
-        let Ok(name) = it.GetDisplayName(SIGDN_FILESYSPATH) else { continue };
-        let path = crate::pwstr(name);
-        if model::canon_path(&path).is_some() {
-            out.push(path);
-        }
-    }
-    out
+    let path = crate::app(|a| a.s.paths.get(a.s.active).cloned().unwrap_or_default());
+    add_folder(&path)
 }
 
 pub(crate) unsafe fn toggle_run(id: u64) {

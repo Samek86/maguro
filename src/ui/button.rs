@@ -54,8 +54,13 @@ pub(crate) struct ButtonColors {
 /// Face colours for `kind` in `state`. `ground` is the paint behind the button,
 /// used for the disabled fade and for icon washes.
 pub(crate) fn button_colors(kind: ButtonKind, state: ButtonState, dark: bool, ground: u32) -> ButtonColors {
+    button_colors_for(kind, state, dark, ground, ACCENT)
+}
+
+/// Same colours as [`button_colors`], with the user's accent instead of the cerulean constant.
+pub(crate) fn button_colors_for(kind: ButtonKind, state: ButtonState, dark: bool, ground: u32, accent: u32) -> ButtonColors {
     let t = tokens_for(dark);
-    let resting = resting_colors(kind, &t, ground);
+    let resting = resting_colors(kind, &t, accent);
     if state == ButtonState::Disabled {
         return ButtonColors {
             fill: resting.fill.map(|c| crate::blend(ground, c, DISABLED_ALPHA)),
@@ -66,11 +71,7 @@ pub(crate) fn button_colors(kind: ButtonKind, state: ButtonState, dark: bool, gr
     }
     match kind {
         ButtonKind::Primary => {
-            let c = match state {
-                ButtonState::Hover => t.accent_hover,
-                ButtonState::Pressed => ACCENT_PRESSED,
-                _ => ACCENT,
-            };
+            let c = accent_face(accent, state, dark);
             ButtonColors { fill: Some(c), border: Some(c), ink: WHITE, underline: false }
         }
         ButtonKind::Secondary => {
@@ -96,22 +97,49 @@ pub(crate) fn button_colors(kind: ButtonKind, state: ButtonState, dark: bool, gr
         }
         ButtonKind::Link => {
             let (ink, underline) = match state {
-                ButtonState::Hover => (ACCENT, true),
-                ButtonState::Pressed => (ACCENT_PRESSED, true),
-                _ => (ACCENT, false),
+                ButtonState::Hover => (accent, true),
+                ButtonState::Pressed => (accent_face(accent, ButtonState::Pressed, dark), true),
+                _ => (accent, false),
             };
             ButtonColors { fill: None, border: None, ink, underline }
         }
     }
 }
 
-fn resting_colors(kind: ButtonKind, t: &Tokens, _ground: u32) -> ButtonColors {
+pub(crate) fn accent_face(accent: u32, state: ButtonState, dark: bool) -> u32 {
+    if accent == ACCENT {
+        return match state {
+            ButtonState::Hover => {
+                if dark {
+                    ACCENT_HOVER_DARK
+                } else {
+                    ACCENT_HOVER_LIGHT
+                }
+            }
+            ButtonState::Pressed => ACCENT_PRESSED,
+            _ => ACCENT,
+        };
+    }
+    match state {
+        ButtonState::Hover => {
+            if dark {
+                crate::blend(accent, 0xFFFFFF, 0.16)
+            } else {
+                crate::blend(accent, 0x000000, 0.12)
+            }
+        }
+        ButtonState::Pressed => crate::blend(accent, 0x000000, 0.22),
+        _ => accent,
+    }
+}
+
+fn resting_colors(kind: ButtonKind, t: &Tokens, accent: u32) -> ButtonColors {
     match kind {
-        ButtonKind::Primary => ButtonColors { fill: Some(ACCENT), border: Some(ACCENT), ink: WHITE, underline: false },
+        ButtonKind::Primary => ButtonColors { fill: Some(accent), border: Some(accent), ink: WHITE, underline: false },
         ButtonKind::Secondary => ButtonColors { fill: Some(t.card), border: Some(t.line), ink: t.text, underline: false },
         ButtonKind::Danger => ButtonColors { fill: Some(t.card), border: Some(t.line), ink: t.danger, underline: false },
         ButtonKind::Icon => ButtonColors { fill: None, border: None, ink: t.text, underline: false },
-        ButtonKind::Link => ButtonColors { fill: None, border: None, ink: ACCENT, underline: false },
+        ButtonKind::Link => ButtonColors { fill: None, border: None, ink: accent, underline: false },
     }
 }
 
@@ -249,11 +277,11 @@ impl<T: Copy + Eq> Tracker<T> {
 
 /// Focus keeps the same rounded face. A secondary or danger border turns accent.
 /// A primary face is already accent, so focus does not add another line.
-fn focus_colors(mut colors: ButtonColors, focused: bool) -> ButtonColors {
+fn focus_colors(mut colors: ButtonColors, focused: bool, accent: u32) -> ButtonColors {
     if focused {
         if let Some(border) = colors.border {
             if colors.fill != Some(border) {
-                colors.border = Some(ACCENT);
+                colors.border = Some(accent);
             }
         }
     }
@@ -269,7 +297,8 @@ pub(crate) unsafe fn paint_button(dc: HDC, rect: RECT, kind: ButtonKind, visual:
     }
     let dark = ui_tokens().dark;
     let focused = visual.focus && visual.state != ButtonState::Disabled;
-    let colors = focus_colors(button_colors(kind, visual.state, dark, ground), focused);
+    let accent = crate::live_accent();
+    let colors = focus_colors(button_colors_for(kind, visual.state, dark, ground, accent), focused, accent);
     if ring == FocusRing::Inside {
         crate::fill(dc, rect, ground);
     }
@@ -376,13 +405,13 @@ mod tests {
         assert_eq!(link_down.ink, ACCENT_PRESSED);
         assert!(link_down.underline);
 
-        let focused_primary = focus_colors(button_colors(ButtonKind::Primary, ButtonState::Normal, false, GROUND), true);
+        let focused_primary = focus_colors(button_colors(ButtonKind::Primary, ButtonState::Normal, false, GROUND), true, ACCENT);
         assert_eq!(focused_primary.fill, Some(ACCENT));
         assert_eq!(focused_primary.border, Some(ACCENT));
-        let focused_secondary = focus_colors(button_colors(ButtonKind::Secondary, ButtonState::Normal, false, GROUND), true);
+        let focused_secondary = focus_colors(button_colors(ButtonKind::Secondary, ButtonState::Normal, false, GROUND), true, ACCENT);
         assert_eq!(focused_secondary.border, Some(ACCENT));
         assert_ne!(focused_secondary.fill, Some(ACCENT));
-        let resting_secondary = focus_colors(button_colors(ButtonKind::Secondary, ButtonState::Normal, false, GROUND), false);
+        let resting_secondary = focus_colors(button_colors(ButtonKind::Secondary, ButtonState::Normal, false, GROUND), false, ACCENT);
         assert_eq!(resting_secondary.border, Some(LINE_LIGHT));
 
         let faded = button_colors(ButtonKind::Primary, ButtonState::Disabled, false, GROUND);
