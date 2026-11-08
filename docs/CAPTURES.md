@@ -2,7 +2,7 @@
 
 **현재 스크린샷 자산 폴더는 `docs/images-v7/`이다.** 캐시 회피용이다. 새로 찍는 샷은 이 폴더에만 넣는다. 같은 경로를 덮어쓰면 GitHub·브라우저 캐시에 옛 그림이 남으므로, `docs/images-v6`·`docs/images-v5`·`docs/images-v0.2.6`은 새 샷의 대상으로 쓰지 않는다.
 
-README(en/ja/ko)와 도움말(en/ja/ko)의 UI 이미지 경로는 `docs/images-v7/`을 가리킨다(v0.2.10, 28px 글자 버튼 반영 재촬영). `docs/images-v6/`는 **대체됨(superseded)**: 다음 재촬영은 새 폴더(`docs/images-v8/` 등)에 넣는다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
+README(en/ja/ko)와 도움말(en/ja/ko)의 UI 이미지 경로는 `docs/images-v7/`을 가리킨다(v0.2.11, 28px 글자 버튼 반영 재촬영). `docs/images-v6/`는 **대체됨(superseded)**: 다음 재촬영은 새 폴더(`docs/images-v8/` 등)에 넣는다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
 
 Maguro README / 도움말용 스크린샷. 모든 제품 이미지는 **포터블 빌드만** 사용하고, AppData·레지스트리·grids.ini·설치본 경로를 쓰지 않는다.
 
