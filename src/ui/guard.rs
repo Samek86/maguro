@@ -85,7 +85,7 @@ const MIGRATED: &[(&str, &[&str])] = &[
             "paint_chip(",
             "paint_wash(",
             "paint_button(",
-            "paint_label(",
+            "text_chip(",
             "paint_meta(",
             "style_dialog_caption(",
             "body_font(",
