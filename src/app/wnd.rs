@@ -151,6 +151,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_TIMER if wp.0 == TIMER_DROP => on_tree_drop_timer(h),
             WM_TIMER if wp.0 == TIMER_TAB_HOVER => on_tab_hover_timer(h),
             WM_TIMER if wp.0 == TIMER_DLG_WATCH || wp.0 == TIMER_DLG_JUMP || wp.0 == TIMER_DLG_RETRY => crate::dialogjump::on_timer(wp.0),
+            WM_TIMER if wp.0 == TIMER_LIST => crate::shell::listsync::on_timer(h),
             WM_SETCURSOR if wp.0 == h.0 as usize && (lp.0 & 0xffff) as u32 == HTCLIENT => {
                 let Some(d) = app(|a| a.drag).or_else(|| cursor_for(h)) else {
                     return DefWindowProcW(h, msg, wp, lp);
@@ -500,6 +501,8 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_EXITMENULOOP => settings::menu_exit(),
             WM_ABOUT => about(h),
             WM_WATCH => crate::watch::on_ui_event(),
+            WM_SHELL_CHANGE => crate::shell::listsync::on_shell(h, wp, lp),
+            WM_LIST_NOW => crate::shell::listsync::on_finished(h, wp),
             WM_WATCH_OPEN => crate::watch::open_queued(),
             WM_WATCH_TOAST => crate::watch::show_fallback(),
             WM_THEME_PANE => theme_pane_step(),
@@ -514,6 +517,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 _ = KillTimer(Some(h), TIMER_FVIEWS);
                 _ = KillTimer(Some(h), TIMER_WINS);
                 crate::shell::warmup::disarm(h);
+                crate::shell::listsync::disarm(h);
                 flush_folder_views();
                 if app(|a| a.s.autosave) {
                     autosave_associated_tabs();
@@ -543,6 +547,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_DESTROY => {
                 release_hotkey_hwnd(h);
+                crate::shell::listsync::disarm(h);
                 crate::cliphot::release(h);
                 crate::dialogjump::release(h);
                 _ = KillTimer(Some(h), TIMER_STATUS);

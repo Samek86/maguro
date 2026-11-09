@@ -434,7 +434,12 @@ unsafe fn start_transfer(srcs: Vec<String>, dst: String, rename: bool, mv: bool,
     // Captured here, on the UI thread. The worker realizes its own copies if FastCopy runs.
     let snap = unsafe { crate::dialog_snap() };
     let busy = Busy::new();
+    // The worker must not call `app()`. The compare is posted when this drops, after
+    // PerformOperations returns, including cancel and a partial failure.
+    let hwnds = super::listsync::list_hwnds();
+    let folders = super::listsync::transfer_drift(&srcs, &dst, mv);
     let job = std::thread::Builder::new().spawn(move || {
+        let later = super::listsync::RefreshLater::new(hwnds, folders);
         let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
         let _ = crate::crash::guard(std::panic::AssertUnwindSafe(|| unsafe {
         let _busy = busy;
@@ -476,6 +481,7 @@ unsafe fn start_transfer(srcs: Vec<String>, dst: String, rename: bool, mv: bool,
             }
         }
         }));
+        drop(later);
         if com {
             CoUninitialize();
         }
@@ -686,10 +692,16 @@ pub(crate) unsafe fn start_delete_notify(
     let notify_hwnd = notify.0 as isize;
     // Captured here. The worker must not call `app()` while the UI thread is in a dialog.
     let dialog_owner = app(|a| a.main.0 as isize);
+    let hwnds = super::listsync::list_hwnds();
     let job = std::thread::Builder::new().spawn(move || {
         let _busy = busy;
         let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
-        let ok = match run_delete(&srcs, permanent, ask_owner, dialog_owner) {
+        let folders = super::listsync::source_drift(&srcs);
+        let result = run_delete(&srcs, permanent, ask_owner, dialog_owner);
+        // Before the warning dialog, so a stale pane can drop rows while that box is up.
+        // Cancel and a partial failure are included: some of the files may already be gone.
+        super::listsync::post_refresh(&hwnds, &folders);
+        let ok = match result {
             Ok(()) => true,
             Err(e) => {
                 if !super::inuse::is_cancel(&e) {

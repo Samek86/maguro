@@ -525,6 +525,8 @@ pub(crate) unsafe fn attach_live() {
     // A tab that was hidden through the theme switch still has the old shell view.
     // Headers and scrollbars follow now. The list itself waits for a restart.
     recolor_due_panes();
+    // A delete that finished while this tab was parked can re-list now that the view has a site.
+    crate::shell::listsync::relist_shown();
 }
 
 pub(crate) unsafe fn sync_filter_edits() {

@@ -465,6 +465,7 @@ pub(crate) unsafe fn open_window(mut s: Session) -> Result<HWND> {
     crate::shell::ctxmenu::install_saved_probe();
     crate::shell::warmup::prime();
     crate::shell::warmup::arm(main);
+    crate::shell::listsync::arm(main);
     // Taken by another app: the menu stays unchecked and hotkey stays on, so the next start tries again.
     try_register_hotkey(main);
     crate::cliphot::install(main);

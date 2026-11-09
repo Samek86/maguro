@@ -10,6 +10,75 @@ use crate::i18n::*;
 // Bumped by each pane's selection-change notification; part of the status key.
 pub(crate) static SEL_REV: [AtomicUsize; MAXP] = [const { AtomicUsize::new(0) }; MAXP];
 
+// The shell's selection count can keep deleted rows until the next click. The status line
+// shows `count` instead, until the view reports that same count or a different count arrives.
+// A notification often bumps the revision while `shell` is still the stale number. That bump
+// is not a new selection.
+#[derive(Clone, Copy)]
+struct Hold {
+    count: i32,
+    shell: i32,
+    rev: usize,
+}
+
+fn holds() -> &'static Mutex<[Option<Hold>; MAXP]> {
+    static HOLDS: Mutex<[Option<Hold>; MAXP]> = Mutex::new([None; MAXP]);
+    &HOLDS
+}
+
+/// `(shown count, trust the shell selection for the size, drop the hold)`.
+/// `held` is `(corrected count, shell count when the hold was taken, revision)`.
+pub(crate) fn resolve_hold(shell: i32, held: Option<(i32, i32, usize)>, rev: usize) -> (i32, bool, bool) {
+    let Some((count, was, hold_rev)) = held else { return (shell, true, false) };
+    if shell == count {
+        return (shell, true, true);
+    }
+    // The count moved. A click, or the view catching up to a different number.
+    if rev != hold_rev && shell != was {
+        return (shell, true, true);
+    }
+    (count, false, false)
+}
+
+fn selection_count(pane: usize, shell: i32) -> (i32, bool) {
+    if pane >= MAXP {
+        return (shell, true);
+    }
+    let rev = SEL_REV[pane].load(Ordering::Relaxed);
+    let mut g = holds().lock().unwrap_or_else(|e| e.into_inner());
+    let (count, trust, clear) = resolve_hold(shell, g[pane].map(|h| (h.count, h.shell, h.rev)), rev);
+    if clear {
+        g[pane] = None;
+    }
+    (count, trust)
+}
+
+/// Remember a selection count the shell has not caught up to, and force the next status paint.
+/// `shell` is the count `IFolderView` reported when `count` was chosen.
+pub(crate) fn hold_selection_count(pane: usize, count: i32, shell: i32) {
+    if pane >= MAXP {
+        return;
+    }
+    let mut g = holds().lock().unwrap_or_else(|e| e.into_inner());
+    if count == shell {
+        g[pane] = None;
+    } else {
+        let rev = SEL_REV[pane].fetch_add(1, Ordering::Relaxed) + 1;
+        g[pane] = Some(Hold { count, shell, rev });
+    }
+    drop(g);
+    app(|a| a.status_key.clear());
+}
+
+/// The row count changed. Repaint the status line from whatever the view reports now.
+pub(crate) fn bump_status(pane: usize) {
+    if pane >= MAXP {
+        return;
+    }
+    SEL_REV[pane].fetch_add(1, Ordering::Relaxed);
+    app(|a| a.status_key.clear());
+}
+
 // The selection split into summed file bytes and folders left to the size worker.
 // partial: something wasn't counted (over 10k items, no file system path, unreadable, a drive root).
 #[derive(Debug, PartialEq)]
@@ -258,7 +327,10 @@ pub(crate) unsafe fn update_status() {
     let (i, path, main) = app(|a| (a.s.active, a.s.paths[a.s.active].clone(), a.main));
     let Some(fv) = view_of::<IFolderView2>(i) else { return };
     let n = fv.ItemCount(SVGIO_ALLVIEW).unwrap_or(0);
-    let sel = fv.ItemCount(SVGIO_SELECTION).unwrap_or(0);
+    let shell_sel = fv.ItemCount(SVGIO_SELECTION).unwrap_or(0);
+    // A delete can leave the shell count on rows that are already gone. `trust` is false
+    // while we show the corrected count and skip the size walk of those rows.
+    let (sel, trust) = selection_count(i, shell_sel);
     let spec = filter_of(i);
     // while a background copy runs, the disk is left alone (size and free space come back after)
     let busy = COPYING.load(Ordering::Relaxed) > 0;
@@ -266,9 +338,9 @@ pub(crate) unsafe fn update_status() {
     let rev = SEL_REV[i].load(Ordering::Relaxed);
     let (show, net) = app(|a| (a.s.folder_sizes, a.s.folder_sizes_network));
     super::set_opts(show, net);
-    let key = format!("{i}|{path}|{n}|{sel}|{}|{spec}|{busy}|{zoom:?}|{rev}|{show}|{net}", fv.GetFocusedItem().unwrap_or(-1));
+    let key = format!("{i}|{path}|{n}|{sel}|{}|{spec}|{busy}|{zoom:?}|{rev}|{show}|{net}|{trust}", fv.GetFocusedItem().unwrap_or(-1));
     if app(|a| a.status_key != key) {
-        status_base(i, &path, main, &fv, n, sel, &spec, busy, zoom);
+        status_base(i, &path, main, &fv, n, sel, &spec, busy, zoom, trust);
         app(|a| a.status_key = key);
     }
     // Selected folders only. Walking visible rows (GetVisibleItem) touched the list every tick
@@ -315,7 +387,7 @@ pub(crate) unsafe fn update_status() {
 }
 
 // The status text around the selection size, the window title, and a new folder size job.
-pub(crate) unsafe fn status_base(i: usize, path: &str, main: HWND, fv: &IFolderView2, n: i32, sel: i32, spec: &str, busy: bool, zoom: Option<usize>) {
+pub(crate) unsafe fn status_base(i: usize, path: &str, main: HWND, fv: &IFolderView2, n: i32, sel: i32, spec: &str, busy: bool, zoom: Option<usize>, trust: bool) {
     let title = window_title(&app(|a| a.panes[i].as_ref().map(|p| p.disp.clone()).unwrap_or_default()));
     if text_of(main) != title {
         _ = SetWindowTextW(main, &HSTRING::from(title));
@@ -327,7 +399,9 @@ pub(crate) unsafe fn status_base(i: usize, path: &str, main: HWND, fv: &IFolderV
     let mut files = (0u64, 0u64, false);
     let (show, net) = app(|a| (a.s.folder_sizes, a.s.folder_sizes_network));
     if sel > 0 {
-        if !busy {
+        // The corrected count is not the shell's selection yet, so summing those rows
+        // reports "size unknown" for files that are already gone.
+        if trust && !busy {
             if show {
                 let pick = super::pick_selection(fv, net);
                 if pick.folders.is_empty() {
@@ -379,6 +453,24 @@ pub(crate) unsafe fn status_base(i: usize, path: &str, main: HWND, fv: &IFolderV
         a.status_files = files;
         a.status_base = (head, size, parts.join("     ·     "));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_hold;
+
+    #[test]
+    fn a_hold_replaces_a_stale_shell_count_until_the_view_agrees() {
+        assert_eq!(resolve_hold(10, None, 3), (10, true, false));
+        // Deleted rows are still counted by the shell. Show 0 and do not sum those rows.
+        assert_eq!(resolve_hold(150, Some((0, 150, 4)), 4), (0, false, false));
+        // The view caught up: trust it again and drop the hold.
+        assert_eq!(resolve_hold(0, Some((0, 150, 4)), 4), (0, true, true));
+        // A notification bumps the revision but the count is still the stale 150.
+        assert_eq!(resolve_hold(150, Some((0, 150, 4)), 9), (0, false, false));
+        // The count changed. The new selection wins.
+        assert_eq!(resolve_hold(2, Some((0, 150, 4)), 5), (2, true, true));
+    }
 }
 
 
