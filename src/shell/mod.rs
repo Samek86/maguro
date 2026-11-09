@@ -10,6 +10,7 @@ mod fastcopy;
 mod fav;
 mod termadmin;
 mod fileop;
+pub(crate) mod listsync;
 mod gather;
 pub(crate) mod inuse;
 mod pins;
