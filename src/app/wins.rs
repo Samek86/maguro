@@ -327,8 +327,8 @@ pub(crate) unsafe fn open_window(mut s: Session) -> Result<HWND> {
     };
     let caption = cref(pal().bg);
     _ = DwmSetWindowAttribute(main, DWMWA_CAPTION_COLOR, &caption as *const _ as _, 4);
-    let square = DWMWCP_DONOTROUND;
-    _ = DwmSetWindowAttribute(main, DWMWA_WINDOW_CORNER_PREFERENCE, &square as *const _ as _, 4);
+    let round = DWMWCP_ROUND;
+    _ = DwmSetWindowAttribute(main, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as _, 4);
     // A later CreateWindow failure must not leave a half-built desk behind. Destroying the
     // bound main window runs WM_DESTROY, which drops the desk and releases its handles.
     let fail = |e: windows::core::Error| -> windows::core::Error {

@@ -59,6 +59,12 @@ enum InstallFail {
 
 static FOUND: Mutex<Option<Release>> = Mutex::new(None);
 static INSTALLING: AtomicBool = AtomicBool::new(false);
+static CHECKING: AtomicBool = AtomicBool::new(false);
+
+/// True while a manual check or an install is in flight. The settings button stays disabled.
+pub(crate) fn update_busy() -> bool {
+    CHECKING.load(Ordering::SeqCst) || INSTALLING.load(Ordering::SeqCst)
+}
 
 fn version_parts(v: &str) -> Vec<u64> {
     let core = v.trim().trim_start_matches(['v', 'V']).split(['-', '+']).next().unwrap_or("");
@@ -281,6 +287,92 @@ fn exe_path() -> Option<PathBuf> {
     std::env::current_exe().ok()
 }
 
+/// What a release check found. Startup stays quiet for `Current` and `Failed`. A manual check reports both.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum CheckHit {
+    Newer(Release),
+    Current,
+    Failed,
+}
+
+/// `body` is the releases API response. A release that is not newer is current, even when it is not installable.
+pub(crate) fn classify_check(body: &str, current: &str) -> CheckHit {
+    match parse_release(body) {
+        Some(rel) if is_newer(rel.tag(), current) => CheckHit::Newer(rel),
+        Some(_) => CheckHit::Current,
+        None => CheckHit::Failed,
+    }
+}
+
+fn release_stage(rel: &Release) -> usize {
+    match rel {
+        Release::Exe { .. } => 0,
+        Release::ZipOnly { .. } => 3,
+        Release::MissingSha { .. } => 4,
+    }
+}
+
+/// Startup posts only when a newer release exists.
+pub(crate) fn startup_stage(hit: &CheckHit) -> Option<usize> {
+    match hit {
+        CheckHit::Newer(rel) => Some(release_stage(rel)),
+        CheckHit::Current | CheckHit::Failed => None,
+    }
+}
+
+/// Manual check always posts: 0 exe, 3 zip only, 4 checksum missing, 6 current, 7 could not check.
+pub(crate) fn manual_stage(hit: &CheckHit) -> usize {
+    match hit {
+        CheckHit::Newer(rel) => release_stage(rel),
+        CheckHit::Current => 6,
+        CheckHit::Failed => 7,
+    }
+}
+
+pub(crate) fn up_to_date_notice(current: &str) -> String {
+    tr(crate::Key::MaguroCurIsUpToDate).replace("{cur}", current)
+}
+
+pub(crate) fn check_failed_notice() -> String {
+    tr(crate::Key::CouldNotCheckForUpdates).to_string()
+}
+
+fn fetch_check() -> CheckHit {
+    let text = http_get(API, 1 << 20).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    classify_check(&text, APP_VERSION)
+}
+
+fn store_newer(hit: &CheckHit) {
+    if let CheckHit::Newer(rel) = hit {
+        *FOUND.lock().unwrap_or_else(|e| e.into_inner()) = Some(rel.clone());
+    }
+}
+
+fn poke_update_button() {
+    unsafe { crate::settings::refresh_update_button() };
+}
+
+/// Settings → About. Ignores the startup-check toggle. The main window shows the result.
+pub(crate) fn check_now(main: HWND) {
+    if update_busy() {
+        return;
+    }
+    CHECKING.store(true, Ordering::SeqCst);
+    let h = main.0 as isize;
+    let spawned = std::thread::Builder::new().name("maguro-update".into()).spawn(move || {
+        let hit = fetch_check();
+        let stage = manual_stage(&hit);
+        store_newer(&hit);
+        let posted = unsafe { PostMessageW(Some(HWND(h as _)), WM_UPDATE, WPARAM(stage), LPARAM(0)).is_ok() };
+        if !posted {
+            CHECKING.store(false, Ordering::SeqCst);
+        }
+    });
+    if spawned.is_err() {
+        CHECKING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Startup: remove the exe a previous update left behind, then ask GitHub when the setting is on.
 pub(crate) fn startup(main: HWND, check: bool) {
     let h = main.0 as isize;
@@ -297,17 +389,10 @@ pub(crate) fn startup(main: HWND, check: bool) {
         if !check {
             return;
         }
-        let text = http_get(API, 1 << 20).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-        let Some(rel) = parse_release(&text) else { return };
-        if is_newer(rel.tag(), APP_VERSION) {
-            let stage = match &rel {
-                Release::Exe { .. } => 0,
-                Release::MissingSha { .. } => 4,
-                Release::ZipOnly { .. } => 3,
-            };
-            *FOUND.lock().unwrap_or_else(|e| e.into_inner()) = Some(rel);
-            unsafe { _ = PostMessageW(Some(HWND(h as _)), WM_UPDATE, WPARAM(stage), LPARAM(0)); }
-        }
+        let hit = fetch_check();
+        let Some(stage) = startup_stage(&hit) else { return };
+        store_newer(&hit);
+        unsafe { _ = PostMessageW(Some(HWND(h as _)), WM_UPDATE, WPARAM(stage), LPARAM(0)); }
     });
 }
 
@@ -375,6 +460,8 @@ fn rollback(exe: &Path) {
 
 /// WM_UPDATE on the main window.
 pub(crate) unsafe fn on_update(h: HWND, stage: usize) {
+    CHECKING.store(false, Ordering::SeqCst);
+    poke_update_button();
     match stage {
         0 => {
             let Some(rel) = FOUND.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
@@ -389,6 +476,7 @@ pub(crate) unsafe fn on_update(h: HWND, stage: usize) {
             if INSTALLING.swap(true, Ordering::SeqCst) {
                 return;
             }
+            poke_update_button();
             let hv = h.0 as isize;
             let spawned = std::thread::Builder::new().name("maguro-update-install".into()).spawn(move || {
                 let stage = match install(&rel) {
@@ -401,6 +489,7 @@ pub(crate) unsafe fn on_update(h: HWND, stage: usize) {
             });
             if spawned.is_err() {
                 INSTALLING.store(false, Ordering::SeqCst);
+                poke_update_button();
             }
         }
         3 => {
@@ -409,13 +498,17 @@ pub(crate) unsafe fn on_update(h: HWND, stage: usize) {
         }
         4 => {
             INSTALLING.store(false, Ordering::SeqCst);
+            poke_update_button();
             let Some(tag) = FOUND.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|r| r.tag().to_string()) else { return };
             sha_missing(h, &tag);
         }
         5 => {
             INSTALLING.store(false, Ordering::SeqCst);
+            poke_update_button();
             sha_mismatch(h);
         }
+        6 => up_to_date(h),
+        7 => could_not_check(h),
         1 => {
             let Some(exe) = exe_path() else { return };
             // current_exe still names the original path, which now holds the new build.
@@ -428,6 +521,7 @@ pub(crate) unsafe fn on_update(h: HWND, stage: usize) {
             if !started {
                 rollback(&exe);
                 INSTALLING.store(false, Ordering::SeqCst);
+                poke_update_button();
                 failed(h);
                 return;
             }
@@ -435,6 +529,7 @@ pub(crate) unsafe fn on_update(h: HWND, stage: usize) {
         }
         _ => {
             INSTALLING.store(false, Ordering::SeqCst);
+            poke_update_button();
             failed(h);
         }
     }
@@ -464,6 +559,18 @@ unsafe fn sha_missing(h: HWND, tag: &str) {
 /// The downloaded exe does not match `maguro.exe.sha256`. The temp file is already deleted.
 unsafe fn sha_mismatch(h: HWND) {
     let text = tr(crate::Key::DownloadedMaguroExeDoesNotMatchPanegri);
+    let title = tr(crate::Key::MaguroUpdate);
+    MessageBoxW(Some(h), &HSTRING::from(text), &HSTRING::from(title), MB_OK | MB_ICONWARNING);
+}
+
+unsafe fn up_to_date(h: HWND) {
+    let text = up_to_date_notice(&format!("v{APP_VERSION}"));
+    let title = tr(crate::Key::MaguroUpdate);
+    MessageBoxW(Some(h), &HSTRING::from(text), &HSTRING::from(title), MB_OK | MB_ICONINFORMATION);
+}
+
+unsafe fn could_not_check(h: HWND) {
+    let text = check_failed_notice();
     let title = tr(crate::Key::MaguroUpdate);
     MessageBoxW(Some(h), &HSTRING::from(text), &HSTRING::from(title), MB_OK | MB_ICONWARNING);
 }
@@ -691,5 +798,72 @@ mod tests {
         assert!(swap(&exe, &new, &old).is_err());
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
         _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn exe_json(tag: &str) -> String {
+        format!(
+            r#"{{"tag_name":"{tag}","assets":[
+            {{"name":"maguro.exe","size":10,"browser_download_url":"https://e/maguro.exe"}},
+            {{"name":"maguro.exe.sha256","size":80,"browser_download_url":"https://e/s"}}]}}"#
+        )
+    }
+
+    #[test]
+    fn manual_check_classifies_the_release_body() {
+        let newer = classify_check(&exe_json("v0.2.0"), "0.1.0");
+        assert!(matches!(newer, CheckHit::Newer(Release::Exe { .. })), "{newer:?}");
+        assert_eq!(manual_stage(&newer), 0);
+        assert_eq!(startup_stage(&newer), Some(0));
+
+        let same = classify_check(&exe_json("v0.1.0"), "0.1.0");
+        assert_eq!(same, CheckHit::Current);
+        assert_eq!(manual_stage(&same), 6);
+        assert_eq!(startup_stage(&same), None);
+
+        let older = classify_check(&exe_json("v0.0.9"), "0.1.0");
+        assert_eq!(older, CheckHit::Current);
+        assert_eq!(startup_stage(&older), None);
+
+        let zip = classify_check(
+            r#"{"tag_name":"v0.2.0","assets":[{"name":"maguro-v0.2.0-x64.zip","size":99,"browser_download_url":"https://e/p.zip"}]}"#,
+            "0.1.0",
+        );
+        assert!(matches!(zip, CheckHit::Newer(Release::ZipOnly { .. })), "{zip:?}");
+        assert_eq!(manual_stage(&zip), 3);
+        assert_eq!(startup_stage(&zip), Some(3));
+
+        let old_zip = classify_check(
+            r#"{"tag_name":"v0.0.1","assets":[{"name":"maguro.zip","size":4,"browser_download_url":"https://e/p.zip"}]}"#,
+            "0.1.0",
+        );
+        assert_eq!(old_zip, CheckHit::Current);
+
+        let missing = classify_check(
+            r#"{"tag_name":"v0.2.0","assets":[{"name":"maguro.exe","size":10,"browser_download_url":"https://e/maguro.exe"}]}"#,
+            "0.1.0",
+        );
+        assert!(matches!(missing, CheckHit::Newer(Release::MissingSha { .. })), "{missing:?}");
+        assert_eq!(manual_stage(&missing), 4);
+
+        for body in ["", "not json", r#"{"tag_name":"v9","assets":[]}"#] {
+            let failed = classify_check(body, "0.1.0");
+            assert_eq!(failed, CheckHit::Failed, "{body}");
+            assert_eq!(manual_stage(&failed), 7);
+            assert_eq!(startup_stage(&failed), None);
+        }
+    }
+
+    #[test]
+    fn manual_check_notices_name_the_version_and_no_site() {
+        let current = up_to_date_notice("v0.1.0");
+        assert!(current.contains("v0.1.0"), "{current}");
+        assert!(!current.contains('{'), "{current}");
+        let failed = check_failed_notice();
+        assert!(!failed.is_empty());
+        for text in [current.as_str(), failed.as_str()] {
+            let low = text.to_ascii_lowercase();
+            assert!(!low.contains("github"), "{text}");
+            assert!(!text.contains("http"), "{text}");
+        }
     }
 }

@@ -97,7 +97,7 @@ pub(crate) const TIMER_SPIN: usize = 27; // pane: next frame of the F5 refresh s
 pub(crate) const FVIEW_SAVE_MS: u32 = 700;
 pub(crate) const WM_FIND: u32 = WM_APP + 50; // search results arrived for this pane
 pub(crate) const WM_EV: u32 = WM_APP + 51; // Everything status changed in the settings window
-pub(crate) const WM_UPDATE: u32 = WM_APP + 60; // update worker: wParam 0 exe found, 1 installed, 2 failed, 3 zip only, 4 sha missing, 5 sha mismatch
+pub(crate) const WM_UPDATE: u32 = WM_APP + 60; // update worker: wParam 0 exe found, 1 installed, 2 failed, 3 zip only, 4 sha missing, 5 sha mismatch, 6 current, 7 could not check
 pub(crate) const WM_ABOUT: u32 = WM_APP + 66; // deferred About so SendMessage(WM_COMMAND, ID_ABOUT) returns before the modal loop
 // tree-view messages (the sidebar's SysTreeView32)
 pub(crate) const TVM_GETNEXTITEM: u32 = 0x110A;

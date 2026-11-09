@@ -403,7 +403,6 @@ pub(crate) struct Session {
     pub(crate) bar: bool,              // tab-row icons and drive buttons
     /// Drive-letter buttons on the tab row. Off hides them and gives that width to the tabs. Missing means on.
     pub(crate) drive_buttons: bool,
-    pub(crate) stat: bool,             // status line
     pub(crate) view_new: i32,          // FOLDERVIEWMODE for a pane that has none yet (see EXPLORER_VIEWS)
     pub(crate) view_icon: i32,         // icon size beside view_new; 0 = that mode's usual size (large icons are 96)
     pub(crate) start_new: u8,          // 0 This PC, 1 Desktop, 2 start_path
@@ -574,7 +573,6 @@ impl Default for Session {
             font_face: String::new(),
             bar: true,
             drive_buttons: true,
-            stat: true,
             view_new: 4,
             view_icon: 0,
             start_new: 0,
@@ -667,7 +665,6 @@ impl PartialEq for Session {
             && self.font_face == o.font_face
             && self.bar == o.bar
             && self.drive_buttons == o.drive_buttons
-            && self.stat == o.stat
             && self.view_new == o.view_new
             && self.view_icon == o.view_icon
             && self.start_new == o.start_new
@@ -1047,7 +1044,8 @@ impl Session {
                 "font" => {}
                 "bar" => s.bar = v.trim() != "0",
                 "drivebuttons" => s.drive_buttons = v.trim() != "0",
-                "stat" => s.stat = v.trim() != "0",
+                // Retired show/hide switch. The status line is always on. The key is ignored and not written back.
+                "stat" => {}
                 "viewnew" => s.view_new = match v.trim() {
                     "list" => 3,
                     "icon" => 1,
@@ -1180,7 +1178,7 @@ impl Session {
             o += &format!("order={}\n", join(&self.order));
         }
         let theme = ["auto", "light", "dark"][self.theme.min(2) as usize];
-        o += &format!("theme={theme}\nbar={}\ndrivebuttons={}\nstat={}\n", self.bar as u8, self.drive_buttons as u8, self.stat as u8);
+        o += &format!("theme={theme}\nbar={}\ndrivebuttons={}\n", self.bar as u8, self.drive_buttons as u8);
         o += &format!("viewnew={}\nstart={}\n", self.view_new, self.start_new);
         if !self.start_path.is_empty() {
             o += &format!("startp={}\n", self.start_path);

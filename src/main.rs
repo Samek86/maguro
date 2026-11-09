@@ -343,7 +343,7 @@ mod tests {
         let fresh = Session::default();
         let round = Session::parse(&fresh.to_ini());
         assert_eq!(round.theme, 0);
-        assert_eq!((round.bar, round.stat, round.view_new, round.start_new), (true, true, 4, 0));
+        assert_eq!((round.bar, round.view_new, round.start_new), (true, 4, 0));
         assert_eq!((round.ext, round.tree_on, round.edge, round.confirm, round.del), (true, true, true, true, 0));
         assert!(round.fav_top && fresh.fav_top);
         assert!(!fresh.to_ini().contains("sideorder"));
@@ -368,7 +368,8 @@ mod tests {
         assert_eq!(t.theme, 0);
         assert!(t.dark);
         assert!(!t.to_ini().contains("font="));
-        assert!(!t.bar && !t.stat && !t.ext && !t.tree_on && !t.edge && !t.confirm && !t.dot);
+        assert!(!t.to_ini().contains("stat="));
+        assert!(!t.bar && !t.ext && !t.tree_on && !t.edge && !t.confirm && !t.dot);
         assert_eq!(t.view_new, 1);
         assert_eq!(t.start_new, 2);
         assert_eq!(t.start_path, "C:\\Work");

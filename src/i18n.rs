@@ -690,6 +690,8 @@ mod tests {
             "maguro_new_is_available_you_have_cur",
             "maguro_new_is_available_you_have_cur_2",
             "maguro_new_is_available_you_have_cur_3",
+            "maguro_cur_is_up_to_date",
+            "could_not_check_for_updates",
             "help_online_f1",
             "fast_multi_pane_file_manager_for_windows",
             "mit_license_2026_efww",
@@ -778,5 +780,18 @@ mod tests {
         }
         let shortcuts = EN[KEY_ID.iter().position(|k| *k == "help_body_shortcuts").unwrap()].to_ascii_lowercase();
         assert!(shortcuts.contains("ctrl+/") && shortcuts.contains("f1"));
+    }
+
+    #[test]
+    fn settings_help_says_you_can_check_for_updates() {
+        let i = KEY_ID.iter().position(|k| *k == "help_body_settings").unwrap();
+        assert!(EN[i].contains("Check for updates"), "{}", EN[i]);
+        let needles = [("ja", "更新を確認"), ("ko", "업데이트 확인"), ("fr", "Rechercher les mises à jour"), ("de", "Nach Aktualisierungen suchen")];
+        for (code, text) in [("ko", KO_INI), ("ja", JA_INI), ("fr", FR_INI), ("de", DE_INI)] {
+            let (_, map) = parse_ini(text);
+            let v = &map["help_body_settings"];
+            let needle = needles.iter().find(|(c, _)| *c == code).unwrap().1;
+            assert!(v.contains(needle), "{code} {v}");
+        }
     }
 }

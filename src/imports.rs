@@ -8,7 +8,7 @@ pub(crate) use std::time::Instant;
 pub(crate) use windows::core::*;
 pub(crate) use windows::Win32::Foundation::*;
 pub(crate) use windows::Win32::Globalization::GetUserDefaultUILanguage;
-pub(crate) use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWINDOWATTRIBUTE};
+pub(crate) use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWINDOWATTRIBUTE};
 pub(crate) use windows::Win32::Graphics::Gdi::*;
 pub(crate) use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 pub(crate) use windows::Win32::System::Com::*;

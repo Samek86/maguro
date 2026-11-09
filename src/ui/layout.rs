@@ -127,7 +127,7 @@ pub(crate) fn side_min(dpi: i32) -> i32 {
 /// Client size that fits the current tab: every pane at `PANE_MIN_W` × `PANE_MIN_H`,
 /// the left panel when it is open, the preview pane when it is open, the tab strip,
 /// the status line, and the icon group.
-pub(crate) fn client_min(heights: &[usize], dpi: i32, tree_on: bool, bar: bool, stat: bool, preview_on: bool) -> (i32, i32) {
+pub(crate) fn client_min(heights: &[usize], dpi: i32, tree_on: bool, bar: bool, preview_on: bool) -> (i32, i32) {
     let s = |v: i32| v * dpi.max(1) / 96;
     let (pad, gap) = (s(8), s(8));
     let cols = heights.len().max(1) as i32;
@@ -138,7 +138,7 @@ pub(crate) fn client_min(heights: &[usize], dpi: i32, tree_on: bool, bar: bool, 
     let preview = if preview_on { gap + s(PREVIEW_DEF_DIP) } else { 0 };
     let width = (left + grid_w + pad + preview).max(super::tabs::icon_group_min(dpi, bar));
     let side_h = if tree_on { side_min(dpi) * 2 + gap } else { 0 };
-    let height = s(32) + grid_h.max(side_h) + if stat { s(24) } else { 0 };
+    let height = s(32) + grid_h.max(side_h) + s(24);
     (width, height)
 }
 
@@ -192,7 +192,7 @@ fn monitor_work(h: HWND) -> Option<RECT> {
 /// so a layout the monitor cannot hold still leaves the window on screen.
 pub(crate) unsafe fn min_track_size(h: HWND) -> (i32, i32) {
     let (cw, ch, dpi) = app(|a| {
-        let (w, ht) = client_min(&a.s.heights, a.dpi, a.s.side_shown(), a.s.bar, a.s.stat, a.s.preview_on);
+        let (w, ht) = client_min(&a.s.heights, a.dpi, a.s.side_shown(), a.s.bar, a.s.preview_on);
         (w, ht, a.dpi)
     });
     let (mut tw, mut th) = frame_around(cw, ch, dpi);
@@ -235,7 +235,7 @@ pub(crate) unsafe fn ensure_window_fits() {
     }
     let Some(work) = monitor_work(main) else { return };
     let (cw, ch, dpi) = app(|a| {
-        let (w, ht) = client_min(&a.s.heights, a.dpi, a.s.side_shown(), a.s.bar, a.s.stat, a.s.preview_on);
+        let (w, ht) = client_min(&a.s.heights, a.dpi, a.s.side_shown(), a.s.bar, a.s.preview_on);
         (w, ht, a.dpi)
     });
     let (min_w, min_h) = frame_around(cw, ch, dpi);
@@ -372,7 +372,7 @@ pub(crate) fn geo(a: &App) -> Geo {
     let preview = preview_plate(a.s.preview_on, a.s.preview_w, a.dpi, rc.right, gx, gap, pad);
     let grid_w = (rc.right - pad - gx - if preview > 0 { preview + gap } else { 0 }).max(0);
     let top = s(32); // tab strip. `bar` hides the icon group except the gear, not this row.
-    let bot = if a.s.stat { (rc.bottom - s(24)).max(top) } else { rc.bottom };
+    let bot = (rc.bottom - s(24)).max(top);
     let plate = (bot - top).max(0);
     let tree_h = side_tree_h(side, plate, a.s.side_split, gap, side_min(a.dpi), a.s.show_fav(), a.s.show_tree());
     Geo {
@@ -1355,12 +1355,13 @@ mod tests {
         // 2×2, tree, toolbar, status, 96 dpi.
         // side 120 + gap 8 + two panes 280 + gap 8 + pad 8 = 424, but the icon row is wider:
         // tab reserve 116 + gap 4 + list 32 + gap 4 + layout 70 + six 32px icons and six 4px gaps + pad 8 = 450.
-        assert_eq!(client_min(&[2, 2], 96, true, true, true, false), (450, 304));
-        // one pane, no tree, toolbar hidden, no status: the gear row is wider than the pane.
+        assert_eq!(client_min(&[2, 2], 96, true, true, false), (450, 304));
+        // one pane, no tree, toolbar hidden: the gear row is wider than the pane.
         // 96 dpi: tab reserve 116 + gap 4 + list 32 + gap 4 + gear 32 + pad 8 = 196.
-        assert_eq!(client_min(&[1], 96, false, false, false, false), (196, 152));
-        let (w, h) = client_min(&[1, 1, 1], 192, false, true, true, false);
-        assert_eq!(client_min(&[2, 2], 96, true, true, true, true), (424 + 8 + 280, 304));
+        // Height is the tab strip, one pane, and the status line: 32 + 120 + 24.
+        assert_eq!(client_min(&[1], 96, false, false, false), (196, 176));
+        let (w, h) = client_min(&[1, 1, 1], 192, false, true, false);
+        assert_eq!(client_min(&[2, 2], 96, true, true, true), (424 + 8 + 280, 304));
         assert_eq!((w, h), (904, 352));
         assert_eq!((pane_min_w(96), pane_min_h(96), pane_min_w(192), pane_min_h(144)), (140, 120, 280, 180));
     }
@@ -1524,7 +1525,7 @@ mod tests {
         }
         // Neither: no plate, so the grid starts at the pad.
         assert_eq!(side_tree_h(0, plate_h, 0.5, gap, min, false, false), 0);
-        assert_eq!(client_min(&[2, 2, 2], 96, false, false, true, false).0 + 120, client_min(&[2, 2, 2], 96, true, false, true, false).0);
+        assert_eq!(client_min(&[2, 2, 2], 96, false, false, false).0 + 120, client_min(&[2, 2, 2], 96, true, false, false).0);
     }
 
     #[test]

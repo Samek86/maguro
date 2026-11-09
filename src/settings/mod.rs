@@ -36,6 +36,7 @@ const S_LAYOUT: i32 = 29;
 const S_SIDE: i32 = 37;
 const S_WM: i32 = 30;
 const S_WM_BROWSE: i32 = 31;
+const S_UPDATE: i32 = 39;
 const S_FAV0: i32 = 20000;
 /// Delete buttons are S_FAV0 + i, rename buttons S_REN0 + i. Control ids stay under 0x8000.
 const FAV_MAX: i32 = 4096;
@@ -46,7 +47,6 @@ static FAV_MADE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::ne
 const TG_SINGLE: u8 = 1;
 const TG_DBLUP: u8 = 2;
 const TG_BAR: u8 = 3;
-const TG_STATUS: u8 = 4;
 const TG_HIDDEN: u8 = 5;
 const TG_EXT: u8 = 6;
 const TG_TREE: u8 = 7;
@@ -224,7 +224,6 @@ const LOOK: &[Spec] = &[
     Spec { title: crate::Key::AccentColour, desc: crate::Key::LightAndDarkEachKeepTheirOwn, live: true, ctl: Ctl::Accent },
     Spec { title: crate::Key::ShowToolbar, desc: crate::Key::Blank, live: true, ctl: Ctl::Toggle(TG_BAR) },
     Spec { title: crate::Key::ShowDriveButtons, desc: crate::Key::CDEOnTabRowOff, live: true, ctl: Ctl::Toggle(TG_DRIVES) },
-    Spec { title: crate::Key::ShowStatusBar, desc: crate::Key::ItemCountAndFreeSpaceOnDrive, live: true, ctl: Ctl::Toggle(TG_STATUS) },
 ];
 const VIEW: &[Spec] = &[
     Spec { title: crate::Key::DefaultViewForNewPane, desc: crate::Key::UsedWhenPaneHasNoViewOf, live: true, ctl: Ctl::ViewMode },
@@ -311,6 +310,7 @@ fn page_match(q: &str, page: usize) -> bool {
     }
     if page == 9 {
         return has(tx(crate::Key::MitLicense2026Efww), q)
+            || has(tx(crate::Key::CheckForUpdates), q)
             || has("Maguro", q)
             || has(env!("CARGO_PKG_VERSION"), q)
             || has("github.com/Samek86/maguro", q);
@@ -898,7 +898,7 @@ fn card_item(rect: RECT, spec: Spec, dpi: i32) -> CardItem {
             right_box(rect, sc(dpi, 230), sc(dpi, 32), pad)
         }
         Ctl::Sess => right_box(rect, sc(dpi, 108), sc(dpi, crate::BTN_H_FOOTER), pad),
-        Ctl::About => RECT { left: rect.right - pad, top: rect.top, right: rect.right - pad, bottom: rect.top },
+        Ctl::About => right_box(rect, sc(dpi, 240), sc(dpi, crate::BTN_H_FOOTER), pad),
         Ctl::Accent => {
             let btn = right_box(rect, sc(dpi, 108), sc(dpi, crate::BTN_H_FOOTER), pad);
             let mut x = btn.left - sc(dpi, 10) - sc(dpi, 22);
@@ -1039,7 +1039,6 @@ fn toggle_on(id: u8) -> bool {
         TG_HIDDEN => unsafe { super::hidden() },
         TG_BAR => app(|a| a.s.bar),
         TG_DRIVES => app(|a| a.s.drive_buttons),
-        TG_STATUS => app(|a| a.s.stat),
         TG_EXT => app(|a| a.s.ext),
         TG_TREE => app(|a| a.s.side_shown()),
         TG_SIDE_FAV => app(|a| a.s.show_fav()),
@@ -1078,7 +1077,7 @@ fn ctl_id(c: Ctl) -> Option<i32> {
         Ctl::Layout => S_LAYOUT,
         Ctl::SideOrder => S_SIDE,
         Ctl::Sess => S_SESS,
-        Ctl::About => return None,
+        Ctl::About => S_UPDATE,
         Ctl::Accent => S_ACCENT,
         _ => return None,
     })
@@ -1131,8 +1130,17 @@ mod tests {
     }
 
     #[test]
-    fn about_card_has_no_link_button() {
-        assert_eq!(ctl_id(Ctl::About), None);
+    fn about_card_has_a_check_button_and_no_link() {
+        let _lock = ui_lock();
+        let _keep = lang(0);
+        assert_eq!(ctl_id(Ctl::About), Some(S_UPDATE));
+        let card = RECT { left: 220, top: 40, right: 860, bottom: 160 };
+        let item = card_item(card, ABOUT[0], 96);
+        assert_eq!(item.ctl.bottom - item.ctl.top, crate::BTN_H_FOOTER);
+        assert_eq!(item.ctl.right, card.right - 16);
+        assert!(item.ctl.left > card.left + 16, "{:?}", item.ctl);
+        assert!(page_match("check for updates", 9));
+        assert!(page_match("check for updates", 7));
         assert_eq!(ABOUT[0].title, crate::Key::Maguro);
         assert_eq!(ABOUT[0].desc, crate::Key::FastMultiPaneFileManagerForWindows);
         let desc = tx(ABOUT[0].desc);

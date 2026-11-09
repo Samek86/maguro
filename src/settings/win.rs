@@ -252,10 +252,11 @@ unsafe fn build_children(h: HWND) {
     btn(S_CTX_REFRESH, tx(CTX_REFRESH_L), true);
     child_at(h, w!("EDIT"), "", 0x80 | tab, S_WM, font);
     btn(S_WM_BROWSE, tx(crate::Key::Browse), true);
+    btn(S_UPDATE, update_button_label(), true);
 }
 
 fn each_child(h: HWND, mut f: impl FnMut(HWND)) {
-    let ids = [S_SEARCH, S_CLOSE, S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE];
+    let ids = [S_SEARCH, S_CLOSE, S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE, S_UPDATE];
     for id in ids {
         let c = unsafe { GetDlgItem(Some(h), id).unwrap_or_default() };
         if !c.0.is_null() {
@@ -320,6 +321,7 @@ unsafe fn fill_strings(h: HWND) {
         (S_CTX_RESET, tx(CTX_RESET_L)),
         (S_CTX_REFRESH, tx(CTX_REFRESH_L)),
         (S_WM_BROWSE, tx(crate::Key::Browse)),
+        (S_UPDATE, update_button_label()),
     ];
     BUSY.with(|b| b.set(true));
     let _ = SetWindowTextW(ctl(h, S_WM), &HSTRING::from(app(|a| a.s.winmerge_path.clone())));
@@ -570,6 +572,9 @@ unsafe fn place(h: HWND, g: &Geo, sn: &Snap) {
                         put!(S_EV, b, c.ctl, false, false);
                     }
                 }
+                if c.spec.ctl == Ctl::About {
+                    sync_update_button(h);
+                }
                 if c.spec.ctl == Ctl::WmPath {
                     let browse = intersects(c.adv[0], content);
                     put!(S_WM_BROWSE, ctl(h, S_WM_BROWSE), c.adv[0], browse, true);
@@ -614,7 +619,7 @@ unsafe fn place(h: HWND, g: &Geo, sn: &Snap) {
         }
     }
     // Other page, scrolled off without a row, or a favourite button this page did not use.
-    for id in [S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE] {
+    for id in [S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE, S_UPDATE] {
         if !kept.contains(&id) {
             put!(id, ctl(h, id), RECT::default(), false, false);
         }
@@ -946,7 +951,7 @@ unsafe fn draw_card(dc: HDC, c: &CardItem, sn: &Snap, accent: u32, h: HWND) {
         let text_r = RECT {
             left: c.rect.left + sc(dpi, 16),
             top: c.rect.top + sc(dpi, 12),
-            right: c.rect.right - sc(dpi, 16),
+            right: c.ctl.left - sc(dpi, 12),
             bottom: c.rect.bottom - sc(dpi, 12),
         };
         let line = sc(dpi, 18);
@@ -1238,6 +1243,30 @@ pub(crate) unsafe fn draw_btn(d: &DRAWITEMSTRUCT) {
     crate::paint_button(d.hDC, d.rcItem, kind, visual, &label, face, dpi, ground, crate::FocusRing::Inside);
 }
 
+fn update_button_label() -> &'static str {
+    if crate::update_busy() { tx(crate::Key::Checking) } else { tx(crate::Key::CheckForUpdates) }
+}
+
+unsafe fn sync_update_button(h: HWND) {
+    let b = ctl(h, S_UPDATE);
+    if b.0.is_null() {
+        return;
+    }
+    let _ = SetWindowTextW(b, &HSTRING::from(update_button_label()));
+    let _ = EnableWindow(b, !crate::update_busy());
+    let _ = InvalidateRect(Some(b), None, false);
+}
+
+/// The About check button follows a check that finished on the main window.
+pub(crate) unsafe fn refresh_update_button() {
+    let h = super::hwnd();
+    if h.0.is_null() || !IsWindow(Some(h)).as_bool() {
+        return;
+    }
+    sync_update_button(h);
+    let _ = InvalidateRect(Some(ctl(h, S_UPDATE)), None, false);
+}
+
 fn ev_button_label() -> &'static str {
     match crate::everything::action() {
         Some(crate::everything::EvAction::Start) => tx(crate::Key::StartEverything),
@@ -1313,7 +1342,6 @@ fn flip(id: u8) {
             }
             return;
         }
-        TG_STATUS => app(|a| a.s.stat ^= true),
         TG_EXT => {
             let on = app(|a| {
                 a.s.ext ^= true;
@@ -1573,6 +1601,12 @@ unsafe fn on_command(h: HWND, id: i32, code: u32) {
                 Some(crate::everything::EvAction::Install) => crate::everything::install_async(),
                 None => {}
             }
+        }
+        S_UPDATE => {
+            let owner = GetWindow(h, GW_OWNER).unwrap_or_default();
+            let target = if owner.0.is_null() { h } else { owner };
+            crate::check_now(target);
+            sync_update_button(h);
         }
         S_WM_BROWSE => {
             let cur = app(|a| a.s.winmerge_path.clone());

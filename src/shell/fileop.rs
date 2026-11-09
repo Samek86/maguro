@@ -893,7 +893,6 @@ pub(crate) unsafe fn reset_prefs() {
         a.s.font_face.clear();
         a.s.bar = fresh.bar;
         a.s.drive_buttons = fresh.drive_buttons;
-        a.s.stat = fresh.stat;
         a.s.view_new = fresh.view_new;
         a.s.view_icon = fresh.view_icon;
         a.s.start_new = fresh.start_new;

@@ -254,8 +254,6 @@ struct SettingsFile {
     /// Drive buttons on the tab row. Missing means on. Omitted while on, so an older file stays unchanged.
     #[serde(default = "yes", skip_serializing_if = "is_on")]
     drive_buttons: bool,
-    #[serde(default = "yes")]
-    stat: bool,
     #[serde(default = "view_details")]
     view_new: i32,
     /// Icon size for `view_new`. Missing or 0 is that mode's usual size (large icons stay 96).
@@ -480,7 +478,6 @@ impl SettingsFile {
             font_face: String::new(),
             bar: true,
             drive_buttons: true,
-            stat: true,
             view_new: 4,
             view_icon: 0,
             start: 0,
@@ -599,7 +596,6 @@ impl SettingsFile {
             font_face: s.font_face.trim().to_string(),
             bar: s.bar,
             drive_buttons: s.drive_buttons,
-            stat: s.stat,
             view_new: s.view_new,
             view_icon: s.view_icon,
             start: s.start_new.min(2),
@@ -735,6 +731,8 @@ impl SettingsFile {
         self.extra.remove("folder_watches");
         // Older builds stored a pane-tab on/off switch. Tabs are always on; the key is dropped.
         self.extra.remove("pane_tabs");
+        // Older builds stored a status-bar on/off switch. The line is always on; the key is dropped.
+        self.extra.remove("stat");
     }
 
     fn to_session(&self) -> Session {
@@ -795,7 +793,6 @@ impl SettingsFile {
         s.font_face = self.font_face.trim().to_string();
         s.bar = self.bar;
         s.drive_buttons = self.drive_buttons;
-        s.stat = self.stat;
         let mode = crate::known_view_mode(self.view_new);
         s.view_icon = if mode == self.view_new { self.view_icon.max(0) } else { 0 };
         s.view_new = mode;
@@ -1236,7 +1233,6 @@ mod tests {
         s.theme = 0;
         s.bar = false;
         s.drive_buttons = false;
-        s.stat = false;
         s.view_new = 1;
         s.start_new = 2;
         s.start_path = "C:\\Work".into();
@@ -1945,6 +1941,18 @@ mod tests {
         let kept = adopt(r#"{"version":1,"pane_tabs":false,"future_flag":1}"#).unwrap();
         let again = sync_text(&kept);
         assert!(!again.contains("pane_tabs"), "{again}");
+        assert!(again.contains("future_flag"));
+    }
+
+    #[test]
+    fn old_status_bar_switch_is_ignored() {
+        let off = adopt(r#"{"version":1,"stat":false}"#).unwrap();
+        assert!(off.bar);
+        let saved = sync_text(&off);
+        assert!(!saved.contains("\"stat\""), "{saved}");
+        let kept = adopt(r#"{"version":1,"stat":false,"future_flag":1}"#).unwrap();
+        let again = sync_text(&kept);
+        assert!(!again.contains("\"stat\""), "{again}");
         assert!(again.contains("future_flag"));
     }
 

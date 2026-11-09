@@ -404,7 +404,8 @@ unsafe fn open() {
         return;
     }
     let dpi = GetDpiForWindow(main).max(96) as i32;
-    let w = 560 * dpi / 96;
+    // 30 DIP wider than 560 so the five footer buttons wrap less often.
+    let w = 590 * dpi / 96;
     let h = 520 * dpi / 96;
     let mut frame = RECT::default();
     _ = GetWindowRect(main, &mut frame);
