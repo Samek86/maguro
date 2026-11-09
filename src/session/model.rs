@@ -455,6 +455,8 @@ pub(crate) struct Session {
     pub(crate) ctx_win11_pack_migrated: bool,
     /// Settings → Right-click menu is showing the Windows 11 list. maguro.json only.
     pub(crate) ctx_win11_view: bool,
+    /// Record right-click phase times. maguro.json only. A .maguro file does not carry this.
+    pub(crate) ctx_timing: bool,
     /// DLL file names that must not load inside this process. Empty means nothing extra is blocked.
     /// maguro.json only. The registry is not written, and a .maguro file does not carry this.
     pub(crate) blocked_shell_extensions: Vec<String>,
@@ -608,6 +610,7 @@ impl Default for Session {
             ctx_packaged_on: std::collections::BTreeSet::new(),
             ctx_win11_pack_migrated: true,
             ctx_win11_view: false,
+            ctx_timing: false,
             blocked_shell_extensions: Vec::new(),
             file_basket: Vec::new(),
             excel_tidy_a1: true,
@@ -700,6 +703,7 @@ impl PartialEq for Session {
             && self.ctx_packaged_on == o.ctx_packaged_on
             && self.ctx_win11_pack_migrated == o.ctx_win11_pack_migrated
             && self.ctx_win11_view == o.ctx_win11_view
+            && self.ctx_timing == o.ctx_timing
             && self.blocked_shell_extensions == o.blocked_shell_extensions
             && self.file_basket == o.file_basket
             && self.excel_tidy_a1 == o.excel_tidy_a1

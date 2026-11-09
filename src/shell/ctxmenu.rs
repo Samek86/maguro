@@ -22,7 +22,11 @@
 // loaded every handler on the real menu, including ones that are off — that is the
 // cost of an identical item set. Disabled handlers are never given their own visible menu.
 //
-// Set `MAGURO_CTX_TIMING=1` to log each phase with OutputDebugString (DebugView).
+// Settings → Right-click menu can record each phase. The file is
+// `Log/maguro-ctx-timing-YYYY-MM-DD.log` next to maguro.json. Files older than
+// 14 days are deleted when a window opens. `MAGURO_CTX_TIMING=1` forces the same
+// log (and OutputDebugString) without the switch. `MAGURO_CTX_TIMING_LOG` is an
+// explicit file path.
 // `query` is the shell's own `QueryContextMenu`. The first call loads each handler DLL
 // and runs its class factory; COM later unloads unused ones (`CoFreeUnusedLibraries`,
 // about ten minutes idle) and the cost comes back. `warmup` does that load off the UI
@@ -42,7 +46,7 @@
 // handler share one row, and an explicit on is `ctx_on`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 use std::time::Instant;
 
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
@@ -740,26 +744,33 @@ pub(crate) fn log_line(msg: &str) {
     }
 }
 
-fn timing_log_path() -> Option<std::path::PathBuf> {
+fn env_log_path() -> Option<std::path::PathBuf> {
     static PATH: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     PATH.get_or_init(|| {
-        if let Ok(p) = std::env::var("MAGURO_CTX_TIMING_LOG") {
-            let p = p.trim();
-            if !p.is_empty() {
-                return Some(std::path::PathBuf::from(p));
-            }
-        }
-        std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.join("maguro-ctx-timing.log")))
+        let Ok(p) = std::env::var("MAGURO_CTX_TIMING_LOG") else { return None };
+        let p = p.trim();
+        if p.is_empty() { None } else { Some(std::path::PathBuf::from(p)) }
     })
     .clone()
 }
 
-fn timing() -> bool {
+fn timing_log_path() -> Option<std::path::PathBuf> {
+    if let Some(path) = env_log_path() {
+        return Some(path);
+    }
+    super::ctxlog::today_file()
+}
+
+fn env_timing() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| match std::env::var("MAGURO_CTX_TIMING") {
         Ok(v) => v == "1" || v.eq_ignore_ascii_case("true"),
         Err(_) => false,
     })
+}
+
+fn timing() -> bool {
+    env_timing() || super::ctxlog::enabled()
 }
 
 fn dump_menu() -> bool {
@@ -1029,7 +1040,63 @@ unsafe fn probe_marks(row: &Row, targets: u8) -> Option<Vec<ProbeItem>> {
     if let Ok(mut cache) = PROBE_MARK_CACHE.lock() {
         cache.get_or_insert_with(HashMap::new).insert(key, items.clone());
     }
+    persist_probe_cache();
     Some(items)
+}
+
+fn probe_path() -> std::path::PathBuf {
+    crate::settings::store::config_dir().join("ctx-probe.json")
+}
+
+/// Marks learned on an earlier run. A missing or broken file leaves the cache alone.
+pub(crate) fn install_saved_probe() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let Ok(text) = std::fs::read_to_string(probe_path()) else { return };
+        let rows = super::ctxlog::decode_probe(&text);
+        if rows.is_empty() {
+            return;
+        }
+        let mut map = HashMap::new();
+        for (id, targets, items) in rows {
+            let marks = items
+                .into_iter()
+                .map(|r| ProbeItem { verb: r.verb, folded: r.folded, label: r.label })
+                .collect();
+            map.insert((id, targets), marks);
+        }
+        if let Ok(mut cache) = PROBE_MARK_CACHE.lock() {
+            let slot = cache.get_or_insert_with(HashMap::new);
+            for (k, v) in map {
+                slot.entry(k).or_insert(v);
+            }
+        }
+    });
+}
+
+fn persist_probe_cache() {
+    if cfg!(test) {
+        return;
+    }
+    let Some(rows) = (|| {
+        let cache = PROBE_MARK_CACHE.lock().ok()?;
+        let map = cache.as_ref()?;
+        let rows = map
+            .iter()
+            .map(|((id, targets), items)| {
+                let marks = items
+                    .iter()
+                    .map(|i| super::ctxlog::ProbeRec { verb: i.verb.clone(), folded: i.folded.clone(), label: i.label.clone() })
+                    .collect();
+                (id.clone(), *targets, marks)
+            })
+            .collect::<Vec<_>>();
+        Some(rows)
+    })() else {
+        return;
+    };
+    let text = super::ctxlog::encode_probe(&rows);
+    let _ = std::fs::write(probe_path(), text);
 }
 
 /// How the shell might have called `IShellExtInit::Initialize` for this click.

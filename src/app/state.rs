@@ -690,6 +690,7 @@ fn copy_shared(dst: &mut Session, src: &Session) {
     dst.ctx_labels = src.ctx_labels.clone();
     dst.ctx_on = src.ctx_on.clone();
     dst.ctx_quiet = src.ctx_quiet.clone();
+    dst.ctx_timing = src.ctx_timing;
     dst.blocked_shell_extensions = src.blocked_shell_extensions.clone();
     dst.file_basket = src.file_basket.clone();
     dst.excel_tidy_a1 = src.excel_tidy_a1;

@@ -50,6 +50,8 @@ static LAST_ENQ: AtomicU64 = AtomicU64::new(0);
 struct Job {
     folder: String,
     blocked: Vec<String>,
+    /// Registry catalogue only. The menu warm still waits for the startup timer.
+    catalogue_only: bool,
 }
 
 enum Outcome {
@@ -61,6 +63,8 @@ enum Outcome {
     Busy,
     /// The folder was local and every query failed.
     Failed,
+    /// The handler catalogue is in memory. Warmup flags stay as they were.
+    Listed,
 }
 
 struct Queue {
@@ -160,6 +164,43 @@ pub(crate) fn pick_samples(entries: &[Sample]) -> (Option<String>, Option<String
     (file, dir)
 }
 
+/// Other files in the same folder, one per extension, skipping the file already warmed.
+pub(crate) fn pick_more(entries: &[Sample], skip: Option<&str>, cap: usize) -> Vec<String> {
+    let mut seen = Vec::new();
+    if let Some(name) = skip {
+        if let Some(ext) = ext_of(name) {
+            seen.push(ext);
+        }
+    }
+    let mut out = Vec::new();
+    for entry in entries.iter().take(SCAN_CAP) {
+        if entry.link || entry.dir || !plain_name(&entry.name) {
+            continue;
+        }
+        if skip.is_some_and(|s| s.eq_ignore_ascii_case(&entry.name)) {
+            continue;
+        }
+        let Some(ext) = ext_of(&entry.name) else { continue };
+        if seen.iter().any(|e| e == &ext) {
+            continue;
+        }
+        seen.push(ext);
+        out.push(entry.name.clone());
+        if out.len() == cap {
+            break;
+        }
+    }
+    out
+}
+
+fn ext_of(name: &str) -> Option<String> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    if stem.is_empty() || ext.is_empty() || ext.contains(['\\', '/']) {
+        return None;
+    }
+    Some(ext.to_ascii_lowercase())
+}
+
 /// Third-party modules only. System DLLs and a blocked shell extension stay unpinned.
 pub(crate) fn pin_path(path: &str, blocked: &[String]) -> bool {
     super::blockext::blockable(path) && !super::blockext::names_match(blocked, path)
@@ -256,7 +297,16 @@ fn request() {
         (folder, a.s.blocked_shell_extensions.clone())
     });
     LAST_ENQ.store(mono_ms().max(1), Ordering::Relaxed);
-    enqueue(Job { folder, blocked });
+    enqueue(Job { folder, blocked, catalogue_only: false });
+}
+
+/// Read the shell-extension catalogue before the first click. The visible menu is unchanged.
+pub(crate) fn prime() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let blocked = app(|a| a.s.blocked_shell_extensions.clone());
+        enqueue(Job { folder: String::new(), blocked, catalogue_only: true });
+    });
 }
 
 fn enqueue(job: Job) {
@@ -326,6 +376,7 @@ fn worker() {
 
 fn apply(outcome: Outcome) {
     match outcome {
+        Outcome::Listed => {}
         Outcome::Warmed | Outcome::Failed => {
             WARMED.store(true, Ordering::Relaxed);
             SKIPPED.store(false, Ordering::Relaxed);
@@ -344,6 +395,11 @@ fn menu_idle() -> bool {
 }
 
 unsafe fn execute(job: &Job) -> Outcome {
+    // The first click used to scan the registry on the UI thread. Do it here instead.
+    super::ctxmenu::ensure_catalogue();
+    if job.catalogue_only {
+        return Outcome::Listed;
+    }
     if !menu_idle() {
         return Outcome::Busy;
     }
@@ -371,6 +427,7 @@ unsafe fn execute(job: &Job) -> Outcome {
 
     let samples = read_samples(&job.folder);
     let (file, dir) = pick_samples(&samples);
+    let more = pick_more(&samples, file.as_deref(), 4);
 
     if menu_idle() {
         if let Some(name) = file {
@@ -381,6 +438,17 @@ unsafe fn execute(job: &Job) -> Outcome {
             }
         } else if let Some(cm) = warm_fallback_file() {
             tried = true;
+            ok_any = true;
+            held.push(cm);
+        }
+    }
+
+    for name in more {
+        if !menu_idle() {
+            break;
+        }
+        tried = true;
+        if let Some(cm) = guarded("warm-ext", || unsafe { item_menu(&job.folder, &name) }) {
             ok_any = true;
             held.push(cm);
         }
@@ -652,6 +720,22 @@ mod tests {
         let (file, dir) = pick_samples(&entries);
         assert_eq!(file.as_deref(), Some("notes.txt"));
         assert_eq!(dir.as_deref(), Some("sub"));
+        let more = pick_more(&entries, file.as_deref(), 4);
+        assert!(more.is_empty());
+    }
+
+    #[test]
+    fn more_samples_are_other_extensions() {
+        let entries = vec![
+            Sample { name: "a.txt".into(), dir: false, link: false },
+            Sample { name: "b.txt".into(), dir: false, link: false },
+            Sample { name: "c.png".into(), dir: false, link: false },
+            Sample { name: "d.docx".into(), dir: false, link: false },
+            Sample { name: "link.zip".into(), dir: false, link: true },
+            Sample { name: "sub".into(), dir: true, link: false },
+        ];
+        assert_eq!(pick_more(&entries, Some("a.txt"), 4), vec!["c.png".to_string(), "d.docx".to_string()]);
+        assert_eq!(pick_more(&entries, None, 1), vec!["a.txt".to_string()]);
     }
 
     #[test]

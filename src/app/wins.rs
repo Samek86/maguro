@@ -458,7 +458,12 @@ pub(crate) unsafe fn open_window(mut s: Session) -> Result<HWND> {
     });
     refresh_save_button();
     SetTimer(Some(main), TIMER_STATUS, 300, None);
-    // Shell context-menu handlers load on a background thread once this window has been up a few seconds.
+    // The handler list is read at once. Menu DLLs still wait a few seconds.
+    // Old timing logs are removed here, once, and only the dated files past 14 days.
+    crate::shell::ctxlog::set_enabled(app(|a| a.s.ctx_timing));
+    crate::shell::ctxlog::sweep_startup();
+    crate::shell::ctxmenu::install_saved_probe();
+    crate::shell::warmup::prime();
     crate::shell::warmup::arm(main);
     // Taken by another app: the menu stays unchecked and hotkey stays on, so the next start tries again.
     try_register_hotkey(main);

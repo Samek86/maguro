@@ -834,11 +834,13 @@ pub(crate) enum Key {
     ShowFolderTreePanel,
     ShowFavouritesPanelDesc,
     ShowFolderTreePanelDesc,
+    CtxTiming,
+    CtxTimingHint,
 }
 
-pub(crate) const KEY_COUNT: usize = 829;
+pub(crate) const KEY_COUNT: usize = 831;
 
-const _: () = assert!((Key::ShowFolderTreePanelDesc as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::CtxTimingHint as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1670,6 +1672,8 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Show folder tree panel",
     "Shown in the left panel. Alone, it fills the full height.",
     "Turn off both panels to hide the left panel.",
+    "Record right-click timing",
+    "Millisecond log in the Log folder next to the settings file. Files older than 14 days are deleted when Maguro starts.",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2503,4 +2507,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "show_folder_tree_panel",
     "show_favourites_panel_desc",
     "show_folder_tree_panel_desc",
+    "ctx_timing",
+    "ctx_timing_hint",
 ];

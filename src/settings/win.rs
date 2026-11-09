@@ -1449,6 +1449,14 @@ fn flip(id: u8) {
             }
             return;
         }
+        TG_CTX_LOG => {
+            let on = app(|a| {
+                a.s.ctx_timing ^= true;
+                a.s.ctx_timing
+            });
+            crate::shell::ctxlog::set_enabled(on);
+            crate::publish_shared();
+        }
         TG_FOLDER => {
             let want = !crate::folderapp::shown_on();
             crate::folderapp::set_registered(want);

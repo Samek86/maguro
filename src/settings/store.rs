@@ -430,6 +430,10 @@ struct SettingsFile {
     /// Settings right-click page is on the Windows 11 list. Omitted while classic.
     #[serde(default, skip_serializing_if = "is_off")]
     ctx_win11_view: bool,
+    /// Right-click phase timings. Missing means off. Omitted while off.
+    /// A .maguro file does not store this.
+    #[serde(default, skip_serializing_if = "is_off")]
+    ctx_timing: bool,
     /// DLL file names blocked inside Maguro only. Omitted when empty.
     /// Not written to the registry. A named session file does not store this.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -539,6 +543,7 @@ impl SettingsFile {
             ctx_packaged_on: BTreeSet::new(),
             ctx_win11_pack_migrated: false,
             ctx_win11_view: false,
+            ctx_timing: false,
             blocked_shell_extensions: Vec::new(),
             workspaces: Vec::new(),
             workspace_confirm: false,
@@ -657,6 +662,7 @@ impl SettingsFile {
             ctx_packaged_on: clean_packaged(&s.ctx_packaged_on),
             ctx_win11_pack_migrated: s.ctx_win11_pack_migrated,
             ctx_win11_view: s.ctx_win11_view,
+            ctx_timing: s.ctx_timing,
             blocked_shell_extensions: clean_blocked(&s.blocked_shell_extensions),
             workspaces: crate::workspaces_json(),
             workspace_confirm: crate::workspaces_confirm(),
@@ -723,6 +729,7 @@ impl SettingsFile {
         self.extra.remove("ctx_packaged_on");
         self.extra.remove("ctx_win11_pack_migrated");
         self.extra.remove("ctx_win11_view");
+        self.extra.remove("ctx_timing");
         self.extra.remove("blocked_shell_extensions");
         self.extra.remove("workspaces");
         self.extra.remove("workspace_confirm");
@@ -854,6 +861,7 @@ impl SettingsFile {
         }
         s.ctx_win11_pack_migrated = true;
         s.ctx_win11_view = self.ctx_win11_view;
+        s.ctx_timing = self.ctx_timing;
         s.blocked_shell_extensions = clean_blocked(&self.blocked_shell_extensions);
         s.file_basket = crate::basket::tidy_list(&self.file_basket);
         s.excel_tidy_a1 = self.excel_tidy.selection;
@@ -2275,6 +2283,25 @@ mod tests {
         assert_eq!(saved["show_folder_sizes"], false);
         assert_eq!(saved["folder_sizes_network"], true);
         assert_eq!(saved["future_flag"], 1);
+        assert!(saved.get("extra").is_none());
+    }
+
+    #[test]
+    fn ctx_timing_defaults_off_and_lives_only_in_json() {
+        assert!(!Session::default().ctx_timing);
+        assert!(!adopt("{}").unwrap().ctx_timing);
+        let mut s = Session::default();
+        s.ctx_timing = true;
+        let text = pretty(&SettingsFile::from_session(&s));
+        assert!(text.contains("\"ctx_timing\": true"), "{text}");
+        assert!(adopt(&text).unwrap().ctx_timing);
+        assert!(!pretty(&SettingsFile::from_session(&Session::default())).contains("ctx_timing"));
+        assert!(!s.to_ini().contains("ctx_timing"));
+        let mut file = SettingsFile::from_session(&s);
+        file.extra.insert("ctx_timing".into(), serde_json::json!(false));
+        file.merge_forward(&file.clone());
+        let saved: Value = serde_json::from_str(&pretty(&file)).unwrap();
+        assert_eq!(saved["ctx_timing"], true);
         assert!(saved.get("extra").is_none());
     }
 

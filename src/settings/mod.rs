@@ -71,6 +71,7 @@ const TG_PREVIEW: u8 = 26;
 const TG_CLIP: u8 = 27;
 const TG_SIDE_FAV: u8 = 28;
 const TG_SIDE_TREE: u8 = 29;
+const TG_CTX_LOG: u8 = 30;
 
 const CB_SETMINVISIBLE: u32 = 0x1701;
 const EM_SETCUEBANNER: u32 = 0x1501;
@@ -160,6 +161,12 @@ const CTX_CLASSIC: crate::Key = crate::Key::ClassicMenu;
 const CTX_WIN11: crate::Key = crate::Key::Windows11Menu;
 const CTX_WIN11_EMPTY: crate::Key = crate::Key::CtxWin11Empty;
 const CTX_WIN11_NOTE: crate::Key = crate::Key::CtxWin11Note;
+const CTX_LOG: &[Spec] = &[Spec {
+    title: crate::Key::CtxTiming,
+    desc: crate::Key::CtxTimingHint,
+    live: true,
+    ctl: Ctl::Toggle(TG_CTX_LOG),
+}];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Ctl {
@@ -324,6 +331,9 @@ fn page_match(q: &str, page: usize) -> bool {
         return (0..crate::keys::len()).any(|i| key_hit_i(i, q)) || has(tx(KEY_NOTE), q);
     }
     if page == CTX_PAGE {
+        if CTX_LOG.iter().any(|c| card_hit(c, q)) {
+            return true;
+        }
         return has(tx(CTX_NOTE), q)
             || has(tx(CTX_WIN11_NOTE), q)
             || has(tx(CTX_RESET_L), q)
@@ -713,6 +723,15 @@ fn fill_items(g: &mut Geo, sn: &Snap, bar: bool) -> i32 {
         y = key_items(g, sn, left, right, y, rq);
     }
     if page == CTX_PAGE {
+        for spec in CTX_LOG {
+            if !rq.is_empty() && !card_hit(spec, rq) {
+                continue;
+            }
+            let h = card_h(spec, dpi);
+            let rect = RECT { left, top: y, right, bottom: y + h };
+            g.items.push(Item::Card(card_item(rect, *spec, dpi)));
+            y += h + gap;
+        }
         y = ctx_items(g, sn, left, right, y, rq);
     }
     (y + sn.scroll) - start + sc(dpi, 16)
@@ -1059,6 +1078,7 @@ fn toggle_on(id: u8) -> bool {
         TG_FAST => app(|a| a.s.fast_copy),
         TG_DIALOG => app(|a| a.s.dialog_jump),
         TG_CLIP => app(|a| a.s.clip_hotkey),
+        TG_CTX_LOG => app(|a| a.s.ctx_timing),
         TG_FOLDER => crate::folderapp::shown_on(),
         _ => false,
     }
@@ -1434,10 +1454,12 @@ mod tests {
         assert_eq!(tx(CTX_RESET_L), "Reset to all enabled");
         assert_eq!(tx(CTX_REFRESH_L), "Refresh");
         assert!(page_match("Refresh", CTX_PAGE));
+        assert!(page_match("Record right-click timing", CTX_PAGE));
         let (anchor, page) = commit_search(0, 0, "Right-click menu");
         assert_eq!((anchor, page), (0, CTX_PAGE));
         let g = geo(client(), &shot(page, "Right-click menu"));
         assert!(g.show[CTX_PAGE]);
+        assert!(g.items.iter().any(|it| matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_CTX_LOG))));
         assert!(g.items.iter().any(|it| matches!(it, Item::CtxNote(_))));
         let (reset, refresh) = g.items.iter().find_map(|it| match it {
             Item::CtxBar { reset, refresh } => Some((*reset, *refresh)),
