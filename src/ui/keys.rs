@@ -1,6 +1,7 @@
 // Shortcut list. Rows come from the keymap, so a rebind shows up here without a restart.
 // Ctrl+/ toggles it; holding the keys does that once. Esc, the close mark, or Ctrl+/ again
 // put focus back. A click outside just closes, and focus stays where that click put it.
+// The header drags the window. The edges resize it. The close mark stays a button.
 
 use crate::imports::*;
 use crate::app::*;
@@ -132,15 +133,60 @@ pub(crate) fn keys_close(width: i32, dpi: i32) -> RECT {
 
 /// Shortcut list stays within this percent of the owner client, not the monitor.
 const KEYS_OWNER_PCT: i32 = 85;
+/// Smallest size the user can drag to, in DIP. The same floor as the first open size.
+const KEYS_MIN_W: i32 = 320;
+const KEYS_MIN_H: i32 = 200;
 
 /// Popup size in px. `content_h(width)` is the header plus the list at that width.
 /// The 760-dip design width and the content height win when they sit under the cap.
 pub(crate) fn keys_fit_size(owner_w: i32, owner_h: i32, dpi: i32, content_h: impl FnOnce(i32) -> i32) -> (i32, i32) {
     let px = |dip: i32| dip * dpi / 96;
     let cap = |span: i32| span.max(0) * KEYS_OWNER_PCT / 100;
-    let w = px(760).min(cap(owner_w)).max(px(320));
-    let h = content_h(w).min(cap(owner_h)).max(px(200));
+    let (min_w, min_h) = keys_min_size(dpi);
+    let w = px(760).min(cap(owner_w)).max(min_w);
+    let h = content_h(w).min(cap(owner_h)).max(min_h);
     (w, h)
+}
+
+/// Smallest outer size, in px.
+pub(crate) fn keys_min_size(dpi: i32) -> (i32, i32) {
+    let px = |dip: i32| dip * dpi.max(1) / 96;
+    (px(KEYS_MIN_W).max(1), px(KEYS_MIN_H).max(1))
+}
+
+/// Resize grip, in px. Wider than the painted hairline so the edge is grabbable.
+pub(crate) fn keys_grip(dpi: i32) -> i32 {
+    (6 * dpi.max(1) / 96).max(4)
+}
+
+/// Sizing border first, then the header as a caption. The close mark stays client
+/// so its click still reaches the window procedure.
+pub(crate) fn keys_nc_hit(width: i32, height: i32, x: i32, y: i32, dpi: i32) -> u32 {
+    let grip = keys_grip(dpi).max(1);
+    if x < 0 || y < 0 || x >= width || y >= height {
+        return HTNOWHERE;
+    }
+    let left = x < grip;
+    let right = x >= width - grip;
+    let top = y < grip;
+    let bottom = y >= height - grip;
+    let edge = match (left, right, top, bottom) {
+        (true, _, true, _) => HTTOPLEFT,
+        (_, true, true, _) => HTTOPRIGHT,
+        (true, _, _, true) => HTBOTTOMLEFT,
+        (_, true, _, true) => HTBOTTOMRIGHT,
+        (true, _, _, _) => HTLEFT,
+        (_, true, _, _) => HTRIGHT,
+        (_, _, true, _) => HTTOP,
+        (_, _, _, true) => HTBOTTOM,
+        _ => HTCLIENT,
+    };
+    if edge != HTCLIENT {
+        return edge;
+    }
+    let close = keys_close(width, dpi);
+    let on_close = x >= close.left && x < close.right && y >= close.top && y < close.bottom;
+    if y < keys_head(dpi) && !on_close { HTCAPTION } else { HTCLIENT }
 }
 
 /// Top-left that centers `w`×`h` on `owner`. A real work rect then keeps it on that monitor.
@@ -178,11 +224,13 @@ pub(crate) unsafe fn open_keys() {
         a.keys_btn = Tracker::new();
     });
     let title = HSTRING::from(tr(crate::Key::KeyboardShortcuts2));
-    let Ok(p) = CreateWindowExW(WS_EX_TOOLWINDOW, w!("MaguroKeys"), &title, WS_POPUP | WS_VISIBLE, x, y, w, h, Some(main), None, None, None) else {
+    // Thick frame so the sizing hits work. WM_NCCALCSIZE keeps the client flush with the window.
+    let style = WS_POPUP | WS_THICKFRAME | WS_VISIBLE;
+    let Ok(p) = CreateWindowExW(WS_EX_TOOLWINDOW, w!("MaguroKeys"), &title, style, x, y, w, h, Some(main), None, None, None) else {
         return;
     };
-    let square = DWMWCP_DONOTROUND;
-    _ = DwmSetWindowAttribute(p, DWMWA_WINDOW_CORNER_PREFERENCE, &square as *const _ as _, 4);
+    let round = DWMWCP_ROUND;
+    _ = DwmSetWindowAttribute(p, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as _, 4);
     app(|a| a.keys_popup = p);
     _ = SetFocus(Some(p));
 }
@@ -324,6 +372,26 @@ fn keys_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         match msg {
             WM_PAINT => paint_keys(h),
             WM_ERASEBKGND => return LRESULT(1),
+            // The thick frame is only there so the sizing hits work. The client fills the window.
+            WM_NCCALCSIZE if wp.0 != 0 => return LRESULT(0),
+            WM_NCHITTEST => {
+                let mut pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
+                _ = ScreenToClient(h, &mut pt);
+                let mut rc = RECT::default();
+                _ = GetClientRect(h, &mut rc);
+                return LRESULT(keys_nc_hit(rc.right, rc.bottom, pt.x, pt.y, dpi) as isize);
+            }
+            WM_GETMINMAXINFO => {
+                let mm = &mut *(lp.0 as *mut MINMAXINFO);
+                let (w, ht) = keys_min_size(dpi);
+                mm.ptMinTrackSize = POINT { x: w, y: ht };
+                return LRESULT(0);
+            }
+            WM_SIZE => {
+                // Width changes the row layout. Clamp the scroll to the new page.
+                keys_scroll_to(h, |y, _| y);
+                _ = InvalidateRect(Some(h), None, false);
+            }
             WM_MOUSEWHEEL => keys_scroll_to(h, |y, _| y - s((wp.0 >> 16) as i16 as i32)),
             WM_MOUSEMOVE => {
                 let (x, y) = xy(lp);
@@ -466,5 +534,28 @@ already running, they open here.\n"
         assert_eq!(keys_fit_origin(owner, 760, 663, RECT::default()), (320, 138));
         let work = RECT { left: 0, top: 0, right: 800, bottom: 600 };
         assert_eq!(keys_fit_origin(owner, 760, 663, work), (40, 0));
+    }
+
+    #[test]
+    fn keys_edges_resize_and_the_header_moves() {
+        let (w, h, dpi) = (760, 500, 96);
+        assert_eq!(keys_nc_hit(w, h, 1, 40, dpi), HTLEFT);
+        assert_eq!(keys_nc_hit(w, h, w - 2, 40, dpi), HTRIGHT);
+        assert_eq!(keys_nc_hit(w, h, 40, 1, dpi), HTTOP);
+        assert_eq!(keys_nc_hit(w, h, 40, h - 2, dpi), HTBOTTOM);
+        assert_eq!(keys_nc_hit(w, h, 1, 1, dpi), HTTOPLEFT);
+        assert_eq!(keys_nc_hit(w, h, w - 2, 1, dpi), HTTOPRIGHT);
+        assert_eq!(keys_nc_hit(w, h, 1, h - 2, dpi), HTBOTTOMLEFT);
+        assert_eq!(keys_nc_hit(w, h, w - 2, h - 2, dpi), HTBOTTOMRIGHT);
+        assert_eq!(keys_nc_hit(w, h, 30, 20, dpi), HTCAPTION);
+        let close = keys_close(w, dpi);
+        assert_eq!(keys_nc_hit(w, h, close.left + 2, close.top + 2, dpi), HTCLIENT);
+        assert_eq!(keys_nc_hit(w, h, 40, keys_head(dpi) + 8, dpi), HTCLIENT);
+        assert_eq!(keys_nc_hit(w, h, -1, 10, dpi), HTNOWHERE);
+        assert_eq!(keys_min_size(96), (320, 200));
+        assert_eq!(keys_min_size(192), (640, 400));
+        // The close mark stays clear of the grip, so the corner still resizes.
+        assert!(close.right <= w - keys_grip(dpi));
+        assert!(close.top >= keys_grip(dpi));
     }
 }
