@@ -313,7 +313,8 @@ fn page_match(q: &str, page: usize) -> bool {
             || has(tx(crate::Key::CheckForUpdates), q)
             || has("Maguro", q)
             || has(env!("CARGO_PKG_VERSION"), q)
-            || has("github.com/Samek86/maguro", q);
+            || has("github.com/Samek86/maguro", q)
+            || has(tx(crate::Key::MaguroIsForkOfEfwwGridsBy2), q);
     }
     if page == 4 {
         let rows = fav_tree_rows();

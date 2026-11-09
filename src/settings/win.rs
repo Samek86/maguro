@@ -2297,21 +2297,24 @@ pub(crate) struct AboutCopy {
     pub license: String,
     /// Plain-text repo address only. Not a link; never opened in a browser.
     pub repo: String,
+    /// Short fork note with the upstream address. Plain text, same as `repo`.
+    pub fork: String,
 }
 
-/// Body of the About window: product name, version, description, license, and plain-text repo address.
-pub(crate) fn about_copy(version: &str, desc: &str, license: &str) -> AboutCopy {
+/// Body of the About window: product name, version, description, license, plain-text repo, and a short fork line.
+pub(crate) fn about_copy(version: &str, desc: &str, license: &str, fork: &str) -> AboutCopy {
     AboutCopy {
         title: "Maguro".into(),
         version: version.into(),
         desc: desc.into(),
         license: license.into(),
         repo: "github.com/Samek86/maguro".into(),
+        fork: fork.into(),
     }
 }
 
 pub(crate) fn about_body(c: &AboutCopy) -> String {
-    format!("{}\n{}\n{}\n{}\n{}", c.title, c.version, c.desc, c.license, c.repo)
+    format!("{}\n{}\n{}\n{}\n{}\n{}", c.title, c.version, c.desc, c.license, c.repo, c.fork)
 }
 
 /// Painted About logo. Light is group 3 and dark is group 2. Both embed `assets/Maguro.ico`,
@@ -2327,6 +2330,7 @@ pub(crate) struct AboutLay {
     pub desc: RECT,
     pub license: RECT,
     pub repo: RECT,
+    pub fork: RECT,
     pub ok: RECT,
 }
 
@@ -2335,22 +2339,24 @@ const ABOUT_ICON_DIP: i32 = 48;
 const ABOUT_BTN_W_DIP: i32 = 88;
 
 /// Client height for the stacked About body. Heights are already in pixels.
-pub(crate) fn about_client_h(dpi: i32, desc_h: i32, lic_h: i32, repo_h: i32) -> i32 {
+pub(crate) fn about_client_h(dpi: i32, desc_h: i32, lic_h: i32, repo_h: i32, fork_h: i32) -> i32 {
     let dpi = dpi.max(96);
     let m = sc(dpi, 16);
     sc(dpi, ABOUT_ICON_DIP)
         + desc_h
         + lic_h
         + repo_h
+        + fork_h
         + sc(dpi, crate::BTN_H_FOOTER)
         + m * 2
         + sc(dpi, 16)
         + sc(dpi, 8)
         + sc(dpi, 4)
+        + sc(dpi, 4)
         + sc(dpi, 16)
 }
 
-pub(crate) fn about_lay(client_w: i32, client_h: i32, dpi: i32, desc_h: i32, lic_h: i32, repo_h: i32) -> AboutLay {
+pub(crate) fn about_lay(client_w: i32, client_h: i32, dpi: i32, desc_h: i32, lic_h: i32, repo_h: i32, fork_h: i32) -> AboutLay {
     let dpi = dpi.max(96);
     let s = |v: i32| sc(dpi, v);
     let m = s(16);
@@ -2370,12 +2376,14 @@ pub(crate) fn about_lay(client_w: i32, client_h: i32, dpi: i32, desc_h: i32, lic
     let license = RECT { left: m, top: lic_top, right: text_r, bottom: lic_top + lic_h.max(1) };
     let repo_top = license.bottom + s(4);
     let repo = RECT { left: m, top: repo_top, right: text_r, bottom: repo_top + repo_h.max(1) };
+    let fork_top = repo.bottom + s(4);
+    let fork = RECT { left: m, top: fork_top, right: text_r, bottom: fork_top + fork_h.max(1) };
     let btn_h = s(crate::BTN_H_FOOTER);
     let btn_w = s(ABOUT_BTN_W_DIP).min((cw - 2 * m).max(1));
-    let ok_top = repo.bottom + s(16);
+    let ok_top = fork.bottom + s(16);
     let ok = RECT { left: (cw - m - btn_w).max(0), top: ok_top, right: (cw - m).max(1), bottom: ok_top + btn_h };
     let _ = ch;
-    AboutLay { icon, title, version, desc, license, repo, ok }
+    AboutLay { icon, title, version, desc, license, repo, fork, ok }
 }
 
 fn about_version_label() -> String {
@@ -2395,6 +2403,7 @@ fn live_about() -> AboutCopy {
         &about_version_label(),
         tx(crate::Key::FastMultiPaneFileManagerForWindows),
         tx(crate::Key::MitLicense2026Efww),
+        tx(crate::Key::MaguroIsForkOfEfwwGridsBy2),
     )
 }
 
@@ -2420,7 +2429,8 @@ unsafe fn about_metrics(cw: i32, ch: i32, dpi: i32) -> AboutLay {
     let desc_h = about_line_h(&copy.desc, inner, font, dpi);
     let lic_h = about_line_h(&copy.license, inner, font, dpi);
     let repo_h = about_line_h(&copy.repo, inner, font, dpi);
-    about_lay(cw, ch, dpi, desc_h, lic_h, repo_h)
+    let fork_h = about_line_h(&copy.fork, inner, font, dpi);
+    about_lay(cw, ch, dpi, desc_h, lic_h, repo_h, fork_h)
 }
 
 unsafe fn draw_about_btn(d: &DRAWITEMSTRUCT) {
@@ -2453,6 +2463,7 @@ unsafe fn paint_about(h: HWND) {
         crate::wrap_text(dc, lay.license, &copy.license, small, t.sub, false);
         // Plain text only — no SysLink, no ShellExecute, no click handler.
         crate::wrap_text(dc, lay.repo, &copy.repo, small, t.sub, false);
+        crate::wrap_text(dc, lay.fork, &copy.fork, small, t.sub, false);
     });
 }
 
@@ -2533,7 +2544,7 @@ fn ensure_about_class() {
     });
 }
 
-/// About Maguro. One OK button. Body: name, version, description, license, plain-text repo.
+/// About Maguro. One OK button. Body: name, version, description, license, plain-text repo, short fork line.
 pub(crate) unsafe fn show_about(owner: HWND) {
     ensure_about_class();
     ABOUT_DONE.with(|d| d.set(false));
@@ -2545,7 +2556,8 @@ pub(crate) unsafe fn show_about(owner: HWND) {
     let desc_h = about_line_h(&copy.desc, inner, font, dpi);
     let lic_h = about_line_h(&copy.license, inner, font, dpi);
     let repo_h = about_line_h(&copy.repo, inner, font, dpi);
-    let client_h = about_client_h(dpi, desc_h, lic_h, repo_h);
+    let fork_h = about_line_h(&copy.fork, inner, font, dpi);
+    let client_h = about_client_h(dpi, desc_h, lic_h, repo_h, fork_h);
     let mut r = RECT { left: 0, top: 0, right: client_w, bottom: client_h };
     let (ww, hh) = if AdjustWindowRectExForDpi(&mut r, ask_style(), false, WS_EX_DLGMODALFRAME, dpi as u32).is_ok() {
         ((r.right - r.left).max(client_w), (r.bottom - r.top).max(client_h))
@@ -2960,18 +2972,24 @@ mod tests {
 
     #[test]
     fn about_body_is_name_version_description_license_and_plain_repo() {
-        let copy = about_copy("0.1.77", "Fast multi-pane file manager for Windows", "MIT License · © 2026 efww, Samek86");
+        let copy = about_copy(
+            "0.1.77",
+            "Fast multi-pane file manager for Windows",
+            "MIT License · © 2026 efww, Samek86",
+            "Fork of github.com/efww/grids",
+        );
         let body = about_body(&copy);
         assert_eq!(copy.title, "Maguro");
         assert_eq!(copy.repo, "github.com/Samek86/maguro");
+        assert_eq!(copy.fork, "Fork of github.com/efww/grids");
         assert!(body.starts_with("Maguro\n0.1.77\n"));
         assert!(body.contains("Fast multi-pane file manager for Windows"));
         assert!(body.contains("MIT License · © 2026 efww, Samek86"));
         assert!(body.contains("github.com/Samek86/maguro"));
+        assert!(body.contains("Fork of github.com/efww/grids"));
         // Plain address only — never a URL scheme that would invite a browser open.
         assert!(!body.contains("http"));
         assert!(!body.contains("https"));
-        assert!(!body.contains("efww/"));
         assert!(!body.contains('?'));
         assert_eq!(crate::ICON_GROUP_EXE, 1);
         assert_eq!(crate::ICON_GROUP_DARK, 2);
@@ -3003,8 +3021,9 @@ mod tests {
             let desc_h = sc(dpi, 20);
             let lic_h = sc(dpi, 18);
             let repo_h = sc(dpi, 18);
-            let ch = about_client_h(dpi, desc_h, lic_h, repo_h);
-            let lay = about_lay(cw, ch, dpi, desc_h, lic_h, repo_h);
+            let fork_h = sc(dpi, 18);
+            let ch = about_client_h(dpi, desc_h, lic_h, repo_h, fork_h);
+            let lay = about_lay(cw, ch, dpi, desc_h, lic_h, repo_h, fork_h);
             let m = sc(dpi, 16);
             assert_eq!(lay.icon.left, m);
             assert_eq!(lay.icon.top, m);
@@ -3019,13 +3038,15 @@ mod tests {
             assert_eq!(lay.license.top, lay.desc.bottom + sc(dpi, 8));
             assert_eq!(lay.repo.top, lay.license.bottom + sc(dpi, 4));
             assert_eq!(lay.repo.bottom - lay.repo.top, repo_h);
-            assert_eq!(lay.ok.top, lay.repo.bottom + m);
+            assert_eq!(lay.fork.top, lay.repo.bottom + sc(dpi, 4));
+            assert_eq!(lay.fork.bottom - lay.fork.top, fork_h);
+            assert_eq!(lay.ok.top, lay.fork.bottom + m);
             assert_eq!(lay.ok.right, cw - m);
             assert_eq!(ch - lay.ok.bottom, m);
             assert_eq!(lay.ok.bottom - lay.ok.top, sc(dpi, crate::BTN_H_FOOTER));
             assert_eq!(lay.ok.right - lay.ok.left, sc(dpi, ABOUT_BTN_W_DIP));
-            assert!(lay.desc.left == m && lay.license.left == m && lay.repo.left == m);
-            assert!(lay.ok.top >= lay.repo.bottom);
+            assert!(lay.desc.left == m && lay.license.left == m && lay.repo.left == m && lay.fork.left == m);
+            assert!(lay.ok.top >= lay.fork.bottom);
         }
     }
     

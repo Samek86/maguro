@@ -1241,7 +1241,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Maguro {cur} is up to date.",
     "Maguro hit an error and kept this window open.",
     "Maguro is a fork of efww/grids by efww\nfork Samek86/maguro",
-    "Maguro is a fork of efww/grids by efww · fork Samek86/maguro",
+    "Fork of github.com/efww/grids",
     "Maguro {new} is available. You have {cur}.\n\nUpdate now? Maguro restarts after the download.",
     "Maguro {new} is available. You have {cur}.\n\nThis release only includes a zip. Maguro installs the raw maguro.exe and does not extract zip files.\n\nReplace this file with maguro.exe from that release yourself.",
     "Maguro {new} is available. You have {cur}.\n\nThe SHA-256 file (maguro.exe.sha256) is missing from the release, or it could not be downloaded. Maguro did not install the update and did not keep a temporary file.",
