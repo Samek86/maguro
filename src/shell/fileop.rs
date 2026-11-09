@@ -434,10 +434,10 @@ unsafe fn start_transfer(srcs: Vec<String>, dst: String, rename: bool, mv: bool,
     // Captured here, on the UI thread. The worker realizes its own copies if FastCopy runs.
     let snap = unsafe { crate::dialog_snap() };
     let busy = Busy::new();
-    // The worker must not call `app()`. The re-list is posted when this drops, after
+    // The worker must not call `app()`. The compare is posted when this drops, after
     // PerformOperations returns, including cancel and a partial failure.
     let hwnds = super::listsync::list_hwnds();
-    let folders = super::listsync::transfer_folders(&srcs, &dst, mv);
+    let folders = super::listsync::transfer_drift(&srcs, &dst, mv);
     let job = std::thread::Builder::new().spawn(move || {
         let later = super::listsync::RefreshLater::new(hwnds, folders);
         let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
@@ -696,10 +696,10 @@ pub(crate) unsafe fn start_delete_notify(
     let job = std::thread::Builder::new().spawn(move || {
         let _busy = busy;
         let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
-        let folders = super::listsync::source_folders(&srcs);
+        let folders = super::listsync::source_drift(&srcs);
         let result = run_delete(&srcs, permanent, ask_owner, dialog_owner);
-        // Before the warning dialog, so the pane drops rows while that box is up.
-        // Cancel and a partial failure re-list too: some of the files may already be gone.
+        // Before the warning dialog, so a stale pane can drop rows while that box is up.
+        // Cancel and a partial failure are included: some of the files may already be gone.
         super::listsync::post_refresh(&hwnds, &folders);
         let ok = match result {
             Ok(()) => true,

@@ -502,7 +502,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_ABOUT => about(h),
             WM_WATCH => crate::watch::on_ui_event(),
             WM_SHELL_CHANGE => crate::shell::listsync::on_shell(h, wp, lp),
-            WM_LIST_NOW => crate::shell::listsync::on_finished(wp),
+            WM_LIST_NOW => crate::shell::listsync::on_finished(h, wp),
             WM_WATCH_OPEN => crate::watch::open_queued(),
             WM_WATCH_TOAST => crate::watch::show_fallback(),
             WM_THEME_PANE => theme_pane_step(),
