@@ -33,6 +33,14 @@
 <br>
 
 <p align="center">
+  <a href="docs/demo-en.mp4"><img src="docs/demo-en.gif" width="320" alt="Maguro in motion"></a>
+</p>
+
+<p align="center">▶ <a href="docs/demo-en.mp4">Watch the full video</a> (60 s)</p>
+
+<br>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images-v7/en/hero_dark.png">
     <img alt="Maguro, light theme, two panes" src="docs/images-v7/en/hero_light.png">

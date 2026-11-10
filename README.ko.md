@@ -33,6 +33,14 @@
 <br>
 
 <p align="center">
+  <a href="docs/demo-ko.mp4"><img src="docs/demo-ko.gif" width="320" alt="Maguro 동작 화면"></a>
+</p>
+
+<p align="center">▶ <a href="docs/demo-ko.mp4">전체 영상 보기</a> (60초)</p>
+
+<br>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images-v7/ko/hero_dark.png">
     <img alt="Maguro, 라이트 테마, 패널 두 개" src="docs/images-v7/ko/hero_light.png">
