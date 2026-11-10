@@ -6,6 +6,10 @@
 
 <p align="center">高速で軽量な、Windows 向けマルチペイン・ファイルマネージャ。<br>本物のエクスプローラーを、並べて。</p>
 
+<p align="center">
+  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="Windows版をダウンロード" src="https://img.shields.io/badge/%E3%83%80%E3%82%A6%E3%83%B3%E3%83%AD%E3%83%BC%E3%83%89-Windows%E7%89%88-0078D6?style=for-the-badge&logo=windows&logoColor=white"></a>
+</p>
+
 > **Maguro は efww の [efww/grids](https://github.com/efww/grids) のフォークです。** 実行ファイル名（`maguro.exe`）、ウィンドウクラス、設定フォルダ、ホットキー（Win+Shift+E）が異なります。
 
 <p align="center">

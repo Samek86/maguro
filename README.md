@@ -6,6 +6,10 @@
 
 <p align="center">A fast multi-pane file manager for Windows.<br>Real Explorer panes, side by side.</p>
 
+<p align="center">
+  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="Download for Windows" src="https://img.shields.io/badge/Download-for%20Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white"></a>
+</p>
+
 > **Maguro is a fork of [efww/grids](https://github.com/efww/grids) by efww.** It has its own exe (`maguro.exe`), window class, settings folder, and hotkey (Win+Shift+E).
 
 <p align="center">
