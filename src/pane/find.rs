@@ -269,6 +269,17 @@ struct FindUi {
     scroll: i32,
     list: isize,
     show: bool,
+    /// Inline rename of one hit. The edit is a child of the list, not of the folder view.
+    rename: Option<FindRename>,
+    /// Path to rename once the shell menu has returned. An edit opened inside that menu is cancelled.
+    rename_queue: String,
+}
+
+/// One search hit being renamed in place. `prev` is the name the row showed when the edit opened.
+struct FindRename {
+    path: String,
+    prev: String,
+    edit: isize,
 }
 
 fn hwnd_of(v: isize) -> HWND {
@@ -316,6 +327,7 @@ pub(crate) unsafe fn drop_find(hwnd: HWND) {
     if hwnd.0.is_null() {
         return;
     }
+    end_find_rename_hwnd(hwnd, false);
     let list = {
         let mut map = find_map();
         let list = map.get(&(hwnd.0 as isize)).map(|u| hwnd_of(u.list)).unwrap_or_default();
@@ -344,6 +356,7 @@ pub(crate) unsafe fn find_cancel(i: usize) {
 
 pub(crate) unsafe fn find_clear(i: usize) {
     let Some(hwnd) = pane_hwnd(i) else { return };
+    end_find_rename_hwnd(hwnd, false);
     let list = {
         let mut map = find_map();
         let Some(u) = map.get_mut(&(hwnd.0 as isize)) else { return };
@@ -365,6 +378,7 @@ pub(crate) unsafe fn find_clear(i: usize) {
 
 pub(crate) unsafe fn hide_find(i: usize) {
     let Some(hwnd) = pane_hwnd(i) else { return };
+    end_find_rename_hwnd(hwnd, false);
     let list = {
         let mut map = find_map();
         let Some(u) = map.get_mut(&(hwnd.0 as isize)) else { return };
@@ -529,6 +543,8 @@ unsafe fn refresh_find_in(i: usize, force: bool) {
             scroll: 0,
             list: 0,
             show: false,
+            rename: None,
+            rename_queue: String::new(),
         });
         let all = u.everywhere || forces_everywhere(&query);
         let same = same_find(&query, &u.query, &root, &u.root, u.recursive, u.searched_sub, all, u.searched_all, u.running, u.hits.len());
@@ -742,6 +758,7 @@ pub(crate) unsafe fn place_find(pane: HWND) {
     let view = pane_geo_of(pane, rc.right, rc.bottom, app(|a| a.dpi)).view;
     let (w, h) = ((view.right - view.left).max(0), (view.bottom - view.top).max(0));
     _ = SetWindowPos(list, Some(HWND_TOP), view.left, view.top, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    place_find_rename(pane);
     sync_net_fail(pane);
 }
 
@@ -1002,6 +1019,326 @@ fn find_worker() {
     }
 }
 
+/// Posted to the result list after the shell menu closes.
+const WM_FIND_RENAME: u32 = WM_APP + 91;
+/// Posted when the rename edit loses focus, so the commit does not destroy the edit inside its own proc.
+const WM_FIND_RENAME_END: u32 = WM_APP + 92;
+const FIND_EDIT_SUB: usize = 11;
+
+thread_local! {
+    static RENAME_CLOSING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Explorer's F2 selection, in UTF-16 units. `(0, -1)` selects the whole name.
+/// A file leaves the last extension unselected. A folder, a name with no dot,
+/// and a dotfile (the only dot is the first character) select everything.
+pub(crate) fn find_rename_sel(name: &str, dir: bool) -> (usize, isize) {
+    if !dir {
+        let units: Vec<u16> = name.encode_utf16().collect();
+        if let Some(dot) = units.iter().rposition(|&u| u == u16::from(b'.')) {
+            if dot > 0 {
+                return (0, dot as isize);
+            }
+        }
+    }
+    (0, -1)
+}
+
+/// A name Explorer will not accept. Empty, `.` / `..`, a trailing space or dot,
+/// a reserved device name, or a character the file system rejects.
+pub(crate) fn find_rename_blocked(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." || name.ends_with([' ', '.']) {
+        return true;
+    }
+    if name.chars().any(|c| (c as u32) < 0x20 || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')) {
+        return true;
+    }
+    let stem = name.split('.').next().unwrap_or(name);
+    let u = stem.to_ascii_uppercase();
+    matches!(u.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || ((u.starts_with("COM") || u.starts_with("LPT")) && u.len() == 4 && u.as_bytes().get(3).is_some_and(|b| b.is_ascii_digit()))
+}
+
+fn find_name_rect(width: i32, dpi: i32, engine: FindEngine, sel: usize, scroll: i32, cols: Option<[f64; 3]>) -> RECT {
+    let rh = row_h(dpi);
+    let head = rh * sticky_rows(engine);
+    let top = head - scroll + sel as i32 * rh;
+    let s = |v: i32| v.saturating_mul(dpi.max(1)) / 96;
+    if engine == FindEngine::Everything {
+        let edges = ev_col_edges_saved(width, dpi, cols);
+        let right = edges[1].max(edges[0].saturating_add(s(48)));
+        RECT { left: edges[0], top, right, bottom: top + rh }
+    } else {
+        RECT { left: s(4), top, right: width.saturating_sub(s(4)).max(s(48)), bottom: top + rh }
+    }
+}
+
+/// The result list has the inline rename edit focused.
+pub(crate) unsafe fn find_rename_focused(i: usize) -> bool {
+    let Some(hwnd) = pane_hwnd(i) else { return false };
+    let edit = find_map().get(&(hwnd.0 as isize)).and_then(|u| u.rename.as_ref()).map(|r| hwnd_of(r.edit)).unwrap_or_default();
+    !edit.0.is_null() && GetFocus() == edit
+}
+
+/// Second F2, as in Explorer: the whole name, extension included.
+pub(crate) unsafe fn select_find_rename_all(i: usize) {
+    let Some(hwnd) = pane_hwnd(i) else { return };
+    let edit = find_map().get(&(hwnd.0 as isize)).and_then(|u| u.rename.as_ref()).map(|r| hwnd_of(r.edit)).unwrap_or_default();
+    if !edit.0.is_null() {
+        SendMessageW(edit, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1)));
+    }
+}
+
+pub(crate) unsafe fn end_find_rename(i: usize, save: bool) {
+    let Some(hwnd) = pane_hwnd(i) else { return };
+    end_find_rename_hwnd(hwnd, save);
+}
+
+/// F2 on the result list: the same edit the shell Rename item starts.
+pub(crate) unsafe fn begin_find_rename_sel(i: usize) -> bool {
+    let Some(hwnd) = pane_hwnd(i) else { return false };
+    let path = {
+        let map = find_map();
+        let Some(u) = map.get(&(hwnd.0 as isize)) else { return false };
+        if !u.show {
+            return false;
+        }
+        u.hits.get(u.sel).map(|h| h.path.clone())
+    };
+    let Some(path) = path else { return false };
+    begin_find_rename_path(hwnd, &path)
+}
+
+/// After the search-result menu closes. The hit is renamed in this list, not in the folder view behind it.
+pub(crate) unsafe fn queue_find_rename(i: usize, path: &str) -> bool {
+    if path.is_empty() || super::recent::locked(i) {
+        return false;
+    }
+    let Some(hwnd) = pane_hwnd(i) else { return false };
+    let list = {
+        let mut map = find_map();
+        let Some(u) = map.get_mut(&(hwnd.0 as isize)) else { return false };
+        if !u.hits.iter().any(|h| h.path.eq_ignore_ascii_case(path)) {
+            return false;
+        }
+        u.rename_queue = path.to_string();
+        u.show = true;
+        hwnd_of(u.list)
+    };
+    if list.0.is_null() || !IsWindow(Some(list)).as_bool() {
+        return false;
+    }
+    _ = KillTimer(Some(hwnd), TIMER_FIND);
+    place_find(hwnd);
+    PostMessageW(Some(list), WM_FIND_RENAME, WPARAM(0), LPARAM(0)).is_ok()
+}
+
+unsafe fn ensure_find_edit(list: HWND, font: HFONT) -> HWND {
+    let style = GetWindowLongPtrW(list, GWL_STYLE) as u32;
+    if style & WS_CLIPCHILDREN.0 == 0 {
+        SetWindowLongPtrW(list, GWL_STYLE, (style | WS_CLIPCHILDREN.0) as isize);
+    }
+    let edit = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        w!("EDIT"),
+        w!(""),
+        WS_CHILD | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
+        0,
+        0,
+        0,
+        0,
+        Some(list),
+        None,
+        None,
+        None,
+    )
+    .unwrap_or_default();
+    if edit.0.is_null() {
+        return edit;
+    }
+    SendMessageW(edit, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+    let dark = DARK_ON.load(Ordering::Relaxed);
+    _ = SetWindowTheme(edit, if dark { w!("DarkMode_CFD") } else { w!("CFD") }, PCWSTR::null());
+    _ = SetWindowSubclass(edit, Some(find_edit_proc), FIND_EDIT_SUB, 0);
+    edit
+}
+
+unsafe fn place_find_rename(pane: HWND) {
+    let (edit, engine, sel, scroll, list) = {
+        let map = find_map();
+        let Some(u) = map.get(&(pane.0 as isize)) else { return };
+        let Some(r) = u.rename.as_ref() else { return };
+        (hwnd_of(r.edit), u.engine, u.sel, u.scroll, hwnd_of(u.list))
+    };
+    if edit.0.is_null() || list.0.is_null() {
+        return;
+    }
+    let dpi = app(|a| a.dpi);
+    let cols = app(|a| a.s.ev_cols);
+    let mut rc = RECT::default();
+    _ = GetClientRect(list, &mut rc);
+    place_edit(edit, find_name_rect(rc.right, dpi, engine, sel, scroll, cols), true);
+}
+
+unsafe fn begin_find_rename_path(pane: HWND, path: &str) -> bool {
+    if pane.0.is_null() || path.is_empty() {
+        return false;
+    }
+    let Some(i) = pane_of(pane) else { return false };
+    if super::recent::locked(i) {
+        return false;
+    }
+    if find_map().get(&(pane.0 as isize)).is_some_and(|u| u.rename.is_some()) {
+        end_find_rename_hwnd(pane, true);
+        if find_map().get(&(pane.0 as isize)).is_some_and(|u| u.rename.is_some()) {
+            return false;
+        }
+    }
+    let (dpi, font) = app(|a| (a.dpi, a.font));
+    let prepared = {
+        let mut map = find_map();
+        let Some(u) = map.get_mut(&(pane.0 as isize)) else { return false };
+        let Some(idx) = u.hits.iter().position(|h| h.path.eq_ignore_ascii_case(path)) else { return false };
+        u.sel = idx;
+        u.show = true;
+        let view_h = list_view_h(hwnd_of(u.list), dpi, sticky_rows(u.engine));
+        u.scroll = scroll_to_sel(u.sel, u.scroll, view_h, row_h(dpi));
+        let hit = u.hits[idx].clone();
+        (hit, u.engine, u.scroll, u.sel, hwnd_of(u.list))
+    };
+    let (hit, _engine, _scroll, _sel, list) = prepared;
+    if list.0.is_null() || !IsWindow(Some(list)).as_bool() {
+        return false;
+    }
+    _ = KillTimer(Some(pane), TIMER_FIND);
+    hide_find_tip(list, pane);
+    place_find(pane);
+    let edit = ensure_find_edit(list, font);
+    if edit.0.is_null() {
+        return false;
+    }
+    _ = SetWindowTextW(edit, &HSTRING::from(hit.name.as_str()));
+    {
+        let mut map = find_map();
+        if let Some(u) = map.get_mut(&(pane.0 as isize)) {
+            u.rename = Some(FindRename { path: hit.path.clone(), prev: hit.name.clone(), edit: edit.0 as isize });
+        }
+    }
+    place_find_rename(pane);
+    _ = SetFocus(Some(edit));
+    let (start, end) = find_rename_sel(&hit.name, hit.dir);
+    SendMessageW(edit, EM_SETSEL, Some(WPARAM(start)), Some(LPARAM(end)));
+    _ = InvalidateRect(Some(list), None, false);
+    true
+}
+
+unsafe fn apply_find_rename(pane: HWND, job: &FindRename, typed: &str) {
+    if typed == job.prev {
+        return;
+    }
+    let Some(i) = pane_of(pane) else { return };
+    let Some(parent) = Path::new(&job.path).parent() else {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    };
+    let new_path = parent.join(typed).to_string_lossy().into_owned();
+    let owner = app(|a| a.main);
+    match crate::run_rename_one(&job.path, typed, owner) {
+        Ok(()) => {
+            {
+                let mut map = find_map();
+                if let Some(u) = map.get_mut(&(pane.0 as isize)) {
+                    if let Some(k) = u.hits.iter().position(|h| h.path.eq_ignore_ascii_case(&job.path)) {
+                        u.hits[k].name = typed.to_string();
+                        u.hits[k].path = new_path;
+                        u.sel = k;
+                    }
+                }
+            }
+            let cur = app(|a| a.s.paths.get(i).cloned().unwrap_or_default());
+            let folder = parent.to_string_lossy();
+            if same_dir(&folder, &cur) {
+                if let Some(sv) = view_of::<IShellView>(i) {
+                    _ = sv.Refresh();
+                }
+            }
+        }
+        Err(e) => {
+            if !crate::shell::inuse::is_cancel(&e) {
+                let text = HSTRING::from(format!("{}{}", tr(crate::Key::RenameFailed), e.message()));
+                _ = MessageBoxW(Some(owner), &text, w!("Maguro"), MB_ICONWARNING);
+            }
+        }
+    }
+}
+
+unsafe fn end_find_rename_hwnd(pane: HWND, save: bool) {
+    if pane.0.is_null() || RENAME_CLOSING.with(|c| c.get()) {
+        return;
+    }
+    if save {
+        let bad = {
+            let map = find_map();
+            map.get(&(pane.0 as isize)).and_then(|u| u.rename.as_ref()).and_then(|r| {
+                let edit = hwnd_of(r.edit);
+                if edit.0.is_null() || !IsWindow(Some(edit)).as_bool() {
+                    return None;
+                }
+                let typed = text_of(edit);
+                (typed != r.prev && find_rename_blocked(&typed)).then_some(edit)
+            })
+        };
+        if let Some(edit) = bad {
+            _ = MessageBeep(MB_ICONWARNING);
+            _ = SetFocus(Some(edit));
+            return;
+        }
+    }
+    let Some(job) = ({
+        RENAME_CLOSING.with(|c| c.set(true));
+        let mut map = find_map();
+        map.get_mut(&(pane.0 as isize)).and_then(|u| u.rename.take())
+    }) else {
+        RENAME_CLOSING.with(|c| c.set(false));
+        return;
+    };
+    let edit = hwnd_of(job.edit);
+    let typed = if save && !edit.0.is_null() && IsWindow(Some(edit)).as_bool() { Some(text_of(edit)) } else { None };
+    if !edit.0.is_null() && IsWindow(Some(edit)).as_bool() {
+        _ = RemoveWindowSubclass(edit, Some(find_edit_proc), FIND_EDIT_SUB);
+        _ = DestroyWindow(edit);
+    }
+    if let Some(typed) = typed {
+        apply_find_rename(pane, &job, &typed);
+    }
+    let list = find_map().get(&(pane.0 as isize)).map(|u| hwnd_of(u.list)).unwrap_or_default();
+    if !list.0.is_null() && IsWindow(Some(list)).as_bool() && IsWindowVisible(list).as_bool() {
+        let focus = GetFocus();
+        if focus.0.is_null() || !IsWindow(Some(focus)).as_bool() || focus == list {
+            _ = SetFocus(Some(list));
+        }
+    }
+    if !list.0.is_null() {
+        _ = InvalidateRect(Some(list), None, false);
+    }
+    RENAME_CLOSING.with(|c| c.set(false));
+}
+
+unsafe extern "system" fn find_edit_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, a1: usize, a2: usize) -> LRESULT {
+    crate::crash::catch_wnd(std::panic::AssertUnwindSafe(|| unsafe { find_edit_proc_inner(h, msg, wp, lp, a1, a2) }))
+}
+
+unsafe fn find_edit_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _a1: usize, _a2: usize) -> LRESULT {
+    if msg == WM_KILLFOCUS && !RENAME_CLOSING.with(|c| c.get()) {
+        let list = GetParent(h).unwrap_or_default();
+        if !list.0.is_null() {
+            // Commit after this proc returns. Destroying the edit here would re-enter it.
+            _ = PostMessageW(Some(list), WM_FIND_RENAME_END, WPARAM(1), LPARAM(0));
+        }
+    }
+    DefSubclassProc(h, msg, wp, lp)
+}
+
 pub(crate) unsafe extern "system" fn find_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     crate::crash::catch_wnd(std::panic::AssertUnwindSafe(|| unsafe { find_proc_inner(h, msg, wp, lp) }))
 }
@@ -1009,7 +1346,24 @@ unsafe fn find_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT 
     let pane = GetParent(h).unwrap_or_default();
     bind_hwnd(h);
     match msg {
-        WM_PAINT => paint_find(h, pane),
+        WM_PAINT => {
+            paint_find(h, pane);
+            let edit = find_map().get(&(pane.0 as isize)).and_then(|u| u.rename.as_ref()).map(|r| hwnd_of(r.edit)).unwrap_or_default();
+            if !edit.0.is_null() && IsWindowVisible(edit).as_bool() {
+                _ = RedrawWindow(Some(edit), None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+            }
+        }
+        WM_CTLCOLOREDIT => return color_edit_on(HDC(wp.0 as _), pal().card, pal().text),
+        WM_FIND_RENAME => {
+            let path = {
+                let mut map = find_map();
+                map.get_mut(&(pane.0 as isize)).map(|u| std::mem::take(&mut u.rename_queue)).unwrap_or_default()
+            };
+            if path.is_empty() || !begin_find_rename_path(pane, &path) {
+                _ = MessageBeep(MB_ICONWARNING);
+            }
+        }
+        WM_FIND_RENAME_END => end_find_rename_hwnd(pane, wp.0 != 0),
         WM_ERASEBKGND => return LRESULT(1),
         WM_SETCURSOR => {
             if (lp.0 & 0xffff) as u32 != HTCLIENT {
@@ -1177,6 +1531,7 @@ unsafe fn scroll_find(pane: HWND, dy: i32) {
     if !list.0.is_null() {
         _ = InvalidateRect(Some(list), None, false);
     }
+    place_find_rename(pane);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1733,6 +2088,14 @@ unsafe fn find_context(pane: HWND, y: Option<i32>, screen: POINT) {
         hit
     };
     let Some(hit) = hit else { return };
+    // The filter's hide timer must not take the list down while the menu is open.
+    if let Some(pane_h) = pane_hwnd(i) {
+        _ = KillTimer(Some(pane_h), TIMER_FIND);
+    }
+    let list = find_map().get(&(pane.0 as isize)).map(|u| hwnd_of(u.list)).unwrap_or_default();
+    if !list.0.is_null() {
+        _ = SetFocus(Some(list));
+    }
     let items = [(hit.path, !hit.dir)];
     _ = crate::shell::show_paths_ctx(i, &items, screen);
 }
@@ -1857,6 +2220,35 @@ fn find_status(running: bool, n: usize, more: bool, engine: FindEngine, everywhe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rename_selects_the_stem_the_way_f2_does_and_rejects_a_bad_name() {
+        // A file keeps the last extension outside the selection. EM_SETSEL counts UTF-16 units.
+        assert_eq!(find_rename_sel("note.txt", false), (0, 4));
+        assert_eq!(find_rename_sel("a.tar.gz", false), (0, 5));
+        assert_eq!(find_rename_sel("한글.txt", false), (0, 2));
+        assert_eq!(find_rename_sel("a\u{1F600}.txt", false), (0, 3));
+        // A folder, a name with no dot, and a dotfile select the whole label.
+        assert_eq!(find_rename_sel("Photos", true), (0, -1));
+        assert_eq!(find_rename_sel("note.txt", true), (0, -1));
+        assert_eq!(find_rename_sel("README", false), (0, -1));
+        assert_eq!(find_rename_sel(".gitignore", false), (0, -1));
+        assert!(!find_rename_blocked("note.txt"));
+        assert!(!find_rename_blocked("한글"));
+        assert!(find_rename_blocked(""));
+        assert!(find_rename_blocked("."));
+        assert!(find_rename_blocked(".."));
+        assert!(find_rename_blocked("note."));
+        assert!(find_rename_blocked("note "));
+        assert!(find_rename_blocked("a/b"));
+        assert!(find_rename_blocked("a\\b"));
+        assert!(find_rename_blocked("a:b"));
+        assert!(find_rename_blocked("a*b"));
+        assert!(find_rename_blocked("CON"));
+        assert!(find_rename_blocked("aux.txt"));
+        assert!(find_rename_blocked("COM1"));
+        assert!(find_rename_blocked("LPT9.bin"));
+    }
 
     #[test]
     fn names_match_substring_wildcard_and_either_term() {

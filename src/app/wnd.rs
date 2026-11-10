@@ -919,7 +919,9 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 // Quick look opened from a result takes focus off this list. Keep the rows up
                 // until that preview closes, or Space just after a click would hide them.
                 let peeking = pane_of(h).is_some_and(peek_shows_find);
-                if !on_filter && !on_list && !peeking {
+                // The shell menu takes focus. Hiding now would drop the list before Rename can edit a hit.
+                let menu = CTX_OPEN.load(Ordering::Acquire);
+                if !on_filter && !on_list && !peeking && !menu {
                     if let Some(i) = pane_of(h) {
                         hide_find(i);
                     }
