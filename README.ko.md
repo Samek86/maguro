@@ -6,6 +6,10 @@
 
 <p align="center">빠르고 가벼운 Windows용 다중 패널 파일 관리자.<br>진짜 탐색기 패널을 나란히.</p>
 
+<p align="center">
+  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="Windows용 다운로드" src="https://img.shields.io/badge/%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-Windows%EC%9A%A9-0078D6?style=for-the-badge&logo=windows&logoColor=white"></a>
+</p>
+
 > **Maguro는 efww의 [efww/grids](https://github.com/efww/grids) 포크입니다.** exe 이름(`maguro.exe`), 창 클래스, 설정 폴더, 단축키(Win+Shift+E)가 다릅니다.
 
 <p align="center">
