@@ -342,6 +342,66 @@ pub(crate) unsafe fn cmd_verb(cm: &IContextMenu, offset: usize) -> String {
     String::from_utf16_lossy(&buf[..end])
 }
 
+/// ANSI verb, for a handler that answers `GCS_VERBA` only. The canonical name is still English.
+unsafe fn cmd_verb_ansi(cm: &IContextMenu, offset: usize) -> String {
+    let mut buf = [0u8; 80];
+    if cm.GetCommandString(offset, GCS_VERBA, None, PSTR(buf.as_mut_ptr()), buf.len() as u32).is_err() {
+        return String::new();
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+/// Shell Rename. `GetCommandString` returns the canonical verb `rename` in every UI language
+/// (or a dotted form such as `Windows.rename`). The drawn label (이름 바꾸기, Rename) is not a verb.
+pub(crate) fn is_rename_verb(verb: &str) -> bool {
+    let v = verb.trim().trim_matches('\0');
+    if v.is_empty() {
+        return false;
+    }
+    let tail = v.rsplit(['.', '\\']).next().unwrap_or(v);
+    tail.eq_ignore_ascii_case("rename")
+}
+
+/// Posted to the shell view after the popup is gone. A rename edit started inside
+/// `WM_CONTEXTMENU` is cancelled when that message returns and focus settles.
+const WM_CTX_RENAME: u32 = WM_APP + 90;
+
+/// The file-pane menu comes from `IShellFolder::GetUIObjectOf`, which has no view site.
+/// `CDefFolderMenu` handles `rename` by calling `IFolderView2::DoRename` on that site, so
+/// `InvokeCommand` returns without an edit. F2 reaches the same method on the view itself.
+unsafe fn begin_shell_rename(pane: usize) -> bool {
+    if crate::pane::recent::locked(pane) {
+        return false;
+    }
+    let Some(fv) = view_of::<IFolderView2>(pane) else { return false };
+    if fv.DoRename().is_ok() {
+        return true;
+    }
+    focus_view(pane);
+    if fv.DoRename().is_ok() {
+        return true;
+    }
+    // Same flags as a new file's edit when the view will not `DoRename`.
+    let Some(sv) = view_of::<IShellView>(pane) else { return false };
+    let Ok(idx) = fv.GetFocusedItem() else { return false };
+    if idx < 0 {
+        return false;
+    }
+    let Ok(pidl) = fv.Item(idx) else { return false };
+    let edit = (SVSI_EDIT.0 | SVSI_DESELECTOTHERS.0 | SVSI_ENSUREVISIBLE.0 | SVSI_FOCUSED.0) as u32;
+    let ok = sv.SelectItem(pidl, edit).is_ok();
+    CoTaskMemFree(Some(pidl as _));
+    ok
+}
+
+unsafe fn queue_shell_rename(owner: HWND, pane: usize) -> bool {
+    if ctx_surface(owner) && PostMessageW(Some(owner), WM_CTX_RENAME, WPARAM(pane), LPARAM(0)).is_ok() {
+        return true;
+    }
+    begin_shell_rename(pane)
+}
+
 /// One GetCommandString pass for observe / properties / fav_anchor / fast paste / Excel read-only / WM_INITMENUPOPUP.
 #[derive(Clone, Default)]
 struct VerbIndex {
@@ -1089,6 +1149,7 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     });
     CTX_MENU.with(|m| m.set(menu.0 as isize));
     let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, None, owner, None).0;
+    let mut start_rename = false;
     super::ctxmenu::observe_menu(menu, &cm, targets);
     MENU_BRIDGE.with(|b| *b.borrow_mut() = None);
     if cmd == ID_CTX_REVEAL as i32 {
@@ -1127,9 +1188,15 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     } else if crate::winmerge::ctx_command(owner, cmd, pane, items) {
     } else if super::ctxpack::invoke_menu_command(cmd as u32, paths, background, props_folder) {
     } else if cmd > 0 {
-        let verb = cmd_verb(&cm, (cmd as u32 - 1) as usize);
+        let offset = (cmd as u32 - 1) as usize;
+        let verb = cmd_verb(&cm, offset);
         let default_item = GetMenuDefaultItem(menu, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0)) as i32 == cmd;
-        if !claim_folder_open(pane, &verb, items, default_item) {
+        // A file click only. Search results are not this view's selection, and a background
+        // click has nothing of its own to rename. The shell item stays on the menu.
+        let rename_verb = if is_rename_verb(&verb) { true } else { verb.is_empty() && is_rename_verb(&cmd_verb_ansi(&cm, offset)) };
+        if !background && pane_selection && rename_verb {
+            start_rename = true;
+        } else if !claim_folder_open(pane, &verb, items, default_item) {
             let mut ici = CMINVOKECOMMANDINFO {
                 cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
                 hwnd: owner,
@@ -1171,6 +1238,10 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     _ = DestroyMenu(menu);
     // Label probes CoCreate handlers. The popup is already gone, so this is not the wait to open it.
     super::ctxmenu::learn_pending(targets);
+    // After this function returns, so menu teardown cannot take focus away from the edit.
+    if start_rename && !queue_shell_rename(owner, pane) {
+        _ = MessageBeep(MB_ICONWARNING);
+    }
     true
 }
 
@@ -1201,6 +1272,13 @@ pub(crate) unsafe extern "system" fn ctx_proc(h: HWND, msg: u32, wp: WPARAM, lp:
     crate::crash::catch_wnd(std::panic::AssertUnwindSafe(|| unsafe { ctx_proc_inner(h, msg, wp, lp, _a1, data) }))
 }
 unsafe fn ctx_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _a1: usize, data: usize) -> LRESULT {
+    if msg == WM_CTX_RENAME {
+        let pane = if view_of::<IShellView>(wp.0).is_some() { wp.0 } else { pane_of(h).unwrap_or(data) };
+        if !begin_shell_rename(pane) {
+            _ = MessageBeep(MB_ICONWARNING);
+        }
+        return LRESULT(0);
+    }
     if msg == WM_INITMENUPOPUP {
         // The shell may insert its own separator, or a second New folder, while the menu opens.
         let lr = forward_menu(msg, wp, lp);
@@ -1864,7 +1942,7 @@ mod geo_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{fav_action_label, parent_of};
+    use super::{fav_action_label, is_rename_verb, parent_of};
     use crate::i18n::UI;
     use std::sync::atomic::Ordering;
 
@@ -1873,6 +1951,27 @@ mod tests {
         assert_eq!(parent_of(r"C:\a\note.txt").as_deref(), Some(r"C:\a"));
         assert_eq!(parent_of(r"C:\note.txt").as_deref(), Some(r"C:\"));
         assert_eq!(parent_of("note.txt"), None);
+    }
+
+    #[test]
+    fn rename_verb_is_the_canonical_name_not_the_label() {
+        assert!(is_rename_verb("rename"));
+        assert!(is_rename_verb("Rename"));
+        assert!(is_rename_verb("RENAME"));
+        assert!(is_rename_verb("  rename  "));
+        assert!(is_rename_verb("rename\0"));
+        assert!(is_rename_verb("Windows.rename"));
+        assert!(is_rename_verb(r"something\rename"));
+        assert!(!is_rename_verb(""));
+        assert!(!is_rename_verb("\0"));
+        assert!(!is_rename_verb("이름 바꾸기"));
+        assert!(!is_rename_verb("名前の変更"));
+        assert!(!is_rename_verb("Rename…"));
+        assert!(!is_rename_verb("ren"));
+        assert!(!is_rename_verb("renamex"));
+        assert!(!is_rename_verb("properties"));
+        assert!(!is_rename_verb("open"));
+        assert!(!is_rename_verb("delete"));
     }
 
     #[test]
