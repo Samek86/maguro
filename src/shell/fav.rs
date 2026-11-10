@@ -352,6 +352,28 @@ unsafe fn cmd_verb_ansi(cm: &IContextMenu, offset: usize) -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
+/// Where a shell Rename click starts an inline edit.
+/// The file pane's menu is that view's selection, so F2's `DoRename` applies.
+/// A search hit is not that selection: the result list is drawn by Maguro, not by a folder view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CtxRename {
+    ShellView,
+    SearchHit,
+}
+
+pub(crate) fn ctx_rename_target(background: bool, pane_selection: bool, rename_verb: bool, one_item: bool) -> Option<CtxRename> {
+    if background || !rename_verb {
+        return None;
+    }
+    if pane_selection {
+        Some(CtxRename::ShellView)
+    } else if one_item {
+        Some(CtxRename::SearchHit)
+    } else {
+        None
+    }
+}
+
 /// Shell Rename. `GetCommandString` returns the canonical verb `rename` in every UI language
 /// (or a dotted form such as `Windows.rename`). The drawn label (이름 바꾸기, Rename) is not a verb.
 pub(crate) fn is_rename_verb(verb: &str) -> bool {
@@ -1150,6 +1172,7 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     CTX_MENU.with(|m| m.set(menu.0 as isize));
     let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, None, owner, None).0;
     let mut start_rename = false;
+    let mut search_rename: Option<String> = None;
     super::ctxmenu::observe_menu(menu, &cm, targets);
     MENU_BRIDGE.with(|b| *b.borrow_mut() = None);
     if cmd == ID_CTX_REVEAL as i32 {
@@ -1191,12 +1214,13 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
         let offset = (cmd as u32 - 1) as usize;
         let verb = cmd_verb(&cm, offset);
         let default_item = GetMenuDefaultItem(menu, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0)) as i32 == cmd;
-        // A file click only. Search results are not this view's selection, and a background
-        // click has nothing of its own to rename. The shell item stays on the menu.
+        // The shell item stays on the menu. InvokeCommand has no view site, so it does not edit.
+        // A file-pane click uses the view's own F2. A search hit is not that selection.
         let rename_verb = if is_rename_verb(&verb) { true } else { verb.is_empty() && is_rename_verb(&cmd_verb_ansi(&cm, offset)) };
-        if !background && pane_selection && rename_verb {
-            start_rename = true;
-        } else if !claim_folder_open(pane, &verb, items, default_item) {
+        match ctx_rename_target(background, pane_selection, rename_verb, items.len() == 1) {
+            Some(CtxRename::ShellView) => start_rename = true,
+            Some(CtxRename::SearchHit) => search_rename = Some(items[0].0.clone()),
+            None if !claim_folder_open(pane, &verb, items, default_item) => {
             let mut ici = CMINVOKECOMMANDINFO {
                 cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
                 hwnd: owner,
@@ -1233,6 +1257,8 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
                     _ = MessageBeep(MB_ICONWARNING);
                 }
             }
+            }
+            None => {}
         }
     }
     _ = DestroyMenu(menu);
@@ -1241,6 +1267,11 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     // After this function returns, so menu teardown cannot take focus away from the edit.
     if start_rename && !queue_shell_rename(owner, pane) {
         _ = MessageBeep(MB_ICONWARNING);
+    }
+    if let Some(path) = search_rename {
+        if !queue_find_rename(pane, &path) {
+            _ = MessageBeep(MB_ICONWARNING);
+        }
     }
     true
 }
@@ -1942,7 +1973,7 @@ mod geo_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{fav_action_label, is_rename_verb, parent_of};
+    use super::{ctx_rename_target, fav_action_label, is_rename_verb, parent_of, CtxRename};
     use crate::i18n::UI;
     use std::sync::atomic::Ordering;
 
@@ -1951,6 +1982,16 @@ mod tests {
         assert_eq!(parent_of(r"C:\a\note.txt").as_deref(), Some(r"C:\a"));
         assert_eq!(parent_of(r"C:\note.txt").as_deref(), Some(r"C:\"));
         assert_eq!(parent_of("note.txt"), None);
+    }
+
+    #[test]
+    fn search_hit_rename_is_not_the_folder_view() {
+        assert_eq!(ctx_rename_target(false, false, true, true), Some(CtxRename::SearchHit));
+        assert_eq!(ctx_rename_target(false, true, true, true), Some(CtxRename::ShellView));
+        assert_eq!(ctx_rename_target(false, true, true, false), Some(CtxRename::ShellView));
+        assert_eq!(ctx_rename_target(true, false, true, true), None);
+        assert_eq!(ctx_rename_target(false, false, false, true), None);
+        assert_eq!(ctx_rename_target(false, false, true, false), None);
     }
 
     #[test]

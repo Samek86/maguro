@@ -515,6 +515,24 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
         return false;
     }
     let list = list && !label_editing;
+    // The search-result rename edit is not the shell label. Enter commits, Esc cancels,
+    // and every other non-Alt key belongs to that box (a letter must not reach the folder view).
+    if find_rename_focused(a) && !alt {
+        let ch = VIRTUAL_KEY(vk);
+        if !ctrl && ch == VK_ESCAPE {
+            end_find_rename(a, false);
+            return true;
+        }
+        if !ctrl && ch == VK_RETURN {
+            end_find_rename(a, true);
+            return true;
+        }
+        if !ctrl && !shift && ch == VK_F2 {
+            select_find_rename_all(a);
+            return true;
+        }
+        return false;
+    }
     // A failed share keeps its path. F5 retries that path; the shell's refresh would reload the
     // previous folder and leave the failure behind. The error view's Retry button does the same.
     // A hold does not retry again. This runs before key bindings, so a rebound F5 still retries.
@@ -669,6 +687,13 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
         VK_SPACE if !ctrl && !shift && !alt && find_focused(a) && app(|x| x.s.space_preview) && !ime_composing(m.hwnd) => {
             if m.lParam.0 & (1 << 30) == 0 {
                 preview_find_sel(a);
+            }
+            true
+        }
+        // F2 on a result row renames that hit. The shell accelerator would rename the folder view's focus instead.
+        VK_F2 if !ctrl && !shift && !alt && find_focused(a) => {
+            if !begin_find_rename_sel(a) {
+                _ = MessageBeep(MB_ICONWARNING);
             }
             true
         }
