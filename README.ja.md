@@ -33,6 +33,14 @@
 <br>
 
 <p align="center">
+  <a href="docs/demo-ja.mp4"><img src="docs/demo-ja.gif" width="320" alt="Maguroの動作画面"></a>
+</p>
+
+<p align="center">▶ <a href="docs/demo-ja.mp4">フル動画を見る</a>（60秒）</p>
+
+<br>
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images-v7/ja/hero_dark.png">
     <img alt="Maguro、ライトテーマ、ペイン二つ" src="docs/images-v7/ja/hero_light.png">
