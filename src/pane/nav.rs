@@ -1598,6 +1598,7 @@ pub(crate) unsafe fn addr_reset(i: usize, e: HWND) {
 // Enter in the address bar: a folder (relative to this pane's) is browsed to, a file opened, else a command
 // (cmd, wt, powershell ...) runs in this pane's folder.
 pub(crate) unsafe fn go_edit(i: usize) {
+    crate::shell::openlog::trace("input", || "source=address".into());
     let Some(e) = pane_ctl(i, ID_EDIT) else { return };
     let raw = text_of(e);
     if let Some(parsed) = crate::remote::parse_remote_url(raw.trim()) {
@@ -1672,9 +1673,12 @@ pub(crate) unsafe fn go_edit(i: usize) {
                 break 'go ok.then_some(true);
             }
             let (mut pidl, mut sfgao) = (std::ptr::null_mut(), 0u32);
-            if SHParseDisplayName(&HSTRING::from(&target), None, &mut pidl, SFGAO_FOLDER.0, Some(&mut sfgao)).is_ok() && !pidl.is_null() {
+            crate::shell::openlog::trace("resolve-start", || format!("source=address target={target}"));
+            let parsed = SHParseDisplayName(&HSTRING::from(&target), None, &mut pidl, SFGAO_FOLDER.0, Some(&mut sfgao)).is_ok() && !pidl.is_null();
+            if parsed {
                 // SFGAO_FOLDER can still be 0 while the path is a local directory, junction, or symlink.
                 let folder = sfgao & SFGAO_FOLDER.0 != 0 || local_directory(&target) || local_symlink_dir(&target);
+                crate::shell::openlog::trace("resolve-end", || format!("source=address ok=1 folder={}", folder as u8));
                 let r = if folder {
                     eb_of(i).is_some_and(|eb| browse_id(&eb, pidl, SBSP_ABSOLUTE).is_ok()).then_some(true)
                 } else {
@@ -1683,12 +1687,21 @@ pub(crate) unsafe fn go_edit(i: usize) {
                     if crate::folderapp::shown_on() {
                         crate::folderapp::note_activate(app(|a| a.main.0 as isize), i, false);
                     }
-                    run(SHELLEXECUTEINFOW { fMask: SEE_MASK_IDLIST | SEE_MASK_FLAG_NO_UI, lpIDList: pidl as _, ..Default::default() }).then_some(false)
+                    // A filesystem file is started off this thread. A shell item with no
+                    // file path keeps the synchronous id-list execute.
+                    if let Some(file) = crate::shell::fileopen::prepare(&target) {
+                        let hwnd = app(|a| a.main.0 as isize);
+                        crate::shell::fileopen::launch("address", hwnd, vec![file]).then_some(false)
+                    } else {
+                        crate::shell::openlog::trace("path", || "source=address mode=shell-default".into());
+                        run(SHELLEXECUTEINFOW { fMask: SEE_MASK_IDLIST | SEE_MASK_FLAG_NO_UI, lpIDList: pidl as _, ..Default::default() }).then_some(false)
+                    }
                 };
                 CoTaskMemFree(Some(pidl as _));
                 resolved = true;
                 break 'go r;
             }
+            crate::shell::openlog::trace("resolve-end", || "source=address ok=0".into());
             if !pidl.is_null() {
                 CoTaskMemFree(Some(pidl as _));
             }
@@ -3755,13 +3768,15 @@ enum ActRow {
     FolderItem(IShellItem),
     FolderPath(String),
     File(IShellItem),
+    /// A display name joined onto this folder. The shell item itself was not ready.
+    FilePath(String),
     Unknown,
 }
 
 fn row_kind(row: &ActRow) -> crate::folderapp::ActKind {
     match row {
         ActRow::FolderItem(_) | ActRow::FolderPath(_) => crate::folderapp::ActKind::Folder,
-        ActRow::File(_) => crate::folderapp::ActKind::File,
+        ActRow::File(_) | ActRow::FilePath(_) => crate::folderapp::ActKind::File,
         ActRow::Unknown => crate::folderapp::ActKind::Unknown,
     }
 }
@@ -3905,22 +3920,191 @@ unsafe fn activation_rows(i: usize, fv: &IFolderView2) -> Vec<ActRow> {
     if crate::folderapp::link_file(&full) {
         if let Some(dir) = folder_link_target(&full) {
             rows.push(ActRow::FolderPath(dir));
+            return rows;
         }
-    } else if local_directory(&full) {
-        rows.push(ActRow::FolderPath(full));
+    }
+    // A file used to be dropped here, so a click during a refresh was swallowed.
+    match local_dir_answer(&full) {
+        Some(true) => rows.push(ActRow::FolderPath(full)),
+        Some(false) => rows.push(ActRow::FilePath(full)),
+        None => {}
     }
     rows
 }
 
-unsafe fn open_file_item(item: &IShellItem) {
-    if item_is_container(item) == Some(true) {
+fn rows_ready(rows: &[ActRow]) -> bool {
+    rows.iter().any(|r| !matches!(r, ActRow::Unknown))
+}
+
+fn activate_source() -> &'static str {
+    unsafe {
+        if GetKeyState(VK_RETURN.0 as i32) < 0 {
+            "enter"
+        } else if GetKeyState(VK_LBUTTON.0 as i32) < 0 {
+            "dblclick"
+        } else {
+            "activate"
+        }
+    }
+}
+
+/// Files this process will launch. `None` when any row is a folder, an executable,
+/// or not a filesystem path: that selection stays on the existing shell path.
+unsafe fn verb_files(rows: &[ActRow]) -> Option<Vec<crate::shell::fileopen::OpenFile>> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for row in rows {
+        let path = match row {
+            ActRow::File(it) => item_path(it),
+            ActRow::FilePath(p) => p.clone(),
+            _ => return None,
+        };
+        if crate::shell::fileopen::route(&path) != Some(crate::shell::fileopen::Mode::Verb) {
+            return None;
+        }
+        out.push(crate::shell::fileopen::prepare(&path)?);
+    }
+    Some(out)
+}
+
+unsafe fn sync_open(path: &str) {
+    _ = ShellExecuteW(None, w!("open"), &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+}
+
+/// Open every file row. Documents and executables both leave the UI thread.
+/// A path this module will not take (not a file path) keeps the old `ShellExecuteW`.
+unsafe fn open_rows(rows: &[ActRow], source: &'static str) {
+    let mut batch = Vec::new();
+    let mut leftover = Vec::new();
+    for row in rows {
+        let path = match row {
+            ActRow::File(it) => {
+                if item_is_container(it) == Some(true) {
+                    continue;
+                }
+                let path = item_path(it);
+                if path.is_empty() || local_directory(&path) {
+                    continue;
+                }
+                path
+            }
+            ActRow::FilePath(p) => {
+                if local_directory(p) {
+                    continue;
+                }
+                p.clone()
+            }
+            _ => continue,
+        };
+        if let Some(file) = crate::shell::fileopen::prepare(&path) {
+            batch.push(file);
+        } else {
+            leftover.push(path);
+        }
+    }
+    if !batch.is_empty() {
+        let hwnd = app(|a| a.main.0 as isize);
+        if !crate::shell::fileopen::launch(source, hwnd, batch.clone()) {
+            for file in &batch {
+                sync_open(&file.path);
+            }
+        }
+    }
+    for path in &leftover {
+        sync_open(path);
+    }
+}
+
+fn same_act_path(a: &str, b: &str) -> bool {
+    fn norm(s: &str) -> &str {
+        s.trim().trim_end_matches(['\\', '/'])
+    }
+    let (a, b) = (norm(a), norm(b));
+    !a.is_empty() && a.eq_ignore_ascii_case(b)
+}
+
+/// True when `paths` is the same open as `prev` inside one double-click.
+/// Comparison is case-insensitive. A second call that names only some of the
+/// rows still matches: the details-cell path selects one row of the selection.
+/// An empty path list does not match, so an unresolved click is not swallowed.
+pub(crate) fn duplicate_activation(
+    prev_pane: usize,
+    prev_paths: &[String],
+    prev_tick: u64,
+    pane: usize,
+    paths: &[String],
+    now: u64,
+    window_ms: u32,
+) -> bool {
+    if pane != prev_pane || paths.is_empty() || prev_paths.is_empty() {
+        return false;
+    }
+    if now < prev_tick || now - prev_tick > u64::from(window_ms) {
+        return false;
+    }
+    paths.iter().all(|p| prev_paths.iter().any(|q| same_act_path(p, q)))
+}
+
+struct ActMemo {
+    pane: usize,
+    tick: u64,
+    paths: Vec<String>,
+}
+
+thread_local! {
+    static ACT_MEMO: std::cell::RefCell<Option<ActMemo>> = std::cell::RefCell::new(None);
+}
+
+fn repeated_activation(pane: usize, paths: &[String]) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    let now = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    let window = unsafe { GetDoubleClickTime() };
+    ACT_MEMO.with(|m| {
+        m.borrow().as_ref().is_some_and(|a| duplicate_activation(a.pane, &a.paths, a.tick, pane, paths, now, window))
+    })
+}
+
+fn remember_activation(pane: usize, paths: &[String]) {
+    if paths.is_empty() {
         return;
     }
-    let path = item.GetDisplayName(SIGDN_FILESYSPATH).ok().map(|p| pwstr(p)).unwrap_or_default();
-    if path.is_empty() || local_directory(&path) {
-        return;
+    let tick = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    ACT_MEMO.with(|m| {
+        *m.borrow_mut() = Some(ActMemo { pane, tick, paths: paths.to_vec() });
+    });
+}
+
+unsafe fn activation_paths(rows: &[ActRow]) -> Vec<String> {
+    let mut out = Vec::new();
+    for row in rows {
+        let path = match row {
+            ActRow::FolderItem(it) | ActRow::File(it) => item_path(it),
+            ActRow::FolderPath(p) | ActRow::FilePath(p) => p.clone(),
+            ActRow::Unknown => continue,
+        };
+        if !path.trim().is_empty() {
+            out.push(path);
+        }
     }
-    _ = ShellExecuteW(None, w!("open"), &HSTRING::from(&path), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+    out
+}
+
+fn row_counts(rows: &[ActRow]) -> (usize, usize, usize) {
+    let mut folder = 0;
+    let mut file = 0;
+    let mut unknown = 0;
+    for row in rows {
+        match row {
+            ActRow::FolderItem(_) | ActRow::FolderPath(_) => folder += 1,
+            ActRow::File(_) | ActRow::FilePath(_) => file += 1,
+            ActRow::Unknown => unknown += 1,
+        }
+    }
+    (folder, file, unknown)
 }
 
 /// Double-click / Enter on the file list, including the filter.
@@ -3932,12 +4116,17 @@ unsafe fn open_file_item(item: &IShellItem) {
 /// `SFGAO_FOLDER` bit; a file symlink to a directory; a `.lnk` whose pidl existed but
 /// whose attributes were not ready; Enter with several rows selected, only one of
 /// which was inspected; a grouped or filtered row whose shell item could not be read
-/// yet. Ctrl and the middle button still return false: that launch is a new tab.
-/// The pane is recorded either way, so a verb that still slips through is caught by
-/// the single-instance handoff and applied to this pane.
+/// yet. A filesystem document is launched on a background thread so the handler load
+/// does not freeze this window. An executable, a folder, a folder shortcut, a zip
+/// opened as a folder, and a non-filesystem item stay on the path they had. Ctrl and
+/// the middle button still return false: that launch is a new tab. The pane is
+/// recorded either way, so a verb that still slips through is caught by the
+/// single-instance handoff and applied to this pane.
 pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
     // The empty-space handler also sees this click. A verb the shell already ran must not run again.
     mark_shell_activate();
+    let source = activate_source();
+    crate::shell::openlog::trace("input", || format!("source={source}"));
     if let Some(sv) = sv {
         if let Ok(h) = sv.GetWindow() {
             bind_hwnd(h);
@@ -3950,30 +4139,75 @@ pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
     // Ctrl / middle: S_FALSE so the view can open a new tab / run the verb. Folder-app off no
     // longer falls through — that S_FALSE path is what leaked real Explorer windows on races.
     if ctrl || middle {
+        crate::shell::openlog::trace("path", || format!("source={source} mode=shell-default reason=modifier"));
         return false;
     }
     let Some(sv) = sv else { return true }; // consume: do not let DefView invent a new window
     let Ok(fv) = sv.cast::<IFolderView2>() else { return true };
-    let rows = activation_rows(i, &fv);
+    crate::shell::openlog::trace("resolve-start", || format!("source={source}"));
+    // The shell item is often missing for one beat while the folder enumerates or the
+    // watcher refreshes. A few short tries beat swallowing the click. 60ms total.
+    let mut rows = activation_rows(i, &fv);
+    let mut tries = 1u32;
+    while !rows_ready(&rows) && tries < 4 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        rows = activation_rows(i, &fv);
+        tries += 1;
+    }
+    if crate::shell::openlog::enabled() {
+        let (folder, file, unknown) = row_counts(&rows);
+        crate::shell::openlog::write(
+            "resolve-end",
+            &format!("source={source} tries={tries} folder={folder} file={file} unknown={unknown}"),
+        );
+    }
     let kinds: Vec<_> = rows.iter().map(row_kind).collect();
+    let paths = activation_paths(&rows);
+    // OnDefaultCommand and the details-cell fallback both enter here for one
+    // double-click. A document used to return without launching; it now launches,
+    // so the second call in this gesture must not start the file or browse again.
+    // Enter is its own keypress and is not collapsed with a click.
+    if source != "enter" && repeated_activation(i, &paths) {
+        crate::shell::openlog::trace("path", || format!("source={source} mode=duplicate-skipped"));
+        return true;
+    }
     let registered = crate::folderapp::shown_on();
     match crate::folderapp::list_activation(registered, false, false, &kinds) {
-        crate::folderapp::ListAct::Shell => false,
-        crate::folderapp::ListAct::Consume => true,
-        crate::folderapp::ListAct::FilesOnly => {
-            for row in &rows {
-                if let ActRow::File(it) = row {
-                    open_file_item(it);
+        crate::folderapp::ListAct::Shell => {
+            // Every row is a filesystem document. Launch those and tell the view we
+            // handled it, so DefView does not open them again on this thread.
+            // One executable or a non-filesystem pidl in the selection: do not launch
+            // anything here. The view's own verb is the existing path for that click.
+            if let Some(files) = verb_files(&rows) {
+                let hwnd = app(|a| a.main.0 as isize);
+                if crate::shell::fileopen::launch(source, hwnd, files) {
+                    if source != "enter" {
+                        remember_activation(i, &paths);
+                    }
+                    return true;
                 }
+            }
+            crate::shell::openlog::trace("path", || format!("source={source} mode=shell-default"));
+            false
+        }
+        crate::folderapp::ListAct::Consume => {
+            if source != "enter" {
+                remember_activation(i, &paths);
             }
             true
         }
-        crate::folderapp::ListAct::Browse(at) => {
-            for row in &rows {
-                if let ActRow::File(it) = row {
-                    open_file_item(it);
-                }
+        crate::folderapp::ListAct::FilesOnly => {
+            if source != "enter" {
+                remember_activation(i, &paths);
             }
+            open_rows(&rows, "mixed");
+            true
+        }
+        crate::folderapp::ListAct::Browse(at) => {
+            if source != "enter" {
+                remember_activation(i, &paths);
+            }
+            open_rows(&rows, "mixed");
             let target = match rows.get(at) {
                 Some(ActRow::FolderPath(p)) => Some(p.clone()),
                 Some(ActRow::FolderItem(it)) => Some(unsafe { item_path(it) }),
@@ -4741,5 +4975,34 @@ mod list_hwnd_tests {
                 _ = UnregisterClassW(w!("DirectUIHWND"), Some(inst.into()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod activation_dedupe {
+    use super::duplicate_activation;
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn same_rows_inside_one_double_click_are_one_open() {
+        let prev = paths(&[r"C:\demo\a-note.txt", r"C:\demo\c-image.png"]);
+        let window = 500u32;
+        // Same set, any order and case, including the exact same tick.
+        assert!(duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"c:\demo\c-image.png", r"C:\demo\a-note.txt"]), 1_000, window));
+        // The cell fallback names one row of the selection. A trailing slash still matches.
+        assert!(duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt\"]), 1_200, window));
+        // The window is inclusive at the edge and exclusive just past it.
+        assert!(duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt"]), 1_500, window));
+        assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt"]), 1_501, window));
+        // A different file, a wider set, another pane, an empty resolve, or an older tick.
+        assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\b.txt"]), 1_100, window));
+        assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt", r"C:\demo\b.txt"]), 1_100, window));
+        assert!(!duplicate_activation(0, &prev, 1_000, 1, &paths(&[r"C:\demo\a-note.txt"]), 1_100, window));
+        assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[]), 1_000, window));
+        assert!(!duplicate_activation(0, &paths(&[]), 1_000, 0, &paths(&[r"C:\demo\a-note.txt"]), 1_000, window));
+        assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt"]), 900, window));
     }
 }

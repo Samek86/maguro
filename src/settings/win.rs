@@ -1455,6 +1455,7 @@ fn flip(id: u8) {
                 a.s.ctx_timing
             });
             crate::shell::ctxlog::set_enabled(on);
+            crate::shell::openlog::set_enabled(on);
             crate::publish_shared();
         }
         TG_FOLDER => {

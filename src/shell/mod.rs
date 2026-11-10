@@ -1,4 +1,6 @@
 pub(crate) mod ctxlog;
+pub(crate) mod openlog;
+pub(crate) mod fileopen;
 pub(crate) mod ctxmenu;
 pub(crate) mod ctxpack;
 mod excelro;

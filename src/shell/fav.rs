@@ -1143,7 +1143,29 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
             if GetKeyState(VK_CONTROL.0 as i32) < 0 {
                 ici.fMask |= CMIC_MASK_CONTROL_DOWN;
             }
-            _ = cm.InvokeCommand(&ici);
+            // Open returns before a DDE server is ready. Delete, rename, properties
+            // and the rest stay synchronous: the caller reads the result.
+            // Shift or Ctrl can turn Open into a chooser, so the error dialog stays.
+            let mut extra = crate::shell::fileopen::open_invoke_mask(&verb, default_item);
+            if extra != 0 && (GetKeyState(VK_SHIFT.0 as i32) < 0 || GetKeyState(VK_CONTROL.0 as i32) < 0) {
+                extra &= !crate::shell::fileopen::CMIC_MASK_FLAG_NO_UI;
+            }
+            if extra != 0 {
+                ici.fMask |= extra;
+                crate::shell::openlog::trace("input", || format!("source=menu verb={verb}"));
+                crate::shell::openlog::trace("launch-before", || format!("source=menu mode=invoke verb={verb} mask={:#x}", ici.fMask));
+            }
+            let hr = cm.InvokeCommand(&ici);
+            if extra != 0 {
+                crate::shell::openlog::trace("launch-after", || {
+                    let err = hr.as_ref().err().map(|e| e.code().0).unwrap_or(0);
+                    let ok = hr.is_ok() as u8;
+                    format!("source=menu mode=invoke ok={ok} err={err} verb={verb}")
+                });
+                if hr.is_err() {
+                    _ = MessageBeep(MB_ICONWARNING);
+                }
+            }
         }
     }
     _ = DestroyMenu(menu);
