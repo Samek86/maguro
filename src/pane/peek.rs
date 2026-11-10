@@ -1337,6 +1337,14 @@ fn shown_path() -> Option<String> {
 }
 
 unsafe fn shell_open(path: &str) -> bool {
+    crate::shell::openlog::trace("input", || "source=peek".into());
+    if let Some(file) = crate::shell::fileopen::prepare(path) {
+        let hwnd = app(|a| a.main.0 as isize);
+        if crate::shell::fileopen::launch("peek", hwnd, vec![file]) {
+            return true;
+        }
+    }
+    crate::shell::openlog::trace("path", || "source=peek mode=shell-default".into());
     let file = HSTRING::from(path);
     let r = ShellExecuteW(None, w!("open"), &file, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
     r.0 as isize > 32

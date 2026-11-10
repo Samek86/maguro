@@ -23,12 +23,21 @@ pub(crate) fn enabled() -> bool {
 }
 
 pub(crate) fn file_name(y: i32, m: u32, d: u32) -> String {
-    format!("{STEM}-{y:04}-{m:02}-{d:02}.log")
+    file_name_stem(STEM, y, m, d)
+}
+
+pub(crate) fn file_name_stem(stem: &str, y: i32, m: u32, d: u32) -> String {
+    format!("{stem}-{y:04}-{m:02}-{d:02}.log")
 }
 
 /// `maguro-ctx-timing-YYYY-MM-DD.log` only. Anything else is left alone.
 pub(crate) fn parse_name(name: &str) -> Option<(i32, u32, u32)> {
-    let rest = name.strip_prefix(STEM)?.strip_prefix('-')?;
+    parse_stem(STEM, name)
+}
+
+/// Dated `stem-YYYY-MM-DD.log` only. A different stem, or any other file, is `None`.
+pub(crate) fn parse_stem(stem: &str, name: &str) -> Option<(i32, u32, u32)> {
+    let rest = name.strip_prefix(stem)?.strip_prefix('-')?;
     let rest = rest.strip_suffix(".log")?;
     let mut parts = rest.split('-');
     let y: i32 = parts.next()?.parse().ok()?;
@@ -48,11 +57,16 @@ pub(crate) fn older_than_keep(file: (i32, u32, u32), today: (i32, u32, u32)) -> 
 
 /// Delete expired timing logs in `dir`. Missing directory is zero. Other files stay.
 pub(crate) fn sweep(dir: &Path, today: (i32, u32, u32)) -> usize {
+    sweep_stem(dir, STEM, today)
+}
+
+/// Delete expired `stem-YYYY-MM-DD.log` files in `dir`. A different stem stays.
+pub(crate) fn sweep_stem(dir: &Path, stem: &str, today: (i32, u32, u32)) -> usize {
     let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
     let mut n = 0;
     for entry in rd.flatten() {
         let Some(name) = entry.file_name().to_str().map(str::to_string) else { continue };
-        let Some(day) = parse_name(&name) else { continue };
+        let Some(day) = parse_stem(stem, &name) else { continue };
         if older_than_keep(day, today) && std::fs::remove_file(entry.path()).is_ok() {
             n += 1;
         }
@@ -75,7 +89,7 @@ pub(crate) fn today_file() -> Option<PathBuf> {
     Some(dir.join(file_name(y, m, d)))
 }
 
-fn today_ymd() -> (i32, u32, u32) {
+pub(crate) fn today_ymd() -> (i32, u32, u32) {
     let t = unsafe { GetLocalTime() };
     (t.wYear as i32, t.wMonth as u32, t.wDay as u32)
 }
@@ -218,6 +232,27 @@ mod tests {
         assert!(dir.join("maguro-ctx-timing-2026-11-09.log").exists());
         assert!(dir.join("maguro-ctx-timing.log").exists());
         assert!(dir.join("notes.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_stem_does_not_remove_the_other_timing_log() {
+        let dir = std::env::temp_dir().join(format!("maguro-ctxlog-stem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "maguro-ctx-timing-2026-10-01.log",
+            "maguro-open-timing-2026-10-01.log",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        assert_eq!(sweep_stem(&dir, "maguro-open-timing", (2026, 11, 9)), 1);
+        assert!(dir.join("maguro-ctx-timing-2026-10-01.log").exists());
+        assert!(!dir.join("maguro-open-timing-2026-10-01.log").exists());
+        assert!(dir.join("notes.txt").exists());
+        assert_eq!(sweep(&dir, (2026, 11, 9)), 1);
+        assert!(!dir.join("maguro-ctx-timing-2026-10-01.log").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

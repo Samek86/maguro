@@ -14,6 +14,12 @@
 //! the registry or to the disk. `blocked_shell_extensions` is already applied
 //! process-wide at startup; a listed DLL is not pinned if it loaded anyway.
 //!
+//! One sample file is not enough: a `.docx` handler stays cold in a folder of
+//! pictures. After that sample, one file of each extension visible in the open
+//! panes is queried too, common document types first, capped so a folder of
+//! hundreds of types cannot stall the worker. The directory read stays on this
+//! thread. The UI thread only copies the pane paths it already has.
+//!
 //! Network folders are skipped. A dead share must not block this thread, and it must
 //! not block the UI. Failures and panics are swallowed.
 
@@ -37,6 +43,13 @@ const POSTPONE_CAP: u32 = 8;
 const RETRY_GAP_MS: u64 = 30_000;
 pub(crate) const IDLE_MS: u64 = 10 * 60 * 1000;
 const SCAN_CAP: usize = 256;
+/// Extra per-extension menus after the first sample file. Common types are preferred.
+const TYPE_CAP: usize = 12;
+/// Document and media extensions, warmed before an uncommon one in the same panes.
+const COMMON_EXTS: &[&str] = &[
+    "txt", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "rtf", "png", "jpg", "jpeg", "gif",
+    "bmp", "mp3", "mp4", "html", "htm", "xml", "json", "zip", "odt", "ods", "odp",
+];
 
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 static ARMED_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -49,6 +62,8 @@ static LAST_ENQ: AtomicU64 = AtomicU64::new(0);
 
 struct Job {
     folder: String,
+    /// Every pane path, copied on the UI thread. Enumeration happens on the worker.
+    panes: Vec<String>,
     blocked: Vec<String>,
     /// Registry catalogue only. The menu warm still waits for the startup timer.
     catalogue_only: bool,
@@ -193,6 +208,33 @@ pub(crate) fn pick_more(entries: &[Sample], skip: Option<&str>, cap: usize) -> V
     out
 }
 
+/// One file per extension across `folders`, common types first. `skip` extensions are
+/// already warmed. Links and directories are not samples. The index is into `folders`.
+pub(crate) fn pick_type_files(folders: &[Vec<Sample>], skip: &[String], cap: usize) -> Vec<(usize, String)> {
+    if cap == 0 {
+        return Vec::new();
+    }
+    let mut seen: Vec<String> = skip.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let mut pool = Vec::new();
+    for (fi, entries) in folders.iter().enumerate() {
+        for entry in entries.iter().take(SCAN_CAP) {
+            if entry.link || entry.dir || !plain_name(&entry.name) {
+                continue;
+            }
+            let Some(ext) = ext_of(&entry.name) else { continue };
+            if seen.iter().any(|e| e == &ext) {
+                continue;
+            }
+            seen.push(ext.clone());
+            pool.push((fi, entry.name.clone(), ext));
+        }
+    }
+    pool.sort_by_key(|(_, _, ext)| {
+        COMMON_EXTS.iter().position(|c| *c == ext).unwrap_or(COMMON_EXTS.len())
+    });
+    pool.into_iter().take(cap).map(|(i, name, _)| (i, name)).collect()
+}
+
 fn ext_of(name: &str) -> Option<String> {
     let (stem, ext) = name.rsplit_once('.')?;
     if stem.is_empty() || ext.is_empty() || ext.contains(['\\', '/']) {
@@ -292,12 +334,13 @@ fn ui_busy() -> bool {
 }
 
 fn request() {
-    let (folder, blocked) = app(|a| {
+    let (folder, panes, blocked) = app(|a| {
         let folder = a.s.paths.get(a.s.active).cloned().unwrap_or_default();
-        (folder, a.s.blocked_shell_extensions.clone())
+        let panes = a.s.paths.iter().filter(|p| !p.is_empty()).cloned().collect();
+        (folder, panes, a.s.blocked_shell_extensions.clone())
     });
     LAST_ENQ.store(mono_ms().max(1), Ordering::Relaxed);
-    enqueue(Job { folder, blocked, catalogue_only: false });
+    enqueue(Job { folder, panes, blocked, catalogue_only: false });
 }
 
 /// Read the shell-extension catalogue before the first click. The visible menu is unchanged.
@@ -305,7 +348,7 @@ pub(crate) fn prime() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let blocked = app(|a| a.s.blocked_shell_extensions.clone());
-        enqueue(Job { folder: String::new(), blocked, catalogue_only: true });
+        enqueue(Job { folder: String::new(), panes: Vec::new(), blocked, catalogue_only: true });
     });
 }
 
@@ -427,7 +470,26 @@ unsafe fn execute(job: &Job) -> Outcome {
 
     let samples = read_samples(&job.folder);
     let (file, dir) = pick_samples(&samples);
-    let more = pick_more(&samples, file.as_deref(), 4);
+    let mut seen_ext = Vec::new();
+    if let Some(name) = file.as_deref() {
+        if let Some(ext) = ext_of(name) {
+            seen_ext.push(ext);
+        }
+    }
+    let mut groups = vec![samples];
+    let mut folders = vec![job.folder.clone()];
+    for pane in &job.panes {
+        if pane.eq_ignore_ascii_case(&job.folder) {
+            continue;
+        }
+        let remote = crate::share_path(pane);
+        if !folder_ok(pane, remote) {
+            continue;
+        }
+        groups.push(read_samples(pane));
+        folders.push(pane.clone());
+    }
+    let more = pick_type_files(&groups, &seen_ext, TYPE_CAP);
 
     if menu_idle() {
         if let Some(name) = file {
@@ -443,12 +505,13 @@ unsafe fn execute(job: &Job) -> Outcome {
         }
     }
 
-    for name in more {
+    for (idx, name) in more {
         if !menu_idle() {
             break;
         }
+        let Some(folder) = folders.get(idx).cloned() else { continue };
         tried = true;
-        if let Some(cm) = guarded("warm-ext", || unsafe { item_menu(&job.folder, &name) }) {
+        if let Some(cm) = guarded("warm-type", || unsafe { item_menu(&folder, &name) }) {
             ok_any = true;
             held.push(cm);
         }
@@ -736,6 +799,30 @@ mod tests {
         ];
         assert_eq!(pick_more(&entries, Some("a.txt"), 4), vec!["c.png".to_string(), "d.docx".to_string()]);
         assert_eq!(pick_more(&entries, None, 1), vec!["a.txt".to_string()]);
+    }
+
+    #[test]
+    fn type_warm_prefers_common_extensions_across_panes() {
+        let here = vec![
+            Sample { name: "a.txt".into(), dir: false, link: false },
+            Sample { name: "notes.bin".into(), dir: false, link: false },
+            Sample { name: "shot.png".into(), dir: false, link: false },
+            Sample { name: "link.zip".into(), dir: false, link: true },
+            Sample { name: "sub".into(), dir: true, link: false },
+        ];
+        let other = vec![
+            Sample { name: "b.txt".into(), dir: false, link: false },
+            Sample { name: "book.docx".into(), dir: false, link: false },
+            Sample { name: "setup.exe".into(), dir: false, link: false },
+        ];
+        let picked = pick_type_files(&[here, other], &["txt".into()], 12);
+        let names: Vec<_> = picked.iter().map(|(_, n)| n.as_str()).collect();
+        // docx outranks png. Both outrank an extension that is not in the common list.
+        // The second pane's txt is already covered by `skip`.
+        assert_eq!(names, vec!["book.docx", "shot.png", "notes.bin", "setup.exe"]);
+        assert_eq!(picked[0].0, 1);
+        assert_eq!(picked[1].0, 0);
+        assert!(pick_type_files(&[Vec::new()], &[], 0).is_empty());
     }
 
     #[test]

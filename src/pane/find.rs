@@ -894,6 +894,14 @@ fn launch_file(pane: usize, path: &str) {
         if crate::folderapp::shown_on() {
             crate::folderapp::note_activate(app(|a| a.main.0 as isize), pane, false);
         }
+        crate::shell::openlog::trace("input", || "source=find".into());
+        if let Some(file) = crate::shell::fileopen::prepare(path) {
+            let hwnd = app(|a| a.main.0 as isize);
+            if crate::shell::fileopen::launch("find", hwnd, vec![file]) {
+                return;
+            }
+        }
+        crate::shell::openlog::trace("path", || "source=find mode=shell-default".into());
         ShellExecuteW(None, w!("open"), &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
     }
 }

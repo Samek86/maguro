@@ -462,6 +462,8 @@ pub(crate) unsafe fn open_window(mut s: Session) -> Result<HWND> {
     // Old timing logs are removed here, once, and only the dated files past 14 days.
     crate::shell::ctxlog::set_enabled(app(|a| a.s.ctx_timing));
     crate::shell::ctxlog::sweep_startup();
+    crate::shell::openlog::set_enabled(app(|a| a.s.ctx_timing));
+    crate::shell::openlog::sweep_startup();
     crate::shell::ctxmenu::install_saved_probe();
     crate::shell::warmup::prime();
     crate::shell::warmup::arm(main);
