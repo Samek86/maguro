@@ -4017,6 +4017,82 @@ unsafe fn open_rows(rows: &[ActRow], source: &'static str) {
     }
 }
 
+fn same_act_path(a: &str, b: &str) -> bool {
+    fn norm(s: &str) -> &str {
+        s.trim().trim_end_matches(['\\', '/'])
+    }
+    let (a, b) = (norm(a), norm(b));
+    !a.is_empty() && a.eq_ignore_ascii_case(b)
+}
+
+/// True when `paths` is the same open as `prev` inside one double-click.
+/// Comparison is case-insensitive. A second call that names only some of the
+/// rows still matches: the details-cell path selects one row of the selection.
+/// An empty path list does not match, so an unresolved click is not swallowed.
+pub(crate) fn duplicate_activation(
+    prev_pane: usize,
+    prev_paths: &[String],
+    prev_tick: u64,
+    pane: usize,
+    paths: &[String],
+    now: u64,
+    window_ms: u32,
+) -> bool {
+    if pane != prev_pane || paths.is_empty() || prev_paths.is_empty() {
+        return false;
+    }
+    if now < prev_tick || now - prev_tick > u64::from(window_ms) {
+        return false;
+    }
+    paths.iter().all(|p| prev_paths.iter().any(|q| same_act_path(p, q)))
+}
+
+struct ActMemo {
+    pane: usize,
+    tick: u64,
+    paths: Vec<String>,
+}
+
+thread_local! {
+    static ACT_MEMO: std::cell::RefCell<Option<ActMemo>> = std::cell::RefCell::new(None);
+}
+
+fn repeated_activation(pane: usize, paths: &[String]) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    let now = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    let window = unsafe { GetDoubleClickTime() };
+    ACT_MEMO.with(|m| {
+        m.borrow().as_ref().is_some_and(|a| duplicate_activation(a.pane, &a.paths, a.tick, pane, paths, now, window))
+    })
+}
+
+fn remember_activation(pane: usize, paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    let tick = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
+    ACT_MEMO.with(|m| {
+        *m.borrow_mut() = Some(ActMemo { pane, tick, paths: paths.to_vec() });
+    });
+}
+
+unsafe fn activation_paths(rows: &[ActRow]) -> Vec<String> {
+    let mut out = Vec::new();
+    for row in rows {
+        let path = match row {
+            ActRow::FolderItem(it) | ActRow::File(it) => item_path(it),
+            ActRow::FolderPath(p) | ActRow::FilePath(p) => p.clone(),
+            ActRow::Unknown => continue,
+        };
+        if !path.trim().is_empty() {
+            out.push(path);
+        }
+    }
+    out
+}
+
 fn row_counts(rows: &[ActRow]) -> (usize, usize, usize) {
     let mut folder = 0;
     let mut file = 0;
@@ -4086,6 +4162,15 @@ pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
         );
     }
     let kinds: Vec<_> = rows.iter().map(row_kind).collect();
+    let paths = activation_paths(&rows);
+    // OnDefaultCommand and the details-cell fallback both enter here for one
+    // double-click. A document used to return without launching; it now launches,
+    // so the second call in this gesture must not start the file or browse again.
+    // Enter is its own keypress and is not collapsed with a click.
+    if source != "enter" && repeated_activation(i, &paths) {
+        crate::shell::openlog::trace("path", || format!("source={source} mode=duplicate-skipped"));
+        return true;
+    }
     let registered = crate::folderapp::shown_on();
     match crate::folderapp::list_activation(registered, false, false, &kinds) {
         crate::folderapp::ListAct::Shell => {
@@ -4096,18 +4181,32 @@ pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
             if let Some(files) = verb_files(&rows) {
                 let hwnd = app(|a| a.main.0 as isize);
                 if crate::shell::fileopen::launch(source, hwnd, files) {
+                    if source != "enter" {
+                        remember_activation(i, &paths);
+                    }
                     return true;
                 }
             }
             crate::shell::openlog::trace("path", || format!("source={source} mode=shell-default"));
             false
         }
-        crate::folderapp::ListAct::Consume => true,
+        crate::folderapp::ListAct::Consume => {
+            if source != "enter" {
+                remember_activation(i, &paths);
+            }
+            true
+        }
         crate::folderapp::ListAct::FilesOnly => {
+            if source != "enter" {
+                remember_activation(i, &paths);
+            }
             open_rows(&rows, "mixed");
             true
         }
         crate::folderapp::ListAct::Browse(at) => {
+            if source != "enter" {
+                remember_activation(i, &paths);
+            }
             open_rows(&rows, "mixed");
             let target = match rows.get(at) {
                 Some(ActRow::FolderPath(p)) => Some(p.clone()),
@@ -4876,5 +4975,34 @@ mod list_hwnd_tests {
                 _ = UnregisterClassW(w!("DirectUIHWND"), Some(inst.into()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod activation_dedupe {
+    use super::duplicate_activation;
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn same_rows_inside_one_double_click_are_one_open() {
+        let prev = paths(&[r"C:\demo\a-note.txt", r"C:\demo\c-image.png"]);
+        let window = 500u32;
+        // Same set, any order and case, including the exact same tick.
+        assert!(duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"c:\demo\c-image.png", r"C:\demo\a-note.txt"]), 1_000, window));
+        // The cell fallback names one row of the selection. A trailing slash still matches.
+        assert!(duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt\"]), 1_200, window));
+        // The window is inclusive at the edge and exclusive just past it.
+        assert!(duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt"]), 1_500, window));
+        assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt"]), 1_501, window));
+        // A different file, a wider set, another pane, an empty resolve, or an older tick.
+        assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\b.txt"]), 1_100, window));
+        assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt", r"C:\demo\b.txt"]), 1_100, window));
+        assert!(!duplicate_activation(0, &prev, 1_000, 1, &paths(&[r"C:\demo\a-note.txt"]), 1_100, window));
+        assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[]), 1_000, window));
+        assert!(!duplicate_activation(0, &paths(&[]), 1_000, 0, &paths(&[r"C:\demo\a-note.txt"]), 1_000, window));
+        assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt"]), 900, window));
     }
 }

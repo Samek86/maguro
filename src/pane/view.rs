@@ -1413,6 +1413,22 @@ unsafe fn select_named(i: usize, name: &str) -> bool {
     false
 }
 
+/// The clicked name is already one of the selected rows. A multi-selection stays
+/// intact so the open launches every selected file, not only the cell under the pointer.
+unsafe fn named_is_selected(i: usize, name: &str) -> bool {
+    let Some(fv) = view_of::<IFolderView2>(i) else { return false };
+    let Ok(arr) = fv.GetSelection(false) else { return false };
+    let n = arr.GetCount().unwrap_or(0).min(500);
+    for k in 0..n {
+        let Ok(it) = arr.GetItemAt(k) else { continue };
+        let disp = it.GetDisplayName(SIGDN_NORMALDISPLAY).ok().map(|p| pwstr(p)).unwrap_or_default();
+        if disp.eq_ignore_ascii_case(name) {
+            return true;
+        }
+    }
+    false
+}
+
 // Double-click on a details cell the shell did not activate: open the row that owns the text or icon.
 pub(crate) unsafe fn open_row_cell(i: usize, pt: POINT) {
     // Do not accDoDefaultAction: on DirectUI that can open a real Explorer window and skip
@@ -1420,7 +1436,7 @@ pub(crate) unsafe fn open_row_cell(i: usize, pt: POINT) {
     let Some((item, mut child)) = list_item_at(pt) else { return };
     let name = acc_label(&item, &child).or_else(|| acc_label(&item, &VARIANT::from(0i32)));
     if let Some(name) = name {
-        if select_named(i, &name) {
+        if named_is_selected(i, &name) || select_named(i, &name) {
             let sv = view_of::<IShellView>(i);
             take_default(i, sv.as_ref());
         }
