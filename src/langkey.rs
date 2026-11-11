@@ -190,9 +190,13 @@ pub(crate) enum Key {
     ExplorerPins,
     Export,
     FastCopy,
+    FastCopyComplete,
+    FastCopyFinishedNote,
     FastCopyForNetworkFolders,
     FastCopyWasCancelled,
     FastMove,
+    FastMoveComplete,
+    FastMoveFinishedNote,
     FastMultiPaneFileManagerForWindows,
     FastPaste,
     Favourite,
@@ -838,7 +842,7 @@ pub(crate) enum Key {
     CtxTimingHint,
 }
 
-pub(crate) const KEY_COUNT: usize = 831;
+pub(crate) const KEY_COUNT: usize = 835;
 
 const _: () = assert!((Key::CtxTimingHint as usize) + 1 == KEY_COUNT);
 
@@ -1030,9 +1034,13 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Explorer pins",
     "Export",
     "Fast copy",
+    "Fast copy complete",
+    "{n} copied ({size})",
     "Fast copy for network folders",
     "Fast copy was cancelled",
     "Fast move",
+    "Fast move complete",
+    "{n} moved ({size})",
     "Fast multi-pane file manager for Windows",
     "Fast paste",
     "Favourite",
@@ -1864,9 +1872,13 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "explorer_pins",
     "export",
     "fast_copy",
+    "fast_copy_complete",
+    "fast_copy_finished_note",
     "fast_copy_for_network_folders",
     "fast_copy_was_cancelled",
     "fast_move",
+    "fast_move_complete",
+    "fast_move_finished_note",
     "fast_multi_pane_file_manager_for_windows",
     "fast_paste",
     "favourite",
