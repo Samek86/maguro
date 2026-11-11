@@ -1180,22 +1180,21 @@ mod tests {
 
     #[test]
     fn folder_size_collect() {
-        let root = tree("collect", &[("f.bin".into(), 7), (r"d\x.bin".into(), 1)]);
-        let path = |p: &str| root.join(p).to_string_lossy().into_owned();
-        let (f, d) = (path("f.bin"), path("d"));
         let none = Sel { file_bytes: 0, dirs: vec![], partial: true };
+        let gone = SelFact { path: r"D:\gone".into(), folder: false, bytes: None };
+        let file = SelFact { path: r"D:\work\f.bin".into(), folder: false, bytes: Some(7) };
+        let dir = SelFact { path: r"D:\work\d".into(), folder: true, bytes: None };
         assert_eq!(collect_sel(None, |_| None), none); // GetSelection / GetCount failed
         assert_eq!(collect_sel(Some(1), |_| None), none); // GetItemAt / no file system path
-        assert_eq!(collect_sel(Some(1), |_| Some(path("gone"))), none);
-        assert_eq!(collect_sel(Some(1), |_| Some(r"C:\".into())), none); // a drive root isn't walked
-        let both = [f.clone(), d.clone()];
-        assert_eq!(collect_sel(Some(2), |k| Some(both[k as usize].clone())), Sel { file_bytes: 7, dirs: vec![d], partial: false });
+        assert_eq!(collect_sel(Some(1), |_| Some(gone.clone())), none);
+        assert_eq!(collect_sel(Some(1), |_| Some(SelFact { path: r"C:\".into(), folder: true, bytes: None })), none);
+        let both = [file.clone(), dir.clone()];
+        assert_eq!(collect_sel(Some(2), |k| Some(both[k as usize].clone())), Sel { file_bytes: 7, dirs: vec![dir.path.clone()], partial: false });
         let calls = std::cell::Cell::new(0);
         let s = collect_sel(Some(10_001), |_| {
             calls.set(calls.get() + 1);
-            Some(f.clone())
+            Some(file.clone())
         });
         assert_eq!((s.file_bytes, s.partial, calls.get()), (70_000, true, 10_000));
-        _ = std::fs::remove_dir_all(root);
     }
 }
