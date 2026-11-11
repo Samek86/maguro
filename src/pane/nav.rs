@@ -3427,6 +3427,7 @@ unsafe fn on_nav_impl(i: usize, pidl: *const ITEMIDLIST) {
         note_folder_views();
     }
     super::recent::on_arrived(i, &parse);
+    crate::shell::listsync::retarget(app(|a| a.main));
 }
 
 #[implement(IExplorerBrowserEvents)]
