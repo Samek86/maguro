@@ -1,6 +1,6 @@
 [package]
 name = "maguro"
-version = "0.2.16"
+version = "0.2.17"
 edition = "2021"
 description = "Fast multi-pane file manager for Windows"
 license = "MIT"
