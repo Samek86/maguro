@@ -168,9 +168,9 @@ Ctrl+Shift+W로 폴더 감시를 엽니다. 폴더·활성 패널뿐 아니라 *
 
 <p align="center"><img width="560" alt="폴더와 파일 행이 있는 폴더 감시" src="docs/images-v7/ko/feature_folder_watch.png"></p>
 
-### 15. 클립보드 경로 열기 (Win+Alt+V)
+### 15. 클립보드 경로 열기 (Alt+Z)
 
-Maguro가 켜져 있으면 **Win+Alt+V**로 다른 창이 앞에 있어도 클립보드의 경로를 엽니다. 폴더는 새 탭으로 열고, 파일은 기본 앱으로 엽니다.
+Maguro가 켜져 있으면 **Alt+Z**로 다른 창이 앞에 있어도 클립보드의 경로를 엽니다. 폴더는 새 탭으로 연 뒤 Maguro가 앞으로 나오고, 파일은 기본 앱으로 엽니다.
 
 <p align="center"><img width="760" alt="클립보드 경로를 새 탭으로 연 모습" src="docs/images-v7/ko/feature_win_shift_v.png"></p>
 
@@ -239,7 +239,7 @@ Windows를 따르는 라이트/다크, 테마마다 강조색 견본 여섯 또�
 |  | Ctrl+Shift+B | 파일 바구니 |
 |  | Ctrl+Alt+B | 선택을 바구니에 담기 |
 |  | Ctrl+Shift+W | 폴더 감시 |
-|  | Win+Alt+V | 클립보드 폴더는 새 탭, 파일은 기본 앱으로 열기 |
+|  | Alt+Z | 클립보드 폴더는 새 탭으로 열고 Maguro를 앞으로, 파일은 기본 앱으로 열기 |
 |  | Ctrl+Shift+R | 일괄 이름 바꾸기 |
 |  | Ctrl+Alt+R | 최근 파일 (Windows 최근 항목, 최신순) |
 |  | Ctrl+Enter | 선택한 최근 파일을 폴더에서 표시 |

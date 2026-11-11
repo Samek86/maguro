@@ -1297,7 +1297,7 @@ mod tests {
         let (anchor, page) = commit_search(2, 2, "Open clipboard path");
         assert_eq!((anchor, page), (2, 0));
         assert!(hit(&geo(client(), &shot(page, "Open clipboard path"))));
-        assert!(hit(&geo(client(), &shot(0, "Win+Alt+V"))));
+        assert!(hit(&geo(client(), &shot(0, "Alt+Z"))));
 
         crate::UI.store(1, Ordering::Relaxed);
         let (_, page) = commit_search(0, 0, "클립보드 경로 열기");

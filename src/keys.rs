@@ -132,8 +132,9 @@ const CMDS: &[Cmd] = &[
     // Registered only while another app's Open or Save dialog is in front. See dialogjump.
     cmd("dialog.jump", WIN, crate::Key::JumpToAFolderInAFileDialog, 0x47, true, false, true, false, false),
     // Registered for the whole time Maguro is running, same as app.front. See cliphot.
-    // Win+Alt+V does not overlap app.front (Win+Shift+E).
-    cmd("clip.open", WIN, crate::Key::OpenClipboardPath, 0x56, false, false, true, true, false),
+    // Alt+Z does not overlap app.front (Win+Shift+E) or any other default chord.
+    // Maguro menus have no &Z mnemonic and no accelerator table.
+    cmd("clip.open", WIN, crate::Key::OpenClipboardPath, 0x5A, false, false, true, false, false),
     cmd("win.new", WIN, crate::Key::NewWindow, 0x4E, true, false, false, false, false),
     cmd("watch.open", WIN, crate::Key::FolderWatch, 0x57, true, true, false, false, false),
 ];
@@ -367,7 +368,9 @@ fn untangle(binds: &mut [Chord]) {
 }
 
 /// Previous built-in `clip.open` (Win+Shift+V). It was not written while it was the default.
-/// A file that still names it is that old default, so the new built-in (Win+Alt+V) replaces it.
+/// A file that still names it is that old default, so the current built-in (Alt+Z) replaces it.
+/// Win+Alt+V, the default this build replaces, is kept when a file names it: that string
+/// was written only as a custom chord. An absent `clip.open` uses Alt+Z and is not written back.
 fn legacy_clip_open(c: Chord) -> bool {
     c.vk == 0x56 && c.win && c.shift && !c.ctrl && !c.alt && !c.digits
 }
@@ -694,10 +697,12 @@ mod tests {
         assert!(help_text().lines().any(|l| l == "Alt+P\tPreview pane"));
         assert_ne!(lookup(b'P' as u16, true, false, false, false), index("view.preview"));
         let clip = index("clip.open").unwrap();
-        assert_eq!(chord_text(clip), "Win+Alt+V");
-        assert_eq!(lookup(b'V' as u16, false, false, true, true), Some(clip));
+        assert_eq!(chord_text(clip), "Alt+Z");
+        assert_eq!(lookup(b'Z' as u16, false, false, true, false), Some(clip));
+        assert_eq!(lookup(b'Z' as u16, false, false, false, false), None);
+        assert_eq!(lookup(b'V' as u16, false, false, true, true), None);
         assert_eq!(lookup(b'V' as u16, false, true, false, true), None);
-        assert!(help_text().lines().any(|l| l == "Win+Alt+V\tOpen clipboard path"));
+        assert!(help_text().lines().any(|l| l == "Alt+Z\tOpen clipboard path"));
         let clip_chord = default_chord(clip).unwrap();
         let front = default_chord(index("app.front").unwrap()).unwrap();
         assert_eq!(format_chord(&front), "Win+Shift+E");
@@ -847,19 +852,26 @@ mod tests {
     }
 
     #[test]
-    fn stored_win_shift_v_for_clip_open_becomes_win_alt_v() {
+    fn stored_win_shift_v_for_clip_open_becomes_alt_z_and_a_saved_chord_stays() {
         fresh();
         let clip = index("clip.open").unwrap();
         let mut old = Map::new();
         old.insert("clip.open".into(), serde_json::json!("Win+Shift+V"));
         load_bindings(&old);
-        assert_eq!(chord_text(clip), "Win+Alt+V");
+        assert_eq!(chord_text(clip), "Alt+Z");
         assert!(bindings_json().get("clip.open").is_none());
 
         let mut lower = Map::new();
         lower.insert("clip.open".into(), serde_json::json!("win+shift+v"));
         load_bindings(&lower);
+        assert_eq!(chord_text(clip), "Alt+Z");
+
+        // The previous default, kept only when the file names it (a custom chord).
+        let mut previous = Map::new();
+        previous.insert("clip.open".into(), serde_json::json!("Win+Alt+V"));
+        load_bindings(&previous);
         assert_eq!(chord_text(clip), "Win+Alt+V");
+        assert_eq!(bindings_json()["clip.open"], "Win+Alt+V");
 
         let mut custom = Map::new();
         custom.insert("clip.open".into(), serde_json::json!("Ctrl+Alt+V"));

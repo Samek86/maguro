@@ -168,9 +168,9 @@ Ctrl+Shift+W でフォルダー監視を開きます。フォルダー・アク�
 
 <p align="center"><img width="560" alt="フォルダーとファイル行があるフォルダー監視" src="docs/images-v7/ja/feature_folder_watch.png"></p>
 
-### 15. クリップボードのパスを開く（Win+Alt+V）
+### 15. クリップボードのパスを開く（Alt+Z）
 
-Maguro が起動していれば **Win+Alt+V** で、ほかのアプリが前面でもクリップボードのパスを開きます。フォルダーは新しいタブになり、ファイルは既定のアプリで開きます。
+Maguro が起動していれば **Alt+Z** で、ほかのアプリが前面でもクリップボードのパスを開きます。フォルダーは新しいタブになり、Maguro が前面に出ます。ファイルは既定のアプリで開きます。
 
 <p align="center"><img width="760" alt="クリップボードのパスを新しいタブで開いたところ" src="docs/images-v7/ja/feature_win_shift_v.png"></p>
 
@@ -239,7 +239,7 @@ Windows に従うライト／ダーク、テーマごとにアクセント色の
 |  | Ctrl+Shift+B | ファイルバスケット |
 |  | Ctrl+Alt+B | 選択をバスケットへ |
 |  | Ctrl+Shift+W | フォルダー監視 |
-|  | Win+Alt+V | クリップボードのフォルダーは新しいタブ、ファイルは既定のアプリで開く |
+|  | Alt+Z | クリップボードのフォルダーは新しいタブで Maguro を前面に、ファイルは既定のアプリで開く |
 |  | Ctrl+Shift+R | 一括リネーム |
 |  | Ctrl+Alt+R | 最近使ったファイル（Windows の最近使った項目、新しい順） |
 |  | Ctrl+Enter | 選択した最近のファイルをフォルダーに表示 |
