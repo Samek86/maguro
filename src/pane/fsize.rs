@@ -558,8 +558,14 @@ pub(crate) fn selection_text(paths: &[String], file_bytes: u64, file_count: u64,
     view_text(view_selection(&parts, file_bytes, file_count, extra_partial))
 }
 
-/// Selection split for the folder-size line. The UI thread reads shell attributes and, for
-/// local files only, file length. Folders are not walked here.
+/// File length the shell already enumerated (`PKEY_Size`). No `stat` on the UI thread.
+pub(crate) unsafe fn shell_file_len(item: &IShellItem) -> Option<u64> {
+    let item2 = item.cast::<IShellItem2>().ok()?;
+    item2.GetUInt64(&crate::folderview::PKEY_Size).ok()
+}
+
+/// Selection split for the folder-size line. The UI thread reads shell attributes and the
+/// size the view already has. Folders are not walked here.
 pub(crate) struct FolderPick {
     pub folders: Vec<String>,
     pub request: Vec<(String, Place)>,
@@ -611,12 +617,12 @@ pub(crate) unsafe fn pick_selection(fv: &IFolderView2, network: bool) -> FolderP
                 pick.extra_partial = true;
                 continue;
             }
-            match std::fs::metadata(&path) {
-                Ok(m) if m.is_file() => {
-                    pick.file_bytes += m.len();
+            match shell_file_len(&item) {
+                Some(n) => {
+                    pick.file_bytes += n;
                     pick.file_count += 1;
                 }
-                _ => pick.extra_partial = true,
+                None => pick.extra_partial = true,
             }
         }
     }

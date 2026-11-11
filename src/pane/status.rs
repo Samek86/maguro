@@ -88,21 +88,38 @@ pub(crate) struct Sel {
     pub(crate) partial: bool,
 }
 
-// n: the selection's count (None = it couldn't be read), path(k): item k's file system path.
-pub(crate) fn collect_sel(n: Option<u32>, path: impl Fn(u32) -> Option<String>) -> Sel {
+/// One selected row, already read from the shell. `bytes` is `PKEY_Size` for a file.
+/// A folder's size is not this field; the folder walk fills that in later.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SelFact {
+    pub(crate) path: String,
+    pub(crate) folder: bool,
+    pub(crate) bytes: Option<u64>,
+}
+
+// n: the selection's count (None = it couldn't be read). fact(k) is item k, or None when it has no path.
+pub(crate) fn collect_sel(n: Option<u32>, fact: impl Fn(u32) -> Option<SelFact>) -> Sel {
     let Some(n) = n else { return Sel { file_bytes: 0, dirs: Vec::new(), partial: true } };
     // ponytail: sums at most 10k selected items; bigger selections are marked partial
     let mut s = Sel { file_bytes: 0, dirs: Vec::new(), partial: n > 10_000 };
     for k in 0..n.min(10_000) {
-        let Some(p) = path(k) else {
+        let Some(it) = fact(k) else {
             s.partial = true;
             continue;
         };
-        match std::fs::metadata(&p) {
-            Ok(m) if m.is_dir() && Path::new(&p).parent().is_some() => s.dirs.push(p),
-            Ok(m) if m.is_file() => s.file_bytes += m.len(),
-            // a drive or share root (its size is the free-space part), or unreadable
-            _ => s.partial = true,
+        if it.folder {
+            // A drive root (`C:\`) has no parent. Its size is the free-space part, not a folder walk.
+            // A UNC share does have a parent, so it stays a folder, same as the old `metadata` check.
+            if Path::new(&it.path).parent().is_none() {
+                s.partial = true;
+                continue;
+            }
+            s.dirs.push(it.path);
+        } else {
+            match it.bytes {
+                Some(b) => s.file_bytes += b,
+                None => s.partial = true,
+            }
         }
     }
     s
@@ -111,7 +128,17 @@ pub(crate) fn collect_sel(n: Option<u32>, path: impl Fn(u32) -> Option<String>) 
 pub(crate) unsafe fn selected_size(fv: &IFolderView2) -> Sel {
     let arr = fv.GetSelection(false).ok();
     let n = arr.as_ref().and_then(|a| a.GetCount().ok());
-    collect_sel(n, |k| Some(pwstr(arr.as_ref()?.GetItemAt(k).ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?)))
+    collect_sel(n, |k| {
+        let item = arr.as_ref()?.GetItemAt(k).ok()?;
+        let path = pwstr(item.GetDisplayName(SIGDN_FILESYSPATH).ok()?);
+        if path.is_empty() {
+            return None;
+        }
+        let attr = item.GetAttributes(SFGAO_FOLDER | SFGAO_STREAM).map(|a| a.0).unwrap_or(0);
+        let folder = real_folder(attr);
+        let bytes = if folder { None } else { super::shell_file_len(&item) };
+        Some(SelFact { path, folder, bytes })
+    })
 }
 
 // The " (…)" after "n selected". dirs: the folder total so far (bytes, done, partial), None = not started.
