@@ -634,6 +634,8 @@ fn edit_xml(xml: &[u8], kind: Kind, edit: &ViewEdit) -> Vec<u8> {
     let mut saw_view = false;
     let mut saw_book = false;
     let mut injected = false;
+    // A1 inside a merged range must select that whole range. sqref="A1" on A1:J1 is repaired.
+    let sqref = if edit.a1 { merge_sqref_containing_a1(xml) } else { Vec::new() };
     while i < xml.len() {
         if xml[i] != b'<' {
             let s = i;
@@ -662,7 +664,7 @@ fn edit_xml(xml: &[u8], kind: Kind, edit: &ViewEdit) -> Vec<u8> {
                     out.extend(book_views_block(&root_prefix));
                     saw_book = true;
                 } else {
-                    out.extend(sheet_views_block(&root_prefix, edit));
+                    out.extend(sheet_views_block(&root_prefix, edit, &sqref));
                     saw_view = true;
                 }
                 out.extend(close_el(&root_prefix, root));
@@ -673,7 +675,7 @@ fn edit_xml(xml: &[u8], kind: Kind, edit: &ViewEdit) -> Vec<u8> {
         }
         if !tag.closing && tag.local == b"sheetView" && kind != Kind::Workbook {
             saw_view = true;
-            let (bytes, next) = rewrite_sheet_view(xml, i, edit);
+            let (bytes, next) = rewrite_sheet_view(xml, i, edit, &sqref);
             out.extend(bytes);
             i = next;
             continue;
@@ -700,7 +702,7 @@ fn edit_xml(xml: &[u8], kind: Kind, edit: &ViewEdit) -> Vec<u8> {
         }
         if !tag.closing && tag.local == b"sheetViews" && tag.self_closing && need_view {
             out.extend(unclose(tag.raw));
-            out.extend(sheet_view_element(&prefix_of(&tag), edit));
+            out.extend(sheet_view_element(&prefix_of(&tag), edit, &sqref));
             out.extend(close_el(tag.prefix, b"sheetViews"));
             saw_view = true;
             injected = true;
@@ -717,7 +719,7 @@ fn edit_xml(xml: &[u8], kind: Kind, edit: &ViewEdit) -> Vec<u8> {
             continue;
         }
         if tag.closing && tag.local == b"sheetViews" && !saw_view && need_view {
-            out.extend(sheet_view_element(&root_prefix, edit));
+            out.extend(sheet_view_element(&root_prefix, edit, &sqref));
             saw_view = true;
         }
         if tag.closing && tag.local == b"bookViews" && !saw_book && edit.book {
@@ -726,7 +728,7 @@ fn edit_xml(xml: &[u8], kind: Kind, edit: &ViewEdit) -> Vec<u8> {
         }
         let child = !tag.closing && depth == 1;
         if child && !injected && !saw_view && need_view && kind != Kind::Workbook && insert_sheet_before(tag.local) {
-            out.extend(sheet_views_block(&root_prefix, edit));
+            out.extend(sheet_views_block(&root_prefix, edit, &sqref));
             injected = true;
             saw_view = true;
         }
@@ -737,7 +739,7 @@ fn edit_xml(xml: &[u8], kind: Kind, edit: &ViewEdit) -> Vec<u8> {
         }
         if tag.closing && depth == 1 && is_root && !injected {
             if need_view && !saw_view && kind != Kind::Workbook {
-                out.extend(sheet_views_block(&root_prefix, edit));
+                out.extend(sheet_views_block(&root_prefix, edit, &sqref));
                 injected = true;
             }
             if edit.book && !saw_book && kind == Kind::Workbook {
@@ -757,11 +759,70 @@ fn edit_xml(xml: &[u8], kind: Kind, edit: &ViewEdit) -> Vec<u8> {
 }
 
 fn insert_sheet_before(local: &[u8]) -> bool {
-    !matches!(local, b"sheetPr" | b"dimension" | b"sheetViews" | b"worksheet" | b"chartsheet")
+    // Elements the worksheet or chartsheet schema places after sheetViews.
+    // mc:AlternateContent and xr:revisionPtr sit earlier in real files. Inserting
+    // there writes a second sheetViews, and Excel repairs the part.
+    matches!(
+        local,
+        b"sheetFormatPr"
+            | b"cols"
+            | b"sheetData"
+            | b"sheetCalcPr"
+            | b"sheetProtection"
+            | b"protectedRanges"
+            | b"scenarios"
+            | b"autoFilter"
+            | b"sortState"
+            | b"dataConsolidate"
+            | b"customSheetViews"
+            | b"mergeCells"
+            | b"phoneticPr"
+            | b"conditionalFormatting"
+            | b"dataValidations"
+            | b"hyperlinks"
+            | b"printOptions"
+            | b"pageMargins"
+            | b"pageSetup"
+            | b"headerFooter"
+            | b"rowBreaks"
+            | b"colBreaks"
+            | b"customProperties"
+            | b"cellWatches"
+            | b"ignoredErrors"
+            | b"smartTags"
+            | b"drawing"
+            | b"legacyDrawing"
+            | b"legacyDrawingHF"
+            | b"picture"
+            | b"oleObjects"
+            | b"controls"
+            | b"webPublishItems"
+            | b"tableParts"
+            | b"extLst"
+    )
 }
 
 fn insert_book_before(local: &[u8]) -> bool {
-    !matches!(local, b"fileVersion" | b"fileSharing" | b"workbookPr" | b"workbookProtection" | b"bookViews" | b"workbook")
+    // bookViews is maxOccurs 1. Excel writes mc:AlternateContent (absPath) and
+    // xr:revisionPtr before the real bookViews. Those are not the insertion point:
+    // a second bookViews is what makes Excel repair the workbook.
+    matches!(
+        local,
+        b"sheets"
+            | b"functionGroups"
+            | b"externalReferences"
+            | b"definedNames"
+            | b"calcPr"
+            | b"oleSize"
+            | b"customWorkbookViews"
+            | b"pivotCaches"
+            | b"smartTagPr"
+            | b"smartTagTypes"
+            | b"webPublishing"
+            | b"fileRecoveryPr"
+            | b"webPublishObjects"
+            | b"extLst"
+    )
 }
 
 fn prefix_of(tag: &Tag) -> Vec<u8> {
@@ -797,7 +858,7 @@ fn skip_element_after_open(xml: &[u8], mut i: usize, self_closing: bool) -> usiz
     i
 }
 
-fn rewrite_sheet_view(xml: &[u8], start: usize, edit: &ViewEdit) -> (Vec<u8>, usize) {
+fn rewrite_sheet_view(xml: &[u8], start: usize, edit: &ViewEdit, sqref: &[u8]) -> (Vec<u8>, usize) {
     let Some((tag, next)) = parse_tag(xml, start) else { return (xml[start..].to_vec(), xml.len()) };
     let mut changes = Vec::new();
     if edit.a1 {
@@ -818,7 +879,7 @@ fn rewrite_sheet_view(xml: &[u8], start: usize, edit: &ViewEdit) -> (Vec<u8>, us
     if tag.self_closing {
         if edit.a1 {
             let mut out = unclose(&open);
-            out.extend(selection_el(tag.prefix));
+            out.extend(selection_el(tag.prefix, sqref));
             out.extend(close_el(tag.prefix, b"sheetView"));
             return (out, next);
         }
@@ -849,7 +910,7 @@ fn rewrite_sheet_view(xml: &[u8], start: usize, edit: &ViewEdit) -> (Vec<u8>, us
         };
         if inner.closing && inner.local == b"sheetView" && depth == 1 {
             if edit.a1 && !saw_sel {
-                out.extend(selection_el(tag.prefix));
+                out.extend(selection_el(tag.prefix, sqref));
             }
             out.extend_from_slice(inner.raw);
             return (out, n);
@@ -858,7 +919,7 @@ fn rewrite_sheet_view(xml: &[u8], start: usize, edit: &ViewEdit) -> (Vec<u8>, us
         // pointing at A1 are invalid outside the corner pane and Excel repairs the file.
         if edit.a1 && !inner.closing && (inner.local == b"pane" || inner.local == b"selection") {
             if inner.local == b"selection" && !saw_sel {
-                out.extend(selection_el(tag.prefix));
+                out.extend(selection_el(tag.prefix, sqref));
                 saw_sel = true;
             }
             i = skip_element_after_open(xml, n, inner.self_closing);
@@ -875,14 +936,14 @@ fn rewrite_sheet_view(xml: &[u8], start: usize, edit: &ViewEdit) -> (Vec<u8>, us
     (out, i)
 }
 
-fn sheet_views_block(prefix: &[u8], edit: &ViewEdit) -> Vec<u8> {
+fn sheet_views_block(prefix: &[u8], edit: &ViewEdit, sqref: &[u8]) -> Vec<u8> {
     let mut v = open_el(prefix, b"sheetViews");
-    v.extend(sheet_view_element(prefix, edit));
+    v.extend(sheet_view_element(prefix, edit, sqref));
     v.extend(close_el(prefix, b"sheetViews"));
     v
 }
 
-fn sheet_view_element(prefix: &[u8], edit: &ViewEdit) -> Vec<u8> {
+fn sheet_view_element(prefix: &[u8], edit: &ViewEdit, sqref: &[u8]) -> Vec<u8> {
     let mut open = Vec::new();
     open.push(b'<');
     push_name(&mut open, prefix, b"sheetView");
@@ -898,7 +959,7 @@ fn sheet_view_element(prefix: &[u8], edit: &ViewEdit) -> Vec<u8> {
     }
     if edit.a1 {
         open.push(b'>');
-        open.extend(selection_el(prefix));
+        open.extend(selection_el(prefix, sqref));
         open.extend(close_el(prefix, b"sheetView"));
     } else {
         open.extend(b"/>");
@@ -921,12 +982,114 @@ fn workbook_view_element(prefix: &[u8]) -> Vec<u8> {
     v
 }
 
-fn selection_el(prefix: &[u8]) -> Vec<u8> {
+fn selection_el(prefix: &[u8], sqref: &[u8]) -> Vec<u8> {
+    let sqref = if sqref.is_empty() { &b"A1"[..] } else { sqref };
     let mut v = Vec::new();
     v.push(b'<');
     push_name(&mut v, prefix, b"selection");
-    v.extend(br#" activeCell="A1" sqref="A1"/>"#);
+    v.extend(br#" activeCell="A1" sqref=""#);
+    v.extend_from_slice(sqref);
+    v.extend(br#""/>"#);
     v
+}
+
+/// `mergeCell/@ref` that contains A1, or `A1` when the corner is not merged.
+/// Excel repairs a selection whose sqref is only the corner of a merged range.
+fn merge_sqref_containing_a1(xml: &[u8]) -> Vec<u8> {
+    let mut i = 0;
+    while i < xml.len() {
+        if xml[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if let Some(n) = skip_special(xml, i) {
+            i = n;
+            continue;
+        }
+        let Some((tag, n)) = parse_tag(xml, i) else {
+            i += 1;
+            continue;
+        };
+        if !tag.closing && tag.local == b"mergeCell" {
+            if let Some(r) = attr_value(tag.raw, b"ref") {
+                if range_contains_a1(&r) {
+                    return r;
+                }
+            }
+        }
+        i = n;
+    }
+    b"A1".to_vec()
+}
+
+fn range_contains_a1(raw: &[u8]) -> bool {
+    let r = trim_ws(raw);
+    let (left, right) = match r.iter().position(|&c| c == b':') {
+        Some(p) => (&r[..p], &r[p + 1..]),
+        None => (r, r),
+    };
+    let Some(a) = parse_cell(left) else { return false };
+    let Some(b) = parse_cell(right) else { return false };
+    let c1 = a.0.min(b.0);
+    let c2 = a.0.max(b.0);
+    let r1 = a.1.min(b.1);
+    let r2 = a.1.max(b.1);
+    c1 <= 1 && 1 <= c2 && r1 <= 1 && 1 <= r2
+}
+
+fn trim_ws(s: &[u8]) -> &[u8] {
+    let mut a = 0;
+    let mut b = s.len();
+    while a < b && is_ws(s[a]) {
+        a += 1;
+    }
+    while b > a && is_ws(s[b - 1]) {
+        b -= 1;
+    }
+    &s[a..b]
+}
+
+fn parse_cell(raw: &[u8]) -> Option<(u32, u32)> {
+    let s = trim_ws(raw);
+    let mut i = 0;
+    if s.get(i) == Some(&b'$') {
+        i += 1;
+    }
+    let cs = i;
+    while i < s.len() && s[i].is_ascii_alphabetic() {
+        i += 1;
+    }
+    if i == cs {
+        return None;
+    }
+    let col = col_index(&s[cs..i])?;
+    if s.get(i) == Some(&b'$') {
+        i += 1;
+    }
+    let rs = i;
+    while i < s.len() && s[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == rs || i != s.len() {
+        return None;
+    }
+    let row = std::str::from_utf8(&s[rs..i]).ok()?.parse::<u32>().ok()?;
+    if row == 0 { None } else { Some((col, row)) }
+}
+
+fn col_index(s: &[u8]) -> Option<u32> {
+    if s.is_empty() || s.len() > 3 {
+        return None;
+    }
+    let mut n = 0u32;
+    for &c in s {
+        let u = c.to_ascii_uppercase();
+        if !u.is_ascii_uppercase() {
+            return None;
+        }
+        n = n.checked_mul(26)?.checked_add(u32::from(u - b'A') + 1)?;
+    }
+    if n == 0 { None } else { Some(n) }
 }
 
 fn open_el(prefix: &[u8], local: &[u8]) -> Vec<u8> {
@@ -1537,6 +1700,78 @@ mod tests {
         assert!(s1.contains(r#"<selection activeCell="A1" sqref="A1"/>"#), "{s1}");
         assert_eq!(s1.matches("<selection ").count(), 1, "{s1}");
         assert!(s1.contains("<v>1</v>"), "{s1}");
+    }
+
+    #[test]
+    fn ignorable_markup_before_book_views_does_not_add_a_second_one() {
+        // Excel writes the path and the revision pointer before the one bookViews.
+        // A second bookViews is illegal (maxOccurs 1) and Excel repairs the file.
+        let book = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:xr="http://schemas.microsoft.com/office/spreadsheetml/2014/revision" xmlns:xr2="http://schemas.microsoft.com/office/spreadsheetml/2015/revision2">
+<workbookPr codeName="ThisWorkbook"/>
+<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="x15"><x15ac:absPath url="C:\HANDA\TEST\" xmlns:x15ac="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"/></mc:Choice></mc:AlternateContent>
+<xr:revisionPtr revIDLastSave="0" documentId="13_ncr:1_{30A61511-50C7-4ED0-8787-2A68C903F61C}" xr2:uid="{00000000-0000-0000-0000-000000000000}"/>
+<bookViews><workbookView xWindow="-120" yWindow="-120" windowWidth="38640" windowHeight="21120" xr2:uid="{95B9D889-92C8-4729-9584-FB5B58D5CBBB}"/></bookViews>
+<sheets><sheet name="Case" sheetId="11" r:id="rId1"/><sheet name="step2" sheetId="6" state="hidden" r:id="rId2"/></sheets>
+</workbook>"#;
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+        let s1 = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><selection activeCell="F21" sqref="F21"/></sheetView></sheetViews><sheetData/></worksheet>"#;
+        let s2 = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><selection activeCell="C4" sqref="C4"/></sheetView></sheetViews><sheetData/></worksheet>"#;
+        let src = zip_of(&[
+            ("xl/workbook.xml", book, false),
+            ("xl/_rels/workbook.xml.rels", rels, false),
+            ("xl/worksheets/sheet1.xml", s1, false),
+            ("xl/worksheets/sheet2.xml", s2, false),
+        ]);
+        let out = tidy_package(&src, opts(false, false, true)).unwrap();
+        let book = String::from_utf8(part(&out, "xl/workbook.xml").2).unwrap();
+        assert_eq!(book.matches("<bookViews").count(), 1, "{book}");
+        assert!(book.contains(r#"xWindow="-120""#), "{book}");
+        assert!(book.contains(r#"xr2:uid="{95B9D889-92C8-4729-9584-FB5B58D5CBBB}""#), "{book}");
+        assert!(book.contains(r#"activeTab="0""#) && book.contains(r#"firstSheet="0""#), "{book}");
+        let rev = book.find("<xr:revisionPtr").expect("revision pointer");
+        let views = book.find("<bookViews").expect("book views");
+        let sheets = book.find("<sheets").expect("sheets");
+        assert!(rev < views && views < sheets, "{book}");
+        let again = tidy_package(&out, opts(false, false, true)).unwrap();
+        assert_eq!(again, out);
+    }
+
+    #[test]
+    fn missing_book_views_still_land_before_sheets_when_markup_comes_first() {
+        let book = br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:xr="http://schemas.microsoft.com/office/spreadsheetml/2014/revision"><workbookPr/><mc:AlternateContent><mc:Choice Requires="x15"><x15ac:absPath url="C:\a.xlsx"/></mc:Choice></mc:AlternateContent><xr:revisionPtr revIDLastSave="0"/><sheets><sheet name="Only" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+        let rels = br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+        let sheet = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
+        let src = zip_of(&[("xl/workbook.xml", book, false), ("xl/_rels/workbook.xml.rels", rels, false), ("xl/worksheets/sheet1.xml", sheet, false)]);
+        let out = tidy_package(&src, opts(false, false, true)).unwrap();
+        let book = String::from_utf8(part(&out, "xl/workbook.xml").2).unwrap();
+        assert_eq!(book.matches("<bookViews").count(), 1, "{book}");
+        assert!(book.contains(r#"<xr:revisionPtr revIDLastSave="0"/><bookViews><workbookView activeTab="0" firstSheet="0"/></bookViews><sheets>"#), "{book}");
+    }
+
+    #[test]
+    fn a1_inside_a_merge_selects_the_whole_merged_range() {
+        let book = br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Case" sheetId="1" r:id="rId1"/><sheet name="step2" sheetId="2" state="hidden" r:id="rId2"/></sheets></workbook>"#;
+        let rels = br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+        let s1 = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:J54"/><sheetViews><sheetView showGridLines="0" tabSelected="1" topLeftCell="A12" zoomScale="115" workbookViewId="0"><selection activeCell="F21" sqref="F21"/></sheetView></sheetViews><sheetData/><mergeCells count="2"><mergeCell ref="A1:J1"/><mergeCell ref="B3:I3"/></mergeCells></worksheet>"#;
+        let s2 = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><selection activeCell="C4" sqref="C4:H4"/></sheetView></sheetViews><sheetData/><mergeCells count="3"><mergeCell ref="B3:H3"/><mergeCell ref="C4:H4"/><mergeCell ref="C18:H18"/></mergeCells></worksheet>"#;
+        let src = zip_of(&[
+            ("xl/workbook.xml", book, false),
+            ("xl/_rels/workbook.xml.rels", rels, false),
+            ("xl/worksheets/sheet1.xml", s1, false),
+            ("xl/worksheets/sheet2.xml", s2, false),
+        ]);
+        let out = tidy_package(&src, opts(true, true, false)).unwrap();
+        let s1 = String::from_utf8(part(&out, "xl/worksheets/sheet1.xml").2).unwrap();
+        assert!(s1.contains(r#"<selection activeCell="A1" sqref="A1:J1"/>"#), "{s1}");
+        assert!(s1.contains(r#"topLeftCell="A1""#) && s1.contains(r#"zoomScale="100""#), "{s1}");
+        assert!(s1.contains(r#"<mergeCell ref="A1:J1"/>"#), "{s1}");
+        assert_eq!(s1.matches("<selection ").count(), 1, "{s1}");
+        let s2 = String::from_utf8(part(&out, "xl/worksheets/sheet2.xml").2).unwrap();
+        assert!(s2.contains(r#"<selection activeCell="A1" sqref="A1"/>"#), "{s2}");
+        assert!(s2.contains(r#"<mergeCell ref="C4:H4"/>"#), "{s2}");
+        let again = tidy_package(&out, opts(true, true, false)).unwrap();
+        assert_eq!(again, out);
     }
 
     #[test]
