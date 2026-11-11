@@ -77,7 +77,9 @@ ctr = "0.9.2"
 base64 = "0.22.1"
 
 [profile.release]
-opt-level = "z"
+# Speed over size. "z" cut inlining in search, list compare, JSON, and preview decode.
+# Thin the binary later if size matters; panic stays unwind so crash::guard can catch it.
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "unwind"
