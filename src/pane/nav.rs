@@ -1255,14 +1255,62 @@ pub(crate) unsafe fn probe_local(path: &str) -> LocalHit {
     }
 }
 
+/// `name.zip`, any case. The name `.zip` alone is not a file.
+fn zip_named(path: &str) -> bool {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or("");
+    let b = name.as_bytes();
+    b.len() > 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".zip")
+}
+
+/// Parent of `path`. `C:\foo` yields `C:\`. A root yields `None`.
+fn parent_of(path: &str) -> Option<&str> {
+    let path = path.trim().trim_end_matches(['\\', '/']);
+    let b = path.as_bytes();
+    if b.len() <= 3 && b.get(1) == Some(&b':') {
+        return None;
+    }
+    let i = path.rfind(['\\', '/'])?;
+    if i == 2 && b.get(1) == Some(&b':') {
+        return path.get(..=2);
+    }
+    if i == 0 {
+        return None;
+    }
+    Some(&path[..i])
+}
+
+/// `path` is under an ancestor whose own name is a `.zip` file.
+/// `is_zip_file` is asked only about those ancestors.
+pub(crate) fn under_zip_file(path: &str, is_zip_file: impl Fn(&str) -> bool) -> bool {
+    let mut cur = path;
+    while let Some(parent) = parent_of(cur) {
+        if zip_named(parent) && is_zip_file(parent) {
+            return true;
+        }
+        cur = parent;
+    }
+    false
+}
+
+/// An existing file whose name ends in `.zip`. A directory named `folder.zip` is not one.
+unsafe fn disk_zip_file(path: &str) -> bool {
+    let attr = GetFileAttributesW(&HSTRING::from(path));
+    attr != INVALID_FILE_ATTRIBUTES && attr & FILE_ATTRIBUTE_DIRECTORY.0 == 0
+}
+
 /// A local filesystem path that is confirmed missing. Shares and shell places are not probed:
 /// `GetFileAttributesW` on a dead share blocks for the redirector's timeout.
+/// A folder inside a zip is not a directory on disk, so the same call says it is missing.
+/// The shell still opens `file.zip\inner`. That path is not gone.
 pub(crate) unsafe fn local_path_gone(path: &str) -> bool {
     let path = path.trim();
     if path.is_empty() || !is_fs(path) || share_path(path) {
         return false;
     }
-    probe_local(path) == LocalHit::Gone
+    if probe_local(path) != LocalHit::Gone {
+        return false;
+    }
+    !under_zip_file(path, |p| unsafe { disk_zip_file(p) })
 }
 
 /// Browse only when the PIDL is safe to hand to the shell view. A null absolute PIDL is the crash.
@@ -3948,9 +3996,69 @@ fn activate_source() -> &'static str {
     }
 }
 
-/// Files this process will launch. `None` when any row is a folder, an executable,
-/// or not a filesystem path: that selection stays on the existing shell path.
-unsafe fn verb_files(rows: &[ActRow]) -> Option<Vec<crate::shell::fileopen::OpenFile>> {
+/// A shortcut or a folder-like archive stays on the shell classification. A normal
+/// file does not need that before it can be started.
+fn click_defers_to_shell(path: &str) -> bool {
+    if crate::folderapp::link_file(path) {
+        return true;
+    }
+    let name = path.trim().rsplit(['\\', '/']).next().unwrap_or("");
+    let ext = name.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+    matches!(ext.to_ascii_lowercase().as_str(), "zip" | "cab" | "library-ms" | "search-ms")
+}
+
+/// `Some` when `path` is a local file a double-click can start without asking the shell
+/// whether it is a folder. A directory, a share, a shortcut, and a zip return `None`.
+unsafe fn fast_click_file(path: &str) -> Option<crate::shell::fileopen::OpenFile> {
+    let path = path.trim();
+    if path.is_empty() || !is_fs(path) || share_path(path) || click_defers_to_shell(path) {
+        return None;
+    }
+    if local_dir_answer(path) != Some(false) {
+        return None;
+    }
+    let file = crate::shell::fileopen::prepare(path)?;
+    Some(crate::shell::fileopen::for_double_click(file))
+}
+
+/// Files under the pointer, using the filesystem path only. `None` when any row still
+/// needs the shell (a folder, a shortcut, a zip, a share, or a name that is not ready).
+unsafe fn double_click_files(i: usize, fv: &IFolderView2) -> Option<Vec<crate::shell::fileopen::OpenFile>> {
+    let focus = fv.GetFocusedItem().ok().filter(|&idx| idx >= 0).and_then(|idx| fv.GetItem::<IShellItem>(idx).ok());
+    let sel = selected_shell(fv);
+    let primary = focus.clone().or_else(|| (sel.len() == 1).then(|| sel[0].clone()));
+    let mut paths = Vec::new();
+    if let Some(primary) = primary {
+        paths.push(item_path(&primary));
+        if sel.len() > 1 {
+            for it in &sel {
+                if !same_shell(&primary, it) {
+                    paths.push(item_path(it));
+                }
+            }
+        }
+    } else if let Some(name) = listed_name(fv) {
+        let cur = app(|a| a.s.paths.get(i).cloned().unwrap_or_default());
+        if is_fs(&cur) && !share_path(&cur) {
+            if let Some(full) = join_child(&cur, &name) {
+                paths.push(full);
+            }
+        }
+    }
+    if paths.is_empty() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for path in &paths {
+        out.push(fast_click_file(path)?);
+    }
+    Some(out)
+}
+
+/// Files this process will launch. `None` when any row is not a filesystem file.
+/// Enter leaves an executable on the view's own verb. A double-click launches it here,
+/// and a document starts with the direct open command.
+unsafe fn files_to_launch(rows: &[ActRow], immediate: bool) -> Option<Vec<crate::shell::fileopen::OpenFile>> {
     if rows.is_empty() {
         return None;
     }
@@ -3961,10 +4069,12 @@ unsafe fn verb_files(rows: &[ActRow]) -> Option<Vec<crate::shell::fileopen::Open
             ActRow::FilePath(p) => p.clone(),
             _ => return None,
         };
-        if crate::shell::fileopen::route(&path) != Some(crate::shell::fileopen::Mode::Verb) {
+        let mode = crate::shell::fileopen::route(&path)?;
+        if !immediate && mode != crate::shell::fileopen::Mode::Verb {
             return None;
         }
-        out.push(crate::shell::fileopen::prepare(&path)?);
+        let file = crate::shell::fileopen::prepare(&path)?;
+        out.push(if immediate { crate::shell::fileopen::for_double_click(file) } else { file });
     }
     Some(out)
 }
@@ -3974,8 +4084,9 @@ unsafe fn sync_open(path: &str) {
 }
 
 /// Open every file row. Documents and executables both leave the UI thread.
-/// A path this module will not take (not a file path) keeps the old `ShellExecuteW`.
-unsafe fn open_rows(rows: &[ActRow], source: &'static str) {
+/// A double-click (`immediate`) starts the registered open command before a context-menu
+/// invoke. A path this module will not take keeps the old `ShellExecuteW`.
+unsafe fn open_rows(rows: &[ActRow], source: &'static str, immediate: bool) {
     let mut batch = Vec::new();
     let mut leftover = Vec::new();
     for row in rows {
@@ -3999,14 +4110,19 @@ unsafe fn open_rows(rows: &[ActRow], source: &'static str) {
             _ => continue,
         };
         if let Some(file) = crate::shell::fileopen::prepare(&path) {
-            batch.push(file);
+            batch.push(if immediate { crate::shell::fileopen::for_double_click(file) } else { file });
         } else {
             leftover.push(path);
         }
     }
     if !batch.is_empty() {
         let hwnd = app(|a| a.main.0 as isize);
-        if !crate::shell::fileopen::launch(source, hwnd, batch.clone()) {
+        let started = if immediate {
+            crate::shell::fileopen::launch_soon(source, hwnd, batch.clone())
+        } else {
+            crate::shell::fileopen::launch(source, hwnd, batch.clone())
+        };
+        if !started {
             for file in &batch {
                 sync_open(&file.path);
             }
@@ -4116,12 +4232,13 @@ fn row_counts(rows: &[ActRow]) -> (usize, usize, usize) {
 /// `SFGAO_FOLDER` bit; a file symlink to a directory; a `.lnk` whose pidl existed but
 /// whose attributes were not ready; Enter with several rows selected, only one of
 /// which was inspected; a grouped or filtered row whose shell item could not be read
-/// yet. A filesystem document is launched on a background thread so the handler load
-/// does not freeze this window. An executable, a folder, a folder shortcut, a zip
-/// opened as a folder, and a non-filesystem item stay on the path they had. Ctrl and
-/// the middle button still return false: that launch is a new tab. The pane is
-/// recorded either way, so a verb that still slips through is caught by the
-/// single-instance handoff and applied to this pane.
+/// yet. A double-click on a local file starts that file before those queries: the
+/// registered open command is queued first, including an executable. Enter still
+/// leaves an executable, a folder, a folder shortcut, a zip opened as a folder, and
+/// a non-filesystem item on the path they had. Ctrl and the middle button still
+/// return false: that launch is a new tab. The pane is recorded either way, so a
+/// verb that still slips through is caught by the single-instance handoff and
+/// applied to this pane.
 pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
     // The empty-space handler also sees this click. A verb the shell already ran must not run again.
     mark_shell_activate();
@@ -4144,6 +4261,24 @@ pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
     }
     let Some(sv) = sv else { return true }; // consume: do not let DefView invent a new window
     let Ok(fv) = sv.cast::<IFolderView2>() else { return true };
+    // Ahead of attribute queries and the retry sleep. A folder, shortcut, or zip
+    // returns nothing here and keeps the classification below.
+    if source != "enter" {
+        if let Some(files) = double_click_files(i, &fv) {
+            let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+            // The details-cell fallback enters this function again for the same click.
+            if repeated_activation(i, &paths) {
+                crate::shell::openlog::trace("path", || format!("source={source} mode=duplicate-skipped"));
+                return true;
+            }
+            let hwnd = app(|a| a.main.0 as isize);
+            crate::shell::openlog::trace("path", || format!("source={source} mode=click-first count={}", files.len()));
+            if crate::shell::fileopen::launch_soon(source, hwnd, files) {
+                remember_activation(i, &paths);
+                return true;
+            }
+        }
+    }
     crate::shell::openlog::trace("resolve-start", || format!("source={source}"));
     // The shell item is often missing for one beat while the folder enumerates or the
     // watcher refreshes. A few short tries beat swallowing the click. 60ms total.
@@ -4174,13 +4309,19 @@ pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
     let registered = crate::folderapp::shown_on();
     match crate::folderapp::list_activation(registered, false, false, &kinds) {
         crate::folderapp::ListAct::Shell => {
-            // Every row is a filesystem document. Launch those and tell the view we
-            // handled it, so DefView does not open them again on this thread.
-            // One executable or a non-filesystem pidl in the selection: do not launch
-            // anything here. The view's own verb is the existing path for that click.
-            if let Some(files) = verb_files(&rows) {
+            // Launch the files and tell the view we handled them, so DefView does not
+            // open them again on this thread. Enter still leaves an executable to the
+            // view. A double-click launches that executable here. A non-filesystem
+            // pidl stays on the view's own verb.
+            let immediate = source != "enter";
+            if let Some(files) = files_to_launch(&rows, immediate) {
                 let hwnd = app(|a| a.main.0 as isize);
-                if crate::shell::fileopen::launch(source, hwnd, files) {
+                let started = if immediate {
+                    crate::shell::fileopen::launch_soon(source, hwnd, files)
+                } else {
+                    crate::shell::fileopen::launch(source, hwnd, files)
+                };
+                if started {
                     if source != "enter" {
                         remember_activation(i, &paths);
                     }
@@ -4200,14 +4341,14 @@ pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
             if source != "enter" {
                 remember_activation(i, &paths);
             }
-            open_rows(&rows, "mixed");
+            open_rows(&rows, "mixed", source != "enter");
             true
         }
         crate::folderapp::ListAct::Browse(at) => {
             if source != "enter" {
                 remember_activation(i, &paths);
             }
-            open_rows(&rows, "mixed");
+            open_rows(&rows, "mixed", source != "enter");
             let target = match rows.get(at) {
                 Some(ActRow::FolderPath(p)) => Some(p.clone()),
                 Some(ActRow::FolderItem(it)) => Some(unsafe { item_path(it) }),
@@ -4520,7 +4661,7 @@ impl IDropTarget_Impl for PaneDrop_Impl {
 mod missing_tests {
     use super::{
         addr_keep, drive_root, edit_cur_ok, edit_target, fail_draw_text, fail_hit, fail_layout, fav_act, folder_step, local_hit, near_dir, net_bar_text, net_fail_buttons, net_fail_message, net_fail_text, net_wait_secs,
-        net_wait_text, path_place, pidl_browse_ok, rec_step, retry_path, share_kind, unc_path, FailHit, FavAct, FolderStep, LocalHit, Nav, NetBook, NetOpen, NetWait, PathPlace, NET_WAIT_MS,
+        local_path_gone, net_wait_text, path_place, pidl_browse_ok, rec_step, retry_path, share_kind, unc_path, under_zip_file, FailHit, FavAct, FolderStep, LocalHit, Nav, NetBook, NetOpen, NetWait, PathPlace, NET_WAIT_MS,
     };
     use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
     use windows::Win32::UI::Shell::{SBSP_ABSOLUTE, SBSP_NAVIGATEBACK, SBSP_NAVIGATEFORWARD, SBSP_PARENT};
@@ -4529,6 +4670,45 @@ mod missing_tests {
     use std::path::Path;
     use std::sync::atomic::Ordering;
     use std::time::Instant;
+
+    #[test]
+    fn a_folder_inside_a_zip_is_not_a_missing_path() {
+        let root = std::env::temp_dir().join(format!("maguro-zip-nav-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        struct Sweep(std::path::PathBuf);
+        impl Drop for Sweep {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _sweep = Sweep(root.clone());
+        let zip = root.join("pack.zip");
+        std::fs::write(&zip, b"pk").unwrap();
+        let inner = zip.join("nest").join("inner");
+        let inner = inner.to_string_lossy().replace('/', "\\");
+        assert!(!unsafe { local_path_gone(&inner) }, "{inner}");
+        let dirzip = root.join("folder.zip");
+        std::fs::create_dir(&dirzip).unwrap();
+        let missing = dirzip.join("missing").to_string_lossy().replace('/', "\\");
+        assert!(unsafe { local_path_gone(&missing) }, "{missing}");
+        let absent = root.join("no-such").to_string_lossy().replace('/', "\\");
+        assert!(unsafe { local_path_gone(&absent) }, "{absent}");
+    }
+
+    #[test]
+    fn under_zip_file_follows_a_zip_ancestor_and_ignores_a_directory_of_that_name() {
+        let zip = r"C:\work\pack.zip";
+        let is_file = |p: &str| p.eq_ignore_ascii_case(zip);
+        assert!(under_zip_file(r"C:\work\pack.zip\nest", is_file));
+        assert!(under_zip_file(r"C:\work\pack.zip\nest\inner", is_file));
+        assert!(under_zip_file(r"C:\work\Pack.ZIP\Docs", is_file));
+        assert!(under_zip_file(r"C:\a\one.zip\two.zip\inner", |p| p.eq_ignore_ascii_case(r"C:\a\one.zip")));
+        assert!(!under_zip_file(zip, is_file));
+        assert!(!under_zip_file(r"C:\work\notes.zip.txt\child", is_file));
+        assert!(!under_zip_file(r"C:\work\folder.zip\missing", |_| false));
+        assert!(!under_zip_file(r"C:\gone\child", |_| true));
+    }
 
     #[test]
     fn nearest_existing_parent() {
@@ -5004,5 +5184,15 @@ mod activation_dedupe {
         assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[]), 1_000, window));
         assert!(!duplicate_activation(0, &paths(&[]), 1_000, 0, &paths(&[r"C:\demo\a-note.txt"]), 1_000, window));
         assert!(!duplicate_activation(0, &prev, 1_000, 0, &paths(&[r"C:\demo\a-note.txt"]), 900, window));
+    }
+
+    #[test]
+    fn a_normal_file_does_not_wait_for_the_shell_classification() {
+        assert!(!super::click_defers_to_shell(r"C:\Work\note.md"));
+        assert!(!super::click_defers_to_shell(r"C:\Work\setup.EXE"));
+        assert!(super::click_defers_to_shell(r"C:\Work\folder.lnk"));
+        assert!(super::click_defers_to_shell(r"C:\Work\pack.ZIP"));
+        assert!(super::click_defers_to_shell(r"C:\Work\pics.cab"));
+        assert!(super::click_defers_to_shell(r"C:\Work\docs.library-ms"));
     }
 }

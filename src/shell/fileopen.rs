@@ -6,14 +6,15 @@
 //! loaded and the target application is ready. COM unloads those handlers after a
 //! few minutes idle, so the next open pays the cost again and the window looks stuck.
 //!
-//! A filesystem document is launched here, on one background STA. The call is
-//! `ShellExecuteExW` with `SEE_MASK_INVOKEIDLIST | SEE_MASK_ASYNCOK |
-//! SEE_MASK_FLAG_NO_UI` when the item has a local path, so the default verb runs
-//! off the UI thread and a DDE conversation does not have to finish first. The STA
-//! pumps messages, which is what lets that conversation complete. The working
-//! directory is the parent folder. `AllowSetForegroundWindow(ASFW_ANY)` runs on the
-//! UI thread, while the click still owns the foreground, and again on the worker
-//! just before the launch, so the opened app can come forward.
+//! A filesystem document is launched here, on one background STA. Enter, the address
+//! bar, peek, and a menu still use `ShellExecuteExW` with `SEE_MASK_INVOKEIDLIST |
+//! SEE_MASK_ASYNCOK | SEE_MASK_FLAG_NO_UI` for a local path, so the default verb runs
+//! off the UI thread. A double-click does not wait for that menu invoke: it starts
+//! the registered `open` command first, and uses the id list only when that command
+//! fails. The STA pumps messages, which is what lets a DDE conversation complete.
+//! The working directory is the parent folder. `AllowSetForegroundWindow(ASFW_ANY)`
+//! runs on the UI thread, while the click still owns the foreground, and again on
+//! the worker just before the launch, so the opened app can come forward.
 //!
 //! Executables stay a direct `open` (no context-menu invoke): that is CreateProcess,
 //! and a UAC or SmartScreen window still belongs to that path. A non-filesystem
@@ -43,6 +44,8 @@ pub(crate) enum Mode {
     Verb,
     /// `open` on the path. Executables, so the shell runs the image itself.
     Run,
+    /// Double-click. The registered `open` command runs before any context-menu invoke.
+    First,
 }
 
 #[derive(Clone, Debug)]
@@ -123,9 +126,26 @@ pub(crate) fn open_invoke_mask(verb: &str, default_item: bool) -> u32 {
     0
 }
 
+/// A double-click document uses [`Mode::First`]. An executable stays [`Mode::Run`].
+pub(crate) fn for_double_click(mut file: OpenFile) -> OpenFile {
+    if file.mode == Mode::Verb {
+        file.mode = Mode::First;
+    }
+    file
+}
+
 /// Queue `files` and return. False when there is nothing to do or the worker did not start.
 /// The caller then keeps its previous launch path.
 pub(crate) fn launch(source: &'static str, hwnd: isize, files: Vec<OpenFile>) -> bool {
+    enqueue(source, hwnd, files, false)
+}
+
+/// Same as [`launch`], placed ahead of opens that have not started yet.
+pub(crate) fn launch_soon(source: &'static str, hwnd: isize, files: Vec<OpenFile>) -> bool {
+    enqueue(source, hwnd, files, true)
+}
+
+fn enqueue(source: &'static str, hwnd: isize, files: Vec<OpenFile>, ahead: bool) -> bool {
     if files.is_empty() {
         return false;
     }
@@ -140,11 +160,12 @@ pub(crate) fn launch(source: &'static str, hwnd: isize, files: Vec<OpenFile>) ->
             super::openlog::trace("error", || format!("source={source} err=queue-full"));
             return false;
         }
-        q.jobs.push_back(Job {
-            source,
-            hwnd,
-            files,
-        });
+        let job = Job { source, hwnd, files };
+        if ahead {
+            q.jobs.push_front(job);
+        } else {
+            q.jobs.push_back(job);
+        }
     }
     WAKE.notify_one();
     true
@@ -228,18 +249,25 @@ unsafe fn launch_one(source: &str, hwnd: isize, file: &OpenFile) {
     let dir = directory
         .as_ref()
         .map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr()));
+    // A double-click must start the program before any context-menu handler loads.
+    if file.mode == Mode::First {
+        if try_path(source, owner, dir, &file.path, "first", false) {
+            return;
+        }
+        if !crate::unc_path(&file.path) && try_idlist(source, owner, dir, &file.path) {
+            return;
+        }
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    }
     if file.mode == Mode::Verb
         && !crate::unc_path(&file.path)
         && try_idlist(source, owner, dir, &file.path)
     {
         return;
     }
-    let mode = if file.mode == Mode::Run {
-        "run"
-    } else {
-        "path"
-    };
-    try_path(source, owner, dir, &file.path, mode);
+    let mode = if file.mode == Mode::Run { "run" } else { "path" };
+    try_path(source, owner, dir, &file.path, mode, true);
 }
 
 unsafe fn try_idlist(source: &str, owner: HWND, dir: PCWSTR, path: &str) -> bool {
@@ -287,7 +315,7 @@ unsafe fn try_idlist(source: &str, owner: HWND, dir: PCWSTR, path: &str) -> bool
     ok
 }
 
-unsafe fn try_path(source: &str, owner: HWND, dir: PCWSTR, path: &str, mode: &str) -> bool {
+unsafe fn try_path(source: &str, owner: HWND, dir: PCWSTR, path: &str, mode: &str, beep: bool) -> bool {
     super::openlog::trace("launch-before", || {
         format!(
             "source={source} mode={mode} dir={} file={path}",
@@ -318,7 +346,7 @@ unsafe fn try_path(source: &str, owner: HWND, dir: PCWSTR, path: &str, mode: &st
             ok as u8
         )
     });
-    if !ok {
+    if !ok && beep {
         _ = MessageBeep(MB_ICONWARNING);
     }
     ok
@@ -380,5 +408,21 @@ mod tests {
         assert_eq!(open_invoke_mask("openas", false), 0);
         assert_eq!(open_invoke_mask("openwith", false), 0);
         assert_eq!(open_invoke_mask("opennew", false), 0);
+    }
+
+    #[test]
+    fn a_double_click_document_starts_with_the_open_command() {
+        let doc = OpenFile {
+            path: r"C:\Work\note.md".into(),
+            directory: r"C:\Work".into(),
+            mode: Mode::Verb,
+        };
+        assert_eq!(for_double_click(doc).mode, Mode::First);
+        let exe = OpenFile {
+            path: r"C:\Work\setup.EXE".into(),
+            directory: r"C:\Work".into(),
+            mode: Mode::Run,
+        };
+        assert_eq!(for_double_click(exe).mode, Mode::Run);
     }
 }
