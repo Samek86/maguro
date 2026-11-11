@@ -1,8 +1,9 @@
 // First-run favourites. The favourites store is maguro.json in the Maguro config
 // directory. A missing file is the only signal that Maguro has never saved
 // favourites. An existing file is left alone, even when its tree is empty, so a
-// group or item the user deleted is not put back. grids.ini and any other
-// application's config are not read or written.
+// group or item the user deleted is not put back on the next launch. Settings
+// calls `restore_missing_defaults` for that, and only for places that are absent.
+// grids.ini and any other application's config are not read or written.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -79,16 +80,71 @@ fn drive_caption(removable: bool, letter: char) -> String {
     format!("{kind} ({letter}:)")
 }
 
+/// Identity of a favourite path. Drive roots and trailing slashes collapse, and case does not count.
+fn path_key(path: &str) -> String {
+    tidy_path(path).to_ascii_lowercase()
+}
+
 fn push_place(children: &mut Vec<FavNode>, seen: &mut HashSet<String>, path: &str, name: &str) {
     let path = tidy_path(path);
-    if path.is_empty() {
-        return;
-    }
-    let key = path.to_ascii_lowercase();
-    if !seen.insert(key) {
+    let key = path_key(&path);
+    if key.is_empty() || !seen.insert(key) {
         return;
     }
     children.push(FavNode::leaf(&path, name, false));
+}
+
+fn collect_path_keys(nodes: &[FavNode], seen: &mut HashSet<String>) {
+    for n in nodes {
+        let key = path_key(&n.path);
+        if !key.is_empty() {
+            seen.insert(key);
+        }
+        if !n.children.is_empty() {
+            collect_path_keys(&n.children, seen);
+        }
+    }
+}
+
+/// Index path of the first group named `name`. A group on this level wins over one nested deeper.
+fn group_path(nodes: &[FavNode], name: &str) -> Option<Vec<usize>> {
+    fn walk(nodes: &[FavNode], name: &str, path: &mut Vec<usize>) -> bool {
+        for (i, n) in nodes.iter().enumerate() {
+            if n.is_group() && n.name == name {
+                path.push(i);
+                return true;
+            }
+        }
+        for (i, n) in nodes.iter().enumerate() {
+            if !n.is_group() {
+                continue;
+            }
+            path.push(i);
+            if walk(&n.children, name, path) {
+                return true;
+            }
+            path.pop();
+        }
+        false
+    }
+    let mut path = Vec::new();
+    walk(nodes, name, &mut path).then_some(path)
+}
+
+/// Open `path` and append `missing` to that group. Existing children stay in front.
+fn append_to_group(nodes: &mut [FavNode], path: &[usize], missing: Vec<FavNode>) {
+    let Some((&i, rest)) = path.split_first() else {
+        return;
+    };
+    let Some(node) = nodes.get_mut(i) else {
+        return;
+    };
+    node.open = true;
+    if rest.is_empty() {
+        node.children.extend(missing);
+    } else {
+        append_to_group(&mut node.children, rest, missing);
+    }
 }
 
 /// The Default group: This PC, Desktop, fixed and removable drives, then the Recycle Bin.
@@ -127,7 +183,7 @@ pub(crate) fn favorites_store_missing(dir: &Path) -> bool {
 /// Add the Default group on a first start. `settings_present` means maguro.json already existed.
 /// A present file is not changed, including one whose favourites the user deleted.
 /// A second call on a session that already has favourites does not add another group.
-/// Returns whether the group was added.
+/// Returns whether the group was added. The Settings button does not call this.
 pub(crate) fn seed_favorites_if_absent(
     settings_present: bool,
     session: &mut Session,
@@ -136,9 +192,51 @@ pub(crate) fn seed_favorites_if_absent(
     if settings_present || !session.tree.is_empty() || !session.favs.is_empty() {
         return false;
     }
-    session.tree = vec![default_favorite_group(sources)];
+    restore_missing_defaults(session, sources) > 0
+}
+
+/// Put back default places that are not already in the tree.
+///
+/// The rows come from `default_favorite_group`, the same list a first launch builds.
+/// A path already stored anywhere (any case, with or without a trailing slash) is left
+/// where it is, including its name. Nothing is removed. Existing nodes stay in order.
+/// Missing rows are appended, in seed order, to the group that wears the current
+/// language's default name, or to a new group at the end when that name is absent.
+/// That group and its parents are opened so the side panel can show the new rows.
+/// Returns how many leaves were added. An existing tree is not rewritten when
+/// nothing is missing. A flat `favs` list with an empty tree is lifted first,
+/// the same migration the favourites page already does.
+pub(crate) fn restore_missing_defaults(session: &mut Session, sources: &SeedSources) -> usize {
+    session.ensure_fav_tree();
+    let seed = default_favorite_group(sources);
+    let mut have = HashSet::new();
+    collect_path_keys(&session.tree, &mut have);
+    let missing: Vec<FavNode> = seed
+        .children
+        .into_iter()
+        .filter(|n| {
+            let key = path_key(&n.path);
+            !key.is_empty() && !have.contains(&key)
+        })
+        .collect();
+    let added = missing.len();
+    if added == 0 {
+        return 0;
+    }
+    if let Some(path) = group_path(&session.tree, &seed.name) {
+        append_to_group(&mut session.tree, &path, missing);
+    } else {
+        let mut group = FavNode::group(&seed.name);
+        group.children = missing;
+        session.tree.push(group);
+    }
     session.sync_favs();
-    true
+    added
+}
+
+/// Same as `restore_missing_defaults`, using this machine's desktop and drives.
+pub(crate) fn restore_default_favorites(session: &mut Session) -> usize {
+    restore_missing_defaults(session, &machine_sources())
 }
 
 /// Desktop known folder for this user, plus fixed and removable drives that are present now.
@@ -464,5 +562,137 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&partial);
+    }
+
+    fn child_paths(node: &FavNode) -> Vec<&str> {
+        node.children.iter().map(|n| n.path.as_str()).collect()
+    }
+
+    #[test]
+    fn restore_on_an_empty_tree_matches_the_first_run_group() {
+        with_ui(0, || {
+            let src = sources();
+            let mut session = Session::default();
+            let expect = default_favorite_group(&src);
+            assert_eq!(restore_missing_defaults(&mut session, &src), expect.children.len());
+            assert_eq!(session.tree, vec![expect]);
+            let tree = session.tree.clone();
+            let favs = session.favs.clone();
+            assert_eq!(restore_missing_defaults(&mut session, &src), 0);
+            assert_eq!(session.tree, tree);
+            assert_eq!(session.favs, favs);
+        });
+    }
+
+    #[test]
+    fn restore_adds_only_missing_and_keeps_existing_order() {
+        with_ui(0, || {
+            let src = sources();
+            // Same places as the seed, one drive written in another case. Nothing is missing.
+            let mut present = FavNode::group("Default");
+            present.open = false;
+            present.children = default_favorite_group(&src).children;
+            present.children[2].path = r"c:\".into();
+            let mut session = Session::default();
+            session.tree = vec![present];
+            let before = session.tree.clone();
+            assert_eq!(restore_missing_defaults(&mut session, &src), 0);
+            assert_eq!(session.tree, before);
+            assert!(!session.tree[0].open);
+            assert_eq!(session.tree[0].children[2].path, r"c:\");
+
+            let mut work = FavNode::group("Work");
+            work.children.push(FavNode::leaf(r"D:\Photos", "Photos", false));
+            // Trailing slash still counts as the desktop path. The stored text stays.
+            work.children.push(FavNode::leaf(r"D:\Desk\", "Desk copy", false));
+            let mut partial = FavNode::group("Default");
+            partial.open = false;
+            partial.children.push(FavNode::leaf(RECYCLE_BIN, "Bin", false));
+            partial.children.push(FavNode::leaf("c:/", "Mine", false));
+            partial.children.push(FavNode::leaf(THIS_PC, "PC", false));
+            session.tree = vec![work, partial];
+            session.favs.clear();
+            assert_eq!(restore_missing_defaults(&mut session, &src), 2);
+
+            assert_eq!(session.tree.len(), 2);
+            assert_eq!(session.tree[0].name, "Work");
+            assert_eq!(child_paths(&session.tree[0]), vec![r"D:\Photos", r"D:\Desk\"]);
+            assert_eq!(session.tree[0].children[1].name, "Desk copy");
+            let group = &session.tree[1];
+            assert!(group.open);
+            assert_eq!(
+                child_paths(group),
+                vec![RECYCLE_BIN, "c:/", THIS_PC, r"D:\", r"E:\"]
+            );
+            assert_eq!(group.children[0].name, "Bin");
+            assert_eq!(group.children[1].name, "Mine");
+            assert_eq!(group.children[2].name, "PC");
+            assert_eq!(group.children[3].name, "Removable drive (D:)");
+            assert_eq!(group.children[4].name, "Removable drive (E:)");
+            assert!(session.favs[0].starts_with(r"D:\Photos"));
+            let mine = session.favs.iter().position(|f| f.starts_with("c:/")).unwrap();
+            let added = session.favs.iter().position(|f| f.contains("Removable drive (D:)")).unwrap();
+            assert!(mine < added);
+            let tree = session.tree.clone();
+            let favs = session.favs.clone();
+            assert_eq!(restore_missing_defaults(&mut session, &src), 0);
+            assert_eq!(session.tree, tree);
+            assert_eq!(session.favs, favs);
+        });
+    }
+
+    #[test]
+    fn restore_appends_a_group_when_the_seed_name_is_absent() {
+        with_ui(0, || {
+            let src = sources();
+            let mut places = FavNode::group("Places");
+            places.children.push(FavNode::leaf(THIS_PC, "PC", false));
+            places.children.push(FavNode::leaf(r"E:\Mine", "Mine", false));
+            let mut session = Session::default();
+            session.tree = vec![places];
+            let n = restore_missing_defaults(&mut session, &src);
+            // This PC is already stored. Desktop, three drives, and the Recycle Bin are not.
+            assert_eq!(n, 5);
+            assert_eq!(session.tree.len(), 2);
+            assert_eq!(session.tree[0].name, "Places");
+            assert_eq!(child_paths(&session.tree[0]), vec![THIS_PC, r"E:\Mine"]);
+            assert_eq!(session.tree[0].children[0].name, "PC");
+            let added = &session.tree[1];
+            assert_eq!(added.name, "Default");
+            assert!(added.open);
+            assert_eq!(
+                child_paths(added),
+                vec![r"D:\Desk", r"C:\", r"D:\", r"E:\", RECYCLE_BIN]
+            );
+
+            // A nested group with the seed name receives the rows. No second group is created.
+            let mut inner = FavNode::group("Default");
+            inner.open = false;
+            inner.children.push(FavNode::leaf(THIS_PC, "PC", false));
+            let mut jobs = FavNode::group("Jobs");
+            jobs.open = false;
+            jobs.children.push(inner);
+            session.tree = vec![jobs];
+            assert!(restore_missing_defaults(&mut session, &src) > 0);
+            assert_eq!(session.tree.len(), 1);
+            assert!(session.tree[0].open);
+            assert_eq!(session.tree[0].name, "Jobs");
+            assert_eq!(session.tree[0].children.len(), 1);
+            let inner = &session.tree[0].children[0];
+            assert!(inner.open);
+            assert_eq!(inner.children[0].path, THIS_PC);
+            assert_eq!(inner.children[0].name, "PC");
+            assert_eq!(inner.children[1].path, r"D:\Desk");
+
+            // A flat list is lifted into the tree first, then only the missing places are added.
+            session.tree.clear();
+            session.favs = vec![r"C:\".into(), r"D:\Photos".into()];
+            assert_eq!(restore_missing_defaults(&mut session, &src), 5);
+            assert_eq!(session.tree[0].path, r"C:\");
+            assert_eq!(session.tree[1].path, r"D:\Photos");
+            assert!(session.tree[2].is_group());
+            assert!(!session.tree[2].children.iter().any(|n| path_key(&n.path) == path_key(r"C:\")));
+            assert_eq!(session.tree[2].children[0].path, THIS_PC);
+        });
     }
 }

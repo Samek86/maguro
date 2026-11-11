@@ -253,10 +253,11 @@ unsafe fn build_children(h: HWND) {
     child_at(h, w!("EDIT"), "", 0x80 | tab, S_WM, font);
     btn(S_WM_BROWSE, tx(crate::Key::Browse), true);
     btn(S_UPDATE, update_button_label(), true);
+    btn(S_FAV_RESTORE, tx(crate::Key::RestoreDefaultFolders), true);
 }
 
 fn each_child(h: HWND, mut f: impl FnMut(HWND)) {
-    let ids = [S_SEARCH, S_CLOSE, S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE, S_UPDATE];
+    let ids = [S_SEARCH, S_CLOSE, S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE, S_UPDATE, S_FAV_RESTORE];
     for id in ids {
         let c = unsafe { GetDlgItem(Some(h), id).unwrap_or_default() };
         if !c.0.is_null() {
@@ -322,6 +323,7 @@ unsafe fn fill_strings(h: HWND) {
         (S_CTX_REFRESH, tx(CTX_REFRESH_L)),
         (S_WM_BROWSE, tx(crate::Key::Browse)),
         (S_UPDATE, update_button_label()),
+        (S_FAV_RESTORE, tx(crate::Key::RestoreDefaultFolders)),
     ];
     BUSY.with(|b| b.set(true));
     let _ = SetWindowTextW(ctl(h, S_WM), &HSTRING::from(app(|a| a.s.winmerge_path.clone())));
@@ -596,6 +598,10 @@ unsafe fn place(h: HWND, g: &Geo, sn: &Snap) {
                 let show_r = intersects(*reset, content);
                 put!(S_RESET, ctl(h, S_RESET), *reset, show_r, true);
             }
+            Item::FavRestore(r) => {
+                let show = intersects(*r, content);
+                put!(S_FAV_RESTORE, ctl(h, S_FAV_RESTORE), *r, show, true);
+            }
             Item::FavRow { i, rename, btn, .. } if *i != usize::MAX && *i < FAV_MAX as usize && btn.right > btn.left => {
                 let id = S_FAV0 + *i as i32;
                 FAV_MADE.fetch_max(*i as i32 + 1, Ordering::Relaxed);
@@ -619,7 +625,7 @@ unsafe fn place(h: HWND, g: &Geo, sn: &Snap) {
         }
     }
     // Other page, scrolled off without a row, or a favourite button this page did not use.
-    for id in [S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE, S_UPDATE] {
+    for id in [S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE, S_UPDATE, S_FAV_RESTORE] {
         if !kept.contains(&id) {
             put!(id, ctl(h, id), RECT::default(), false, false);
         }
@@ -812,6 +818,7 @@ unsafe fn draw(dc: HDC, rc: RECT, g: &Geo, sn: &Snap, h: HWND) {
                 crate::fill(dc, RECT { top: r.bottom - 1, ..*r }, t.line);
             }
             Item::KeyRow { i, rect, change, reset } => draw_key_row(dc, *i, *rect, *change, *reset, sn),
+            Item::FavRestore(_) => {}
         }
     }
     if g.has_bar {
@@ -1485,6 +1492,20 @@ fn flip(id: u8) {
     }
 }
 
+/// Add default places that are missing, refresh both favourites surfaces, and save.
+unsafe fn restore_default_favs(h: HWND) {
+    let added = app(|a| crate::restore_default_favorites(&mut a.s));
+    if added > 0 {
+        crate::commit_favs();
+    }
+    let text = if added == 0 {
+        tx(crate::Key::RestoreDefaultsNone).to_string()
+    } else {
+        tf(crate::Key::RestoreDefaultsAdded, &[("n", &added.to_string())])
+    };
+    let _ = MessageBoxW(Some(h), &HSTRING::from(text), w!("Maguro"), MB_OK | MB_ICONINFORMATION);
+}
+
 unsafe fn delete_fav(k: usize) {
     let Some(id) = fav_node(k).map(|r| r.id) else { return };
     let links = crate::servers_at(&id);
@@ -1633,6 +1654,7 @@ unsafe fn on_command(h: HWND, id: i32, code: u32) {
             crate::save_session();
             let _ = InvalidateRect(Some(h), None, false);
         }
+        S_FAV_RESTORE => restore_default_favs(h),
         id if (S_FAV0..S_REN0).contains(&id) => delete_fav((id - S_FAV0) as usize),
         id if (S_REN0..S_REN0 + FAV_MAX).contains(&id) => rename_fav(h, (id - S_REN0) as usize),
         _ => {}

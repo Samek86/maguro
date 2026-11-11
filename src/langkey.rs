@@ -836,11 +836,14 @@ pub(crate) enum Key {
     ShowFolderTreePanelDesc,
     CtxTiming,
     CtxTimingHint,
+    RestoreDefaultFolders,
+    RestoreDefaultsAdded,
+    RestoreDefaultsNone,
 }
 
-pub(crate) const KEY_COUNT: usize = 831;
+pub(crate) const KEY_COUNT: usize = 834;
 
-const _: () = assert!((Key::CtxTimingHint as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::RestoreDefaultsNone as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1674,6 +1677,9 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Turn off both panels to hide the left panel.",
     "Record right-click timing",
     "Millisecond log in the Log folder next to the settings file. Files older than 14 days are deleted when Maguro starts.",
+    "Restore default folders",
+    "{n} added",
+    "Nothing to add",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2509,4 +2515,7 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "show_folder_tree_panel_desc",
     "ctx_timing",
     "ctx_timing_hint",
+    "restore_default_folders",
+    "restore_defaults_added",
+    "restore_defaults_none",
 ];
