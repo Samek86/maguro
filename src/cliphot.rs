@@ -1,7 +1,8 @@
 //! Global hotkey that opens a clipboard path.
 //! Registered the same way as Win+Shift+E (`app.front`): `RegisterHotKey` on one window,
-//! only while Maguro is running. The chord is `clip.open` (Win+Alt+V unless rebound).
-//! A folder opens in a new tab. A file opens with the shell default handler.
+//! only while Maguro is running. The chord is `clip.open` (Alt+Z unless rebound).
+//! A folder opens in a new tab and the main window is brought forward.
+//! A file opens with the shell default handler and does not pull Maguro forward.
 //! The on/off switch is `Session::clip_hotkey`, not an unbound chord.
 
 use std::sync::Mutex;
@@ -245,8 +246,9 @@ fn reveal_miss() {
     miss();
 }
 
-/// Win+Alt+V, or whatever chord the keymap now has. A dialog that has disabled its owner comes forward instead.
-/// A folder opens in a new tab. A file is handed to the shell and does not arm `TIMER_CLIPSEL`.
+/// Alt+Z, or whatever chord the keymap now has. A dialog that has disabled its owner comes forward instead.
+/// A folder opens in a new tab, then the main window is restored and brought forward
+/// the same way as Win+Shift+E. A file is handed to the shell and does not arm `TIMER_CLIPSEL`.
 pub(crate) unsafe fn on_hotkey() {
     if modal_forward() {
         return;
@@ -258,8 +260,12 @@ pub(crate) unsafe fn on_hotkey() {
     };
     match clippath::plan(&path, probe_path(&path)) {
         Some(ClipPlan::Folder(folder)) => {
-            crate::reveal_window(front_target());
+            let h = front_target();
+            // Restore before the shell view is created so a minimized window has a real size.
+            // Browsing can give the foreground back, so take it again after the tab exists.
+            crate::reveal_window(h);
             crate::new_tab_at(Some(&folder));
+            crate::activate_main(h);
         }
         Some(ClipPlan::File(file)) => {
             if !shell_open(&file) {

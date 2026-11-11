@@ -37,6 +37,8 @@ const S_SIDE: i32 = 37;
 const S_WM: i32 = 30;
 const S_WM_BROWSE: i32 = 31;
 const S_UPDATE: i32 = 39;
+/// Favourites page. Adds default places that are not already in the tree.
+const S_FAV_RESTORE: i32 = 40;
 const S_FAV0: i32 = 20000;
 /// Delete buttons are S_FAV0 + i, rename buttons S_REN0 + i. Control ids stay under 0x8000.
 const FAV_MAX: i32 = 4096;
@@ -273,6 +275,7 @@ const ADV: &[Spec] = &[
 
 const KEY_NOTE: crate::Key = crate::Key::DoubleClickRowOrPressChangeThen;
 const LIST_H: crate::Key = crate::Key::ViewList;
+const RESTORE_FAV: crate::Key = crate::Key::RestoreDefaultFolders;
 const SIDE_FAV: crate::Key = crate::Key::FavouritesOnTop;
 const SIDE_TREE: crate::Key = crate::Key::FolderTreeOnTop;
 const ABOUT: &[Spec] = &[Spec {
@@ -325,7 +328,7 @@ fn page_match(q: &str, page: usize) -> bool {
     }
     if page == 4 {
         let rows = fav_tree_rows();
-        return !crate::filter_fav_rows(&rows, q).is_empty() || has(tx(LIST_H), q);
+        return !crate::filter_fav_rows(&rows, q).is_empty() || has(tx(LIST_H), q) || has(tx(RESTORE_FAV), q);
     }
     if page == 5 {
         return (0..crate::keys::len()).any(|i| key_hit_i(i, q)) || has(tx(KEY_NOTE), q);
@@ -537,6 +540,8 @@ enum Item {
     KeyBar { edit: RECT, reset: RECT },
     KeyHead(RECT),
     KeyRow { i: usize, rect: RECT, change: RECT, reset: RECT },
+    /// Favourites page. The button itself is a child control; this is only its slot.
+    FavRestore(RECT),
 }
 
 struct Geo {
@@ -971,11 +976,29 @@ fn fav_node(i: usize) -> Option<crate::FavRow> {
     fav_tree_rows().get(i).cloned()
 }
 
+fn restore_btn_rect(left: i32, right: i32, top: i32, dpi: i32) -> RECT {
+    let bh = sc(dpi, crate::BTN_H_FOOTER);
+    let max_w = (right - left).max(sc(dpi, crate::BTN_MIN_W));
+    let want = seg_w(tx(RESTORE_FAV), dpi).max(sc(dpi, crate::BTN_MIN_W));
+    let bw = want.min(max_w);
+    RECT { left: right - bw, top, right, bottom: top + bh }
+}
+
 fn fav_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str) -> i32 {
     let dpi = sn.dpi.max(96);
     let all = fav_tree_rows();
     let rows = crate::filter_fav_rows(&all, rq);
-    if !rq.is_empty() && rows.is_empty() && !has(tx(LIST_H), rq) {
+    let show_list = rq.is_empty() || !rows.is_empty() || has(tx(LIST_H), rq);
+    let show_restore = rq.is_empty() || has(tx(RESTORE_FAV), rq);
+    if !show_list && !show_restore {
+        return y;
+    }
+    if show_restore {
+        let rect = restore_btn_rect(left, right, y, dpi);
+        g.items.push(Item::FavRestore(rect));
+        y = rect.bottom + sc(dpi, 12);
+    }
+    if !show_list {
         return y;
     }
     g.items.push(Item::Head(RECT { left, top: y, right, bottom: y + sc(dpi, 28) }, LIST_H));
@@ -1297,7 +1320,7 @@ mod tests {
         let (anchor, page) = commit_search(2, 2, "Open clipboard path");
         assert_eq!((anchor, page), (2, 0));
         assert!(hit(&geo(client(), &shot(page, "Open clipboard path"))));
-        assert!(hit(&geo(client(), &shot(0, "Win+Alt+V"))));
+        assert!(hit(&geo(client(), &shot(0, "Alt+Z"))));
 
         crate::UI.store(1, Ordering::Relaxed);
         let (_, page) = commit_search(0, 0, "클립보드 경로 열기");
@@ -1647,5 +1670,47 @@ mod tests {
         assert_eq!(page, 2);
         assert!(ordered(&geo(client(), &shot(2, ""))));
         assert!(has("左のパネルの順番") && has("お気に入りを上") && has("フォルダー ツリーを上"));
+    }
+
+    #[test]
+    fn favourites_page_puts_restore_above_the_list() {
+        let _lock = ui_lock();
+        let _keep = lang(0);
+        assert_eq!(tx(RESTORE_FAV), "Restore default folders");
+        assert_eq!(tx(crate::Key::RestoreDefaultsAdded), "{n} added");
+        assert_eq!(tx(crate::Key::RestoreDefaultsNone), "Nothing to add");
+        assert_eq!(
+            (0..PAGES.len()).filter(|&p| page_match("Restore default folders", p)).collect::<Vec<_>>(),
+            vec![4]
+        );
+        let g = geo(client(), &shot(4, ""));
+        let btn = g.items.iter().find_map(|it| match it {
+            Item::FavRestore(r) => Some(*r),
+            _ => None,
+        }).expect("restore button");
+        let list_top = g.items.iter().find_map(|it| match it {
+            Item::Head(r, k) if *k == LIST_H => Some(r.top),
+            _ => None,
+        }).expect("list head");
+        assert_eq!(btn.right, g.title.right);
+        assert!(btn.left < btn.right);
+        assert_eq!(btn.bottom - btn.top, crate::BTN_H_FOOTER);
+        assert!(btn.top >= g.title.bottom);
+        assert!(btn.bottom <= list_top);
+
+        let only = geo(client(), &shot(4, "Restore default folders"));
+        assert!(only.show[4]);
+        assert!(only.items.iter().any(|it| matches!(it, Item::FavRestore(_))));
+
+        crate::UI.store(1, Ordering::Relaxed);
+        assert_eq!(tx(RESTORE_FAV), "기본 폴더 다시 만들기");
+        assert_eq!(tx(crate::Key::RestoreDefaultsAdded), "{n}개 추가됨");
+        assert_eq!(tx(crate::Key::RestoreDefaultsNone), "추가할 항목이 없습니다");
+        assert!(page_match("기본 폴더 다시 만들기", 4));
+        crate::UI.store(2, Ordering::Relaxed);
+        assert_eq!(tx(RESTORE_FAV), "既定のフォルダを再作成");
+        assert_eq!(tx(crate::Key::RestoreDefaultsAdded), "{n}件追加しました");
+        assert_eq!(tx(crate::Key::RestoreDefaultsNone), "追加する項目はありません");
+        assert!(page_match("既定のフォルダを再作成", 4));
     }
 }

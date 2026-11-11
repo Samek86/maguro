@@ -1,3 +1,5 @@
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
+
 use crate::imports::*;
 use super::*;
 use crate::ui::*;
@@ -1174,17 +1176,47 @@ pub(crate) unsafe fn hotkey_pressed() {
         }
     }
     let main = app(|a| a.desks.get(a.last_front).map(|d| d.main).filter(|h| !h.0.is_null()).unwrap_or(a.hot_hwnd));
-    if main.0.is_null() {
+    activate_main(main);
+}
+
+/// Restore `main` if it is minimized and make it the foreground window.
+/// Win+Shift+E ends here. A clipboard folder calls it again after the tab exists,
+/// because creating the shell view can hand the foreground back.
+/// `SetForegroundWindow` is tried first. If that misses, attach the foreground
+/// thread, allow this process, and toggle topmost once. The topmost bit is cleared
+/// before return, so the window does not stay above other apps.
+pub(crate) unsafe fn activate_main(main: HWND) {
+    if main.0.is_null() || !IsWindow(Some(main)).as_bool() {
         return;
     }
     if IsIconic(main).as_bool() {
-        _ = ShowWindow(main, SW_RESTORE);
+        let _ = ShowWindow(main, SW_RESTORE);
     }
-    if SetForegroundWindow(main).as_bool() && GetForegroundWindow() == main {
-        bind_hwnd(main);
-        app(|a| a.last_front = a.cur);
-        focus_view(app(|a| a.s.active));
+    let _ = AllowSetForegroundWindow(GetCurrentProcessId());
+    if !foreground_now(main) {
+        let fg = GetForegroundWindow();
+        let fg_thread = if fg.0.is_null() { 0 } else { GetWindowThreadProcessId(fg, None) };
+        let mine = GetCurrentThreadId();
+        let attached = fg_thread != 0 && fg_thread != mine && AttachThreadInput(fg_thread, mine, true).as_bool();
+        let _ = BringWindowToTop(main);
+        let _ = SetForegroundWindow(main);
+        if GetForegroundWindow() != main {
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+            let _ = SetWindowPos(main, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+            let _ = SetWindowPos(main, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+            let _ = SetForegroundWindow(main);
+        }
+        if attached {
+            let _ = AttachThreadInput(fg_thread, mine, false);
+        }
     }
+    bind_hwnd(main);
+    app(|a| a.last_front = a.cur);
+    focus_view(app(|a| a.s.active));
+}
+
+unsafe fn foreground_now(main: HWND) -> bool {
+    SetForegroundWindow(main).as_bool() && GetForegroundWindow() == main
 }
 
 /// F1 / Help. Opens the GitHub Pages Help in the browser. Ctrl+/ still opens the compact shortcut list.
