@@ -61,26 +61,36 @@ pub(crate) fn query_parts(q: &str) -> Vec<String> {
     q.split(';').map(str::trim).filter(|t| !t.is_empty()).map(|t| t.to_string()).collect()
 }
 
-pub(crate) fn name_matches(name: &str, query: &str) -> bool {
-    let parts = query_parts(query);
-    !parts.is_empty() && parts.iter().any(|t| term_match(name, t))
+struct Term {
+    wild: bool,
+    chars: Vec<char>,
 }
 
-fn term_match(name: &str, term: &str) -> bool {
-    if term.contains(['*', '?']) { wild_ci(name, term) } else { contains_ci(name, term) }
+/// Split and lowercase the query once. Each file name is then compared against these terms.
+fn prepared_terms(query: &str) -> Vec<Term> {
+    query_parts(query)
+        .into_iter()
+        .map(|t| Term { wild: t.contains(['*', '?']), chars: lower(&t) })
+        .filter(|t| !t.chars.is_empty())
+        .collect()
+}
+
+/// Tests call this. The folder walk uses `prepared_terms` so the query is not split per file.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn name_matches(name: &str, query: &str) -> bool {
+    name_hit(&lower(name), &prepared_terms(query))
+}
+
+fn name_hit(name: &[char], terms: &[Term]) -> bool {
+    !terms.is_empty() && terms.iter().any(|t| if t.wild { wild(name, &t.chars) } else { contains_chars(name, &t.chars) })
 }
 
 fn lower(s: &str) -> Vec<char> {
     s.chars().flat_map(|c| c.to_lowercase()).collect()
 }
 
-fn contains_ci(hay: &str, needle: &str) -> bool {
-    let (h, n) = (lower(hay), lower(needle));
-    !n.is_empty() && h.windows(n.len()).any(|w| w == n.as_slice())
-}
-
-fn wild_ci(name: &str, pat: &str) -> bool {
-    wild(&lower(name), &lower(pat))
+fn contains_chars(hay: &[char], needle: &[char]) -> bool {
+    !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
 fn wild(n: &[char], p: &[char]) -> bool {
@@ -150,6 +160,7 @@ pub(crate) fn walk_search(root: &Path, query: &str, recursive: bool, show_hidden
     let mut pending = Vec::new();
     let mut more = false;
     let mut stopped = false;
+    let terms = prepared_terms(query);
     let mut stack = vec![root.to_path_buf()];
     let mut last = Instant::now();
     let flush = |pending: &mut Vec<FindHit>, hits: &[FindHit], more: bool, emit: &mut dyn FnMut(&[FindHit], bool)| {
@@ -176,14 +187,17 @@ pub(crate) fn walk_search(root: &Path, query: &str, recursive: bool, show_hidden
                 continue;
             }
             let path = e.path();
-            if !show_hidden && is_hidden(&path) {
+            // FindNextFile already filled these attributes. `DirEntry::metadata` does not stat again.
+            let meta = e.metadata().ok();
+            let attr = meta.as_ref().map(|m| file_attr(m)).unwrap_or(0);
+            if !show_hidden && attr & (ATTR_HIDDEN | ATTR_SYSTEM) != 0 {
                 continue;
             }
-            let dir_ent = is_dir_follow(&e);
-            if dir_ent && recursive && !is_reparse(&path) {
+            let dir_ent = entry_from(e.file_type().ok().as_ref(), meta.as_ref());
+            if dir_ent && recursive && attr & ATTR_REPARSE == 0 {
                 kids.push(path.clone());
             }
-            if !name_matches(&name, query) {
+            if !name_hit(&lower(&name), &terms) {
                 continue;
             }
             if hits.len() >= cap {
@@ -222,27 +236,23 @@ pub(crate) fn entry_is_dir(is_dir: Option<bool>, is_symlink: Option<bool>, follo
     }
 }
 
-fn is_dir_follow(e: &std::fs::DirEntry) -> bool {
-    let ft = e.file_type().ok();
-    let is_dir = ft.as_ref().map(|t| t.is_dir());
-    let is_symlink = ft.as_ref().map(|t| t.is_symlink());
-    // `metadata` follows the link. Skip it for a real directory or a plain file.
+const ATTR_HIDDEN: u32 = 0x2;
+const ATTR_SYSTEM: u32 = 0x4;
+const ATTR_REPARSE: u32 = 0x400;
+
+fn file_attr(m: &std::fs::Metadata) -> u32 {
+    use std::os::windows::fs::MetadataExt;
+    m.file_attributes()
+}
+
+fn entry_from(ft: Option<&std::fs::FileType>, meta: Option<&std::fs::Metadata>) -> bool {
+    let is_dir = ft.map(|t| t.is_dir());
+    let is_symlink = ft.map(|t| t.is_symlink());
+    // A real directory or a plain file is decided from the type. A symlink, or a type
+    // that could not be read, uses the same metadata the attribute bits came from.
     let need = is_dir != Some(true) && (is_symlink == Some(true) || is_dir.is_none());
-    let followed = need.then(|| e.metadata().ok().map(|m| m.is_dir())).flatten();
+    let followed = need.then(|| meta.map(|m| m.is_dir())).flatten();
     entry_is_dir(is_dir, is_symlink, followed)
-}
-
-fn is_reparse(path: &Path) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const REPARSE: u32 = 0x400;
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_attributes() & REPARSE != 0)
-}
-
-fn is_hidden(path: &Path) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const HIDDEN: u32 = 0x2;
-    const SYSTEM: u32 = 0x4;
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_attributes() & (HIDDEN | SYSTEM) != 0)
 }
 
 struct FindUi {
