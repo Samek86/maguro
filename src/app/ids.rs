@@ -70,8 +70,9 @@ pub(crate) const TIMER_SETTLE: usize = 4; // one width pass after a folder chang
 pub(crate) const TIMER_SAVE: usize = 5; // debounced maguro.json write
 pub(crate) const SAVE_SOON_MS: u32 = 1500;
 pub(crate) const SAVE_LATEST_MS: u128 = 30_000;
-/// Hidden tabs that still hold Explorer windows. Older hidden tabs keep only their saved grid.
-pub(crate) const PARK_CACHE: usize = 1;
+/// Hidden tabs that still hold Explorer windows. Two, so moving among three tabs
+/// does not build the browser again. Older hidden tabs keep only their saved grid.
+pub(crate) const PARK_CACHE: usize = 2;
 pub(crate) const TIMER_NEWF: usize = 6; // on a pane: select and rename a folder just created
 pub(crate) const TIMER_NEWFILE: usize = 7; // on a pane: select and rename a file just created
 pub(crate) const TIMER_WINS: usize = 8; // after the first window is shown, open the other saved windows

@@ -550,6 +550,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 crate::remote::unmount_all();
                 flush_folder_views();
                 save_session();
+                crate::store::flush_writes();
             }
             // Windows light/dark changed. Queued so nothing is drawn inside the broadcast.
             WM_SETTINGCHANGE => {
@@ -593,12 +594,14 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     // The last window stays in the file, so the next launch restores every window that was open.
                     crate::remote::unmount_all();
                     save_session();
+                    crate::store::flush_writes();
                     _ = DestroyWindow(h);
                 } else {
                     destroy_every_pane();
                     app(|a| a.tree = None);
                     let handles = drop_current_desk();
                     save_session();
+                    crate::store::flush_writes();
                     _ = DestroyWindow(h);
                     release_desk_handles(handles.0, handles.1, handles.2, handles.3, handles.4);
                 }

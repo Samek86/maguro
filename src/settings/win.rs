@@ -1405,7 +1405,12 @@ fn flip(id: u8) {
         TG_FSIZE => {
             app(|a| a.s.folder_sizes ^= true);
             let (show, net) = app(|a| (a.s.folder_sizes, a.s.folder_sizes_network));
-            crate::set_opts(show, net);
+            if crate::set_opts(show, net) {
+                let paths = app(|a| a.s.paths.clone());
+                for (i, p) in paths.iter().enumerate() {
+                    crate::pane_here(i, p, crate::classify_ui(p));
+                }
+            }
             if !show {
                 crate::clear_pending();
             }

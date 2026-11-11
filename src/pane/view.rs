@@ -1177,6 +1177,15 @@ thread_local! {
 // within the system's double-click time and box. The pair is consumed: a third click doesn't repeat it.
 // `hit` is 0 (an item the shell handles, or nothing), 1 (empty list), or 2 (a details cell). Only two
 // presses of the same kind pair.
+/// The second press of a double-click: same window, generation, and within the system box.
+/// The accessibility hit test runs only then. Both presses are at the same point.
+pub(crate) fn presses_pair(prev: Option<&Click>, win: isize, gen: usize, time: u32, x: i32, y: i32, ms: u32, cx: i32, cy: i32) -> bool {
+    let Some(p) = prev else { return false };
+    p.win == win && p.gen == gen && time.wrapping_sub(p.time) <= ms && (x - p.x).abs() <= cx / 2 && (y - p.y).abs() <= cy / 2
+}
+
+/// Tests call this. The live path records the first press and hit-tests only the second.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn next_click(prev: Option<Click>, now: Click, hit: u8, ms: u32, cx: i32, cy: i32) -> (Option<Click>, bool) {
     if hit == 0 || now.kind != hit {
         return (None, false);
@@ -1288,8 +1297,11 @@ pub(crate) unsafe fn up_candidate(m: &MSG) -> Option<RowClick> {
         return None;
     }
     let i = pane_of(m.hwnd)?;
+    let (cx, cy) = (GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK));
+    let ms = GetDoubleClickTime();
     let svh = Cell::new(HWND::default());
     let hit = Cell::new(HIT_NONE);
+    let second = Cell::new(false);
     let (g0, armed) = bg_probe(gen, || {
         let Some(h) = view_of::<IShellView>(i).and_then(|v| v.GetWindow().ok()) else {
             return false;
@@ -1301,19 +1313,26 @@ pub(crate) unsafe fn up_candidate(m: &MSG) -> Option<RowClick> {
         if !(list && (h == m.hwnd || IsChild(h, m.hwnd).as_bool()) && m.wParam.0 & (MK_CONTROL.0 | MK_SHIFT.0) as usize == 0) {
             return false;
         }
+        // First press only records the point. The hit test waits for the matching second press.
+        let near = LAST_CLICK.with(|c| presses_pair(c.get().as_ref(), m.hwnd.0 as isize, gen(), m.time, m.pt.x, m.pt.y, ms, cx, cy));
+        second.set(near);
+        if !near {
+            return true;
+        }
         let kind = point_hit(m);
         hit.set(kind);
         kind != HIT_NONE
     });
-    let kind = if armed { hit.get() } else { HIT_NONE };
-    let now = Click { win: m.hwnd.0 as isize, gen: g0, time: m.time, x: m.pt.x, y: m.pt.y, kind };
-    let (cx, cy) = (GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK));
-    let (next, fire) = next_click(LAST_CLICK.get(), now, kind, GetDoubleClickTime(), cx, cy);
-    LAST_CLICK.set(next);
-    if !fire {
+    if !armed {
+        LAST_CLICK.set(None);
         return None;
     }
-    match kind {
+    if !second.get() {
+        LAST_CLICK.set(Some(Click { win: m.hwnd.0 as isize, gen: g0, time: m.time, x: m.pt.x, y: m.pt.y, kind: HIT_NONE }));
+        return None;
+    }
+    LAST_CLICK.set(None);
+    match hit.get() {
         HIT_BLANK => Some(RowClick::Up(i, g0, svh.get().0 as isize)),
         HIT_CELL => Some(RowClick::Open(i, g0)),
         _ => None,
