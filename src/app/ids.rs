@@ -98,6 +98,7 @@ pub(crate) const TIMER_SPIN: usize = 27; // pane: next frame of the F5 refresh s
 pub(crate) const TIMER_LIST: usize = 28; // trailing compare after a burst, plus the stale-list grace and restore polls
 pub(crate) const WM_SHELL_CHANGE: u32 = WM_APP + 88; // SHChangeNotifyRegister delivery
 pub(crate) const WM_LIST_NOW: u32 = WM_APP + 89; // a file operation finished; compare its folders
+pub(crate) const WM_FAST_NOTE: u32 = WM_APP + 94; // fast copy/move finished; the note text is queued for the status line
 pub(crate) const FVIEW_SAVE_MS: u32 = 700;
 pub(crate) const WM_FIND: u32 = WM_APP + 50; // search results arrived for this pane
 pub(crate) const WM_EV: u32 = WM_APP + 51; // Everything status changed in the settings window

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
@@ -21,6 +21,42 @@ use crate::imports::*;
 use crate::i18n::*;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+/// Pre-scan yields the progress window this often so a large tree can paint and cancel.
+const SCAN_PUMP_EVERY: u32 = 32;
+const DONE_MIN_VISIBLE: Duration = Duration::from_millis(500);
+const DONE_LINGER: Duration = Duration::from_secs(3);
+const NOTE_HOLD: Duration = Duration::from_secs(5);
+
+/// The finished window stays at least `DONE_MIN_VISIBLE` from open, then until a click or `DONE_LINGER`.
+fn done_should_close(open_for: Duration, done_for: Duration, clicked: bool) -> bool {
+    if open_for < DONE_MIN_VISIBLE {
+        return false;
+    }
+    clicked || done_for >= DONE_LINGER
+}
+
+/// Flash and beep when some other process is in front. A zero pid means nothing is in front.
+fn should_alert(foreground_pid: u32, our_pid: u32) -> bool {
+    foreground_pid != our_pid
+}
+
+fn progress_title_key(mv: bool, done: bool) -> Key {
+    match (mv, done) {
+        (false, false) => Key::FastCopy,
+        (true, false) => Key::FastMove,
+        (false, true) => Key::FastCopyComplete,
+        (true, true) => Key::FastMoveComplete,
+    }
+}
+
+fn progress_action_key(done: bool) -> Key {
+    if done { Key::Close } else { Key::Cancel }
+}
+
+fn finished_note(mv: bool, files: u64, bytes: u64) -> String {
+    let key = if mv { Key::FastMoveFinishedNote } else { Key::FastCopyFinishedNote };
+    tf(key, &[("n", &files.to_string()), ("size", &format_bytes(bytes))])
+}
 
 /// Fast paste always. Otherwise only when the setting is on and a path is on the network.
 pub(crate) fn decide_fast(force: bool, setting: bool, network: bool) -> bool {
@@ -120,6 +156,8 @@ pub(crate) struct FastJob {
     pub(crate) dst: String,
     pub(crate) rename: bool,
     pub(crate) mv: bool,
+    /// Held for the transfer. Dropped before the completion linger so the status line can leave "copying".
+    pub(crate) busy: crate::Busy,
 }
 
 pub(crate) fn run_fast(job: FastJob) {
@@ -133,7 +171,7 @@ pub(crate) fn run_fast(job: FastJob) {
     let mut ui = Progress::open(&job);
     ui.set_scan();
     ui.pump();
-    let mut items = plan_items(&job);
+    let mut items = plan_items(&job, &mut ui);
     if ui.cancelled() {
         ui.show_cancelled();
         return;
@@ -143,7 +181,7 @@ pub(crate) fn run_fast(job: FastJob) {
         return;
     }
     let steps = build_steps(&items);
-    let (files, bytes) = tally(&steps, &ui.cancel);
+    let (files, bytes) = tally(&steps, &mut ui);
     ui.set_totals(files, bytes);
     if ui.cancelled() {
         ui.show_cancelled();
@@ -205,8 +243,8 @@ pub(crate) fn run_fast(job: FastJob) {
         ui.show_cancelled();
         return;
     }
-    ui.close();
     if failed || !errors.is_empty() {
+        ui.close();
         if errors.iter().any(|line| super::inuse::text_is_in_use(line)) {
             let paths = fast_locked_paths(&job, &errors);
             let retry = unsafe {
@@ -224,7 +262,10 @@ pub(crate) fn run_fast(job: FastJob) {
         let list = clip_list(&errors, 12);
         let text = tf(Key::NotCopied, &[("list", &list)]);
         complain(job.owner, &text);
+        return;
     }
+    drop(job.busy);
+    ui.show_done();
 }
 
 /// Sources, the destination folder, and each destination file. Robocopy lines may name the path too.
@@ -308,10 +349,14 @@ struct Item {
     skip: bool,
 }
 
-fn plan_items(job: &FastJob) -> Vec<Item> {
+fn plan_items(job: &FastJob, ui: &mut Progress) -> Vec<Item> {
     let mut taken = HashSet::new();
     let mut out = Vec::new();
+    let mut seen = 0u32;
     for src in &job.srcs {
+        if !scan_tick(ui, &mut seen) {
+            break;
+        }
         let name = file_name(src);
         if name.is_empty() {
             continue;
@@ -347,6 +392,8 @@ fn unique_name(dir: &str, name: &str, taken: &mut HashSet<String>) -> String {
 fn resolve_conflicts(ui: &mut Progress, items: &mut [Item]) -> bool {
     let mut policy: Option<u8> = None;
     for item in items.iter_mut() {
+        // Each exists() can block on a share, so cancel and paint run between them.
+        ui.pump();
         if ui.cancelled() {
             return false;
         }
@@ -441,21 +488,30 @@ fn joined_len(names: &[String]) -> usize {
     names.iter().map(String::len).sum::<usize>() + names.len()
 }
 
-fn tally(steps: &[Step], cancel: &AtomicBool) -> (u64, u64) {
+fn tally(steps: &[Step], ui: &mut Progress) -> (u64, u64) {
     let mut files = 0u64;
     let mut bytes = 0u64;
+    let mut seen = 0u32;
     for step in steps {
-        if cancel.load(Ordering::Relaxed) {
+        if ui.cancelled() {
             break;
         }
         match step {
             Step::Files { sources, .. } => {
                 for s in sources {
+                    if !scan_tick(ui, &mut seen) {
+                        return (files, bytes);
+                    }
                     add_file(Path::new(s), &mut files, &mut bytes);
                 }
             }
-            Step::AsName { source, .. } => add_file(Path::new(source), &mut files, &mut bytes),
-            Step::Tree { from, .. } => walk(Path::new(from), &mut files, &mut bytes, cancel, 0),
+            Step::AsName { source, .. } => {
+                if !scan_tick(ui, &mut seen) {
+                    return (files, bytes);
+                }
+                add_file(Path::new(source), &mut files, &mut bytes);
+            }
+            Step::Tree { from, .. } => walk(Path::new(from), &mut files, &mut bytes, ui, &mut seen, 0),
         }
     }
     (files, bytes)
@@ -470,23 +526,34 @@ fn add_file(path: &Path, files: &mut u64, bytes: &mut u64) {
     }
 }
 
-fn walk(path: &Path, files: &mut u64, bytes: &mut u64, cancel: &AtomicBool, depth: u32) {
-    if cancel.load(Ordering::Relaxed) || depth > 40 {
+fn walk(path: &Path, files: &mut u64, bytes: &mut u64, ui: &mut Progress, seen: &mut u32, depth: u32) {
+    if ui.cancelled() || depth > 40 {
         return;
     }
     let Ok(rd) = std::fs::read_dir(path) else { return };
     for ent in rd.flatten() {
-        if cancel.load(Ordering::Relaxed) {
+        if !scan_tick(ui, seen) {
             return;
         }
         let p = ent.path();
         let Ok(ft) = ent.file_type() else { continue };
         if ft.is_dir() {
-            walk(&p, files, bytes, cancel, depth + 1);
+            walk(&p, files, bytes, ui, seen, depth + 1);
+            if ui.cancelled() {
+                return;
+            }
         } else {
             add_file(&p, files, bytes);
         }
     }
+}
+
+fn scan_tick(ui: &mut Progress, seen: &mut u32) -> bool {
+    *seen = seen.saturating_add(1);
+    if *seen == 1 || *seen % SCAN_PUMP_EVERY == 0 {
+        ui.pump();
+    }
+    !ui.cancelled()
 }
 
 enum StepEnd {
@@ -866,7 +933,12 @@ fn progress_geom(dpi: i32) -> ProgGeom {
 
 struct Progress {
     hwnd: HWND,
+    owner: HWND,
     cancel: Arc<AtomicBool>,
+    finish: Arc<AtomicBool>,
+    mv: bool,
+    opened: Instant,
+    force_full: bool,
     files_done: u64,
     files_total: u64,
     bytes_done: u64,
@@ -880,17 +952,24 @@ struct Progress {
 impl Progress {
     fn open(job: &FastJob) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
+        let finish = Arc::new(AtomicBool::new(false));
         let owner = HWND(job.owner as *mut _);
-        let hwnd = open_progress(owner, job.accent, job.mv, cancel.clone());
+        let hwnd = open_progress(owner, job.accent, job.mv, cancel.clone(), finish.clone());
+        let now = Instant::now();
         Self {
             hwnd,
+            owner,
             cancel,
+            finish,
+            mv: job.mv,
+            opened: now,
+            force_full: false,
             files_done: 0,
             files_total: 0,
             bytes_done: 0,
             bytes_total: 0,
             current: String::new(),
-            started: Instant::now(),
+            started: now,
             step_no: 0,
             dirty: true,
         }
@@ -943,7 +1022,9 @@ impl Progress {
 
     fn refresh_text(&mut self) {
         let Some(v) = view(self.hwnd) else { return };
-        let frac = if self.bytes_total > 0 {
+        let frac = if self.force_full {
+            1.0
+        } else if self.bytes_total > 0 {
             (self.bytes_done as f32 / self.bytes_total as f32).clamp(0.0, 1.0)
         } else if self.files_total > 0 {
             (self.files_done as f32 / self.files_total as f32).clamp(0.0, 1.0)
@@ -959,9 +1040,13 @@ impl Progress {
                 ("btotal", &format_bytes(self.bytes_total)),
             ],
         );
-        let eta = match eta_basis(self.bytes_done, self.bytes_total, self.files_done, self.files_total) {
-            Some((done, total)) => eta_text(done, total, self.started),
-            None => String::new(),
+        let eta = if self.force_full {
+            String::new()
+        } else {
+            match eta_basis(self.bytes_done, self.bytes_total, self.files_done, self.files_total) {
+                Some((done, total)) => eta_text(done, total, self.started),
+                None => String::new(),
+            }
         };
         unsafe {
             (*v).stats = stats;
@@ -984,7 +1069,7 @@ impl Progress {
         self.pump();
         let choice = Arc::new(AtomicU8::new(0));
         let all = Arc::new(AtomicBool::new(false));
-        let hwnd = open_ask(self.hwnd, name, choice.clone(), all.clone());
+        let hwnd = open_ask(self.owner, self.hwnd, name, choice.clone(), all.clone());
         if hwnd.0.is_null() {
             return None;
         }
@@ -1026,6 +1111,39 @@ impl Progress {
         self.close();
     }
 
+    fn show_done(&mut self) {
+        self.force_full = true;
+        self.current.clear();
+        let title = tr(progress_title_key(self.mv, true)).to_string();
+        if let Some(v) = view(self.hwnd) {
+            unsafe {
+                (*v).done = true;
+                (*v).title = title.clone();
+                let _ = SetWindowTextW(self.hwnd, &HSTRING::from(&title));
+            }
+        }
+        self.refresh_text();
+        if !self.hwnd.0.is_null() {
+            raise(self.hwnd);
+            pump_messages();
+        }
+        alert_owner(self.owner);
+        queue_finished_note(self.owner, finished_note(self.mv, self.files_done, self.bytes_done));
+        let shown = Instant::now();
+        loop {
+            if self.hwnd.0.is_null() || unsafe { !IsWindow(Some(self.hwnd)).as_bool() } {
+                break;
+            }
+            pump_messages();
+            let clicked = self.finish.load(Ordering::Relaxed);
+            if done_should_close(self.opened.elapsed(), shown.elapsed(), clicked) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        self.close();
+    }
+
     fn close(&mut self) {
         unsafe {
             if !self.hwnd.0.is_null() && IsWindow(Some(self.hwnd)).as_bool() {
@@ -1053,7 +1171,8 @@ struct View {
     tip: HWND,
     tip_on: bool,
     cancel: Arc<AtomicBool>,
-    mv: bool,
+    finish: Arc<AtomicBool>,
+    done: bool,
 }
 
 fn view(hwnd: HWND) -> Option<*mut View> {
@@ -1068,13 +1187,13 @@ fn view(hwnd: HWND) -> Option<*mut View> {
     }
 }
 
-fn open_progress(owner: HWND, accent: u32, mv: bool, cancel: Arc<AtomicBool>) -> HWND {
+fn open_progress(owner: HWND, accent: u32, mv: bool, cancel: Arc<AtomicBool>, finish: Arc<AtomicBool>) -> HWND {
     ensure_class(w!("MaguroFastCopy"), Some(progress_proc));
     let dpi = dpi_of(owner);
     let geom = progress_geom(dpi);
     let (w, h) = (geom.w, geom.h);
     let (x, y) = center_on(owner, w, h);
-    let title = if mv { tr(Key::FastMove) } else { tr(Key::FastCopy) };
+    let title = tr(progress_title_key(mv, false));
     let view = Box::new(View {
         hwnd: HWND::default(),
         dpi,
@@ -1091,12 +1210,15 @@ fn open_progress(owner: HWND, accent: u32, mv: bool, cancel: Arc<AtomicBool>) ->
         tip: HWND::default(),
         tip_on: false,
         cancel,
-        mv,
+        finish,
+        done: false,
     });
     let ptr = Box::into_raw(view);
+    // No owner yet: an owner passed to CreateWindowEx suppresses the taskbar button.
+    // WS_EX_APPWINDOW puts the button on the taskbar and in Alt+Tab. The owner is applied next.
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            WS_EX_APPWINDOW,
             w!("MaguroFastCopy"),
             &HSTRING::from(title),
             WS_POPUP | WS_CLIPCHILDREN | WS_VISIBLE,
@@ -1119,6 +1241,7 @@ fn open_progress(owner: HWND, accent: u32, mv: bool, cancel: Arc<AtomicBool>) ->
         (*ptr).hwnd = hwnd;
         (*ptr).tip = make_tip(hwnd);
         style_fast_window(hwnd);
+        bind_owner(hwnd, owner);
         raise(hwnd);
     }
     hwnd
@@ -1138,11 +1261,12 @@ struct AskView {
     tip_on: bool,
 }
 
-fn open_ask(owner: HWND, name: &str, choice: Arc<AtomicU8>, all_flag: Arc<AtomicBool>) -> HWND {
+fn open_ask(owner: HWND, center: HWND, name: &str, choice: Arc<AtomicU8>, all_flag: Arc<AtomicBool>) -> HWND {
     ensure_class(w!("MaguroFastAsk"), Some(ask_proc));
-    let dpi = dpi_of(owner);
+    let anchor = if center.0.is_null() { owner } else { center };
+    let dpi = dpi_of(anchor);
     let (w, h) = (crate::px(dpi, 480), crate::px(dpi, 176));
-    let (x, y) = center_on(owner, w, h);
+    let (x, y) = center_on(anchor, w, h);
     let view = Box::new(AskView {
         dpi,
         name: name.to_string(),
@@ -1159,7 +1283,7 @@ fn open_ask(owner: HWND, name: &str, choice: Arc<AtomicU8>, all_flag: Arc<Atomic
     let ptr = Box::into_raw(view);
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            WINDOW_EX_STYLE(0),
             w!("MaguroFastAsk"),
             w!("Maguro"),
             WS_POPUP | WS_CLIPCHILDREN | WS_VISIBLE,
@@ -1167,7 +1291,7 @@ fn open_ask(owner: HWND, name: &str, choice: Arc<AtomicU8>, all_flag: Arc<Atomic
             y,
             w,
             h,
-            None,
+            owner_arg(owner),
             None,
             None,
             None,
@@ -1222,10 +1346,80 @@ fn center_on(owner: HWND, w: i32, h: i32) -> (i32, i32) {
     (80, 80)
 }
 
+fn owner_arg(owner: HWND) -> Option<HWND> {
+    if owner.0.is_null() { None } else { Some(owner) }
+}
+
+/// Owned by the main window so the popup stays above Maguro. Applied after creation so the taskbar button remains.
+fn bind_owner(hwnd: HWND, owner: HWND) {
+    if hwnd.0.is_null() || owner.0.is_null() {
+        return;
+    }
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex | WS_EX_APPWINDOW.0) as isize);
+        let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+}
+
 unsafe fn style_fast_window(hwnd: HWND) {
     // Caption colours follow the theme. The popup frame is last so its token border stays.
     crate::style_dialog_caption(hwnd);
     crate::style_popup_chrome(hwnd);
+}
+
+fn foreground_pid() -> u32 {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return 0;
+        }
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(fg, Some(&mut pid));
+        pid
+    }
+}
+
+fn alert_owner(owner: HWND) {
+    if !should_alert(foreground_pid(), std::process::id()) {
+        return;
+    }
+    unsafe {
+        if !owner.0.is_null() {
+            let info = FLASHWINFO {
+                cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+                hwnd: owner,
+                dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+                uCount: 0,
+                dwTimeout: 0,
+            };
+            let _ = FlashWindowEx(&info);
+        }
+        let _ = MessageBeep(MB_OK);
+    }
+}
+
+static FINISHED_NOTE: Mutex<Option<String>> = Mutex::new(None);
+
+fn queue_finished_note(owner: HWND, text: String) {
+    if owner.0.is_null() {
+        return;
+    }
+    *FINISHED_NOTE.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
+    let posted = unsafe { PostMessageW(Some(owner), crate::WM_FAST_NOTE, WPARAM(0), LPARAM(0)) };
+    if posted.is_err() {
+        FINISHED_NOTE.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+}
+
+/// UI thread. The worker posted `WM_FAST_NOTE` after queueing the text.
+pub(crate) fn apply_fast_note() {
+    let Some(text) = FINISHED_NOTE.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    crate::app(|a| {
+        a.note = Some((text, Instant::now() + NOTE_HOLD));
+    });
+    unsafe { crate::update_status() };
 }
 
 /// The worker thread does not own the foreground, so attach to it long enough to show the window.
@@ -1267,7 +1461,11 @@ unsafe extern "system" fn progress_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARA
         WM_CLOSE | WM_DESTROY => {
             if msg == WM_CLOSE {
                 if let Some(v) = view(h) {
-                    (*v).cancel.store(true, Ordering::Relaxed);
+                    if (*v).done {
+                        (*v).finish.store(true, Ordering::Relaxed);
+                    } else {
+                        (*v).cancel.store(true, Ordering::Relaxed);
+                    }
                 }
                 return LRESULT(0);
             }
@@ -1310,7 +1508,11 @@ unsafe extern "system" fn progress_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARA
         }
         WM_KEYDOWN if wp.0 == VK_ESCAPE.0 as usize => {
             if let Some(v) = view(h) {
-                (*v).cancel.store(true, Ordering::Relaxed);
+                if (*v).done {
+                    (*v).finish.store(true, Ordering::Relaxed);
+                } else {
+                    (*v).cancel.store(true, Ordering::Relaxed);
+                }
             }
             LRESULT(0)
         }
@@ -1368,7 +1570,8 @@ unsafe fn paint_progress(h: HWND) {
         let hot = v.hot.then_some(1u8);
         let down = v.down.then_some(1u8);
         let visual = crate::visual_from_pointer(1u8, hot, down);
-        crate::paint_button(dc, v.cancel_rect, crate::ButtonKind::Secondary, visual, tr(Key::Cancel), body, dpi, crate::ui_tokens().bg, crate::FocusRing::Outside);
+        let action = tr(progress_action_key(v.done));
+        crate::paint_button(dc, v.cancel_rect, crate::ButtonKind::Secondary, visual, action, body, dpi, crate::ui_tokens().bg, crate::FocusRing::Outside);
     });
 }
 
@@ -1389,7 +1592,11 @@ fn hit_progress(h: HWND, lp: LPARAM, down: bool, up: bool) {
             (*v).down = false;
             let _ = ReleaseCapture();
             if fire {
-                (*v).cancel.store(true, Ordering::Relaxed);
+                if (*v).done {
+                    (*v).finish.store(true, Ordering::Relaxed);
+                } else {
+                    (*v).cancel.store(true, Ordering::Relaxed);
+                }
             }
         }
         track_tip((*v).tip, h, &mut (*v).tip_on, (*v).file_rect, &(*v).current, x, y);
@@ -1875,5 +2082,40 @@ mod tests {
         assert_eq!(eta_remain_secs(1, 2, 86_401_000), None);
         assert_eq!(eta_from(3, 14, 20_000).is_empty(), false);
         assert!(eta_from(9_933, 4_509_715_661, 20_000).is_empty());
+    }
+
+    #[test]
+    fn done_window_respects_the_minimum_and_the_linger() {
+        assert!(!done_should_close(Duration::from_millis(499), Duration::from_secs(3), false));
+        assert!(!done_should_close(Duration::from_millis(200), Duration::from_millis(200), true));
+        assert!(done_should_close(Duration::from_millis(500), Duration::from_millis(1), true));
+        assert!(!done_should_close(Duration::from_secs(4), Duration::from_millis(2_999), false));
+        assert!(done_should_close(Duration::from_secs(4), Duration::from_secs(3), false));
+    }
+
+    #[test]
+    fn finished_copy_names_the_count_and_alerts_only_in_the_background() {
+        // The active language is process-global. Check the pieces every translation keeps.
+        let note = finished_note(false, 3, 4_509_715_661);
+        assert!(note.contains('3') && note.contains("4.2 GB"), "{note}");
+        let moved = finished_note(true, 1, 0);
+        assert!(moved.contains('1') && moved.contains("0 B"), "{moved}");
+        assert_eq!(
+            crate::langkey::EN[Key::FastCopyFinishedNote as usize].replace("{n}", "3").replace("{size}", "4.2 GB"),
+            "3 copied (4.2 GB)"
+        );
+        assert_eq!(crate::langkey::EN[Key::FastCopyComplete as usize], "Fast copy complete");
+        assert_eq!(crate::langkey::EN[Key::FastMoveComplete as usize], "Fast move complete");
+        assert_eq!(crate::langkey::EN[Key::FastCopyFinishedNote as usize], "{n} copied ({size})");
+        assert_eq!(crate::langkey::EN[Key::FastMoveFinishedNote as usize], "{n} moved ({size})");
+        assert_eq!(progress_title_key(false, false), Key::FastCopy);
+        assert_eq!(progress_title_key(true, false), Key::FastMove);
+        assert_eq!(progress_title_key(false, true), Key::FastCopyComplete);
+        assert_eq!(progress_title_key(true, true), Key::FastMoveComplete);
+        assert_eq!(progress_action_key(false), Key::Cancel);
+        assert_eq!(progress_action_key(true), Key::Close);
+        assert!(!should_alert(40, 40));
+        assert!(should_alert(7, 40));
+        assert!(should_alert(0, 40));
     }
 }
