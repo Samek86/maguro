@@ -690,6 +690,8 @@ impl Store {
         }
     }
 
+    /// Tests write the file directly. The running app queues the bytes in `flush`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn save_to(&mut self, path: &Path) -> std::io::Result<()> {
         if self.blocked {
             return Err(std::io::Error::other("folder-views.json could not be read"));
@@ -740,15 +742,20 @@ pub(crate) fn is_dirty() -> bool {
 
 /// Write folder-views.json if something changed. A file that could not be read is left in place.
 pub(crate) fn flush() {
-    with_store(|s| {
+    let path = folder_views_path();
+    let bytes = with_store(|s| {
         if !s.dirty || s.blocked {
             s.dirty = false;
-            return;
+            return None;
         }
-        if s.save_to(&folder_views_path()).is_err() {
-            // Keep dirty so a later timer or shutdown tries again. The previous file stays.
-        }
+        let bytes = s.to_json().into_bytes();
+        s.dirty = false;
+        Some(bytes)
     });
+    // The timer must not fsync on the UI thread. Closing the window waits in flush_writes.
+    if let Some(bytes) = bytes {
+        store::enqueue_write(&path, bytes);
+    }
 }
 
 #[cfg(test)]

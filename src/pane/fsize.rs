@@ -435,15 +435,23 @@ static POLICY: AtomicU64 = AtomicU64::new(0);
 static PANE_GEN: [AtomicU64; MAXP] = [const { AtomicU64::new(0) }; MAXP];
 static WATCH_EVT: AtomicIsize = AtomicIsize::new(0);
 
-pub(crate) fn set_opts(show: bool, network: bool) {
-    let changed = SHOW.swap(show, Ordering::Relaxed) != show || NET.swap(network, Ordering::Relaxed) != network;
+pub(crate) fn set_opts(show: bool, network: bool) -> bool {
+    let was = SHOW.swap(show, Ordering::Relaxed);
+    let changed = was != show || NET.swap(network, Ordering::Relaxed) != network;
     if !show {
-        lock().queue.clear();
+        let mut st = lock();
+        st.queue.clear();
+        for slot in &mut st.desired {
+            slot.clear();
+        }
+        drop(st);
+        signal_watch();
     }
     if changed {
         POLICY.fetch_add(1, Ordering::Relaxed);
         WAKE.notify_one();
     }
+    !was && show
 }
 
 pub(crate) fn clear_pending() {
@@ -478,6 +486,15 @@ pub(crate) fn pane_left(i: usize) {
 
 pub(crate) fn pane_here(i: usize, path: &str, place: Place) {
     if i >= MAXP {
+        return;
+    }
+    if !SHOW.load(Ordering::Relaxed) {
+        let mut st = lock();
+        if !st.desired[i].is_empty() {
+            st.desired[i].clear();
+            drop(st);
+            signal_watch();
+        }
         return;
     }
     let key = norm_key(path);

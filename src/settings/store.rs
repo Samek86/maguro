@@ -1161,7 +1161,69 @@ pub(crate) fn load() -> Result<Session, String> {
 }
 
 pub(crate) fn write_settings(text: &str) -> std::io::Result<()> {
-    write_atomic(&settings_path(), text.as_bytes())
+    // The UI thread only queues the bytes. fsync runs on maguro-save.
+    // Shutdown calls flush_writes so the file lands before the process exits.
+    enqueue_write(&settings_path(), text.as_bytes().to_vec());
+    Ok(())
+}
+
+struct SaveQueue {
+    jobs: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
+    busy: bool,
+}
+
+fn save_slot() -> &'static std::sync::OnceLock<(std::sync::Mutex<SaveQueue>, std::sync::Condvar)> {
+    static Q: std::sync::OnceLock<(std::sync::Mutex<SaveQueue>, std::sync::Condvar)> = std::sync::OnceLock::new();
+    &Q
+}
+
+fn save_queue() -> &'static (std::sync::Mutex<SaveQueue>, std::sync::Condvar) {
+    save_slot().get_or_init(|| {
+        (
+            std::sync::Mutex::new(SaveQueue { jobs: std::collections::HashMap::new(), busy: false }),
+            std::sync::Condvar::new(),
+        )
+    })
+}
+
+/// Keep the latest bytes for `path`. An older queued write of the same file is dropped.
+pub(crate) fn enqueue_write(path: &Path, bytes: Vec<u8>) {
+    let (lock, cv) = save_queue();
+    {
+        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        g.jobs.insert(path.to_path_buf(), bytes);
+    }
+    cv.notify_one();
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = std::thread::Builder::new().name("maguro-save".into()).spawn(|| loop {
+            let (path, bytes) = {
+                let (lock, cv) = save_queue();
+                let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+                while g.jobs.is_empty() {
+                    g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+                }
+                let path = g.jobs.keys().next().cloned().unwrap();
+                let bytes = g.jobs.remove(&path).unwrap();
+                g.busy = true;
+                (path, bytes)
+            };
+            let _ = write_atomic(&path, &bytes);
+            let (lock, cv) = save_queue();
+            let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            g.busy = false;
+            cv.notify_all();
+        });
+    });
+}
+
+/// Block until every queued settings write has finished. Used when the window is closing.
+pub(crate) fn flush_writes() {
+    let Some((lock, cv)) = save_slot().get() else { return };
+    let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while g.busy || !g.jobs.is_empty() {
+        g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+    }
 }
 
 /// Write `bytes` next to `path` and swap it in. A failed swap leaves the previous file in place.
