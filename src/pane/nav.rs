@@ -2537,6 +2537,59 @@ unsafe fn capture_user_width(i: usize) {
 // With memory on, a change is stored for the folder instead, and the pane's session view is left
 // alone so a tab switch does not look like an unsaved layout edit.
 pub(crate) unsafe fn save_view(i: usize) {
+    remember_view(i, true);
+}
+
+/// Status-timer read. Column floors and drop targets are installed when the view is created,
+/// not on this path: `free_min_widths` walks every child and wraps its drop target.
+pub(crate) unsafe fn save_view_poll(i: usize) {
+    remember_view(i, false);
+}
+
+/// Drop the cached file-list window. The next read searches again.
+pub(crate) unsafe fn forget_pane_list(i: usize) {
+    app(|a| {
+        if let Some(p) = a.panes.get_mut(i).and_then(|p| p.as_mut()) {
+            p.list_hwnd = HWND::default();
+        }
+    });
+}
+
+unsafe fn pane_list(i: usize, fv: &IFolderView2) -> HWND {
+    let view = fv.cast::<IShellView>().and_then(|v| v.GetWindow()).unwrap_or_default();
+    let cached = app(|a| a.panes.get(i).and_then(|p| p.as_ref()).map(|p| p.list_hwnd).unwrap_or_default());
+    // Only a real list-view is cached. An items view can grow a list child later, and a
+    // cached DirectUIHWND would hide that search.
+    if is_sys_list(cached) && list_still(cached, view) {
+        return cached;
+    }
+    let found = list_under(view);
+    app(|a| {
+        if let Some(p) = a.panes.get_mut(i).and_then(|p| p.as_mut()) {
+            p.list_hwnd = if is_sys_list(found) { found } else { HWND::default() };
+        }
+    });
+    found
+}
+
+unsafe fn list_still(list: HWND, view: HWND) -> bool {
+    if list.0.is_null() || view.0.is_null() || !IsWindow(Some(list)).as_bool() {
+        return false;
+    }
+    let mut h = list;
+    for _ in 0..8 {
+        if h == view {
+            return true;
+        }
+        h = GetParent(h).unwrap_or_default();
+        if h.0.is_null() {
+            return false;
+        }
+    }
+    false
+}
+
+unsafe fn remember_view(i: usize, touch_list: bool) {
     if KEEP_VIEWS.with(|c| c.get()) {
         return;
     }
@@ -2560,8 +2613,12 @@ pub(crate) unsafe fn save_view(i: usize) {
         return;
     }
     let Some(fv) = view_of::<IFolderView2>(i) else { return };
-    let lv = view_list(&fv);
-    free_min_widths(lv); // a list made after the folder change gets it here
+    let lv = pane_list(i, &fv);
+    // A list created after the folder change is lowered from on_nav and settle_cols.
+    // The poll used to do it too, which re-wrapped every drop target three times a second.
+    if touch_list {
+        free_min_widths(lv);
+    }
     let (mut m, mut z) = (FOLDERVIEWMODE(0), 0);
     let mode_ok = fv.GetViewModeAndIconSize(&mut m, &mut z).is_ok();
     let cols = read_cols(&fv, lv);
@@ -3432,6 +3489,7 @@ impl IExplorerBrowserEvents_Impl for Events_Impl {
             super::recent::note_folder(i, &path);
             rec_event(i, Nav::Pending, pidl);
             save_view(i);
+            forget_pane_list(i);
             // The folder we are leaving has had its view writes. The next complete starts from zero,
             // and a settle timer still armed must not touch the new list.
             if let Some(h) = pane_hwnd(i) {
@@ -3458,7 +3516,10 @@ impl IExplorerBrowserEvents_Impl for Events_Impl {
                 }
             }
         }
-        unsafe { schedule_pane_drop(i) };
+        unsafe {
+            forget_pane_list(i);
+            schedule_pane_drop(i);
+        }
         Ok(())
     }
     fn OnNavigationComplete(&self, pidl: *const ITEMIDLIST) -> Result<()> {

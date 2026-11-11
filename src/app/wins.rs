@@ -457,7 +457,7 @@ pub(crate) unsafe fn open_window(mut s: Session) -> Result<HWND> {
         let _ = pull_dirty(a);
     });
     refresh_save_button();
-    SetTimer(Some(main), TIMER_STATUS, 300, None);
+    arm_status_timer(main);
     // The handler list is read at once. Menu DLLs still wait a few seconds.
     // Old timing logs are removed here, once, and only the dated files past 14 days.
     crate::shell::ctxlog::set_enabled(app(|a| a.s.ctx_timing));
