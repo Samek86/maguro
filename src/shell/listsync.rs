@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::os::windows::fs::MetadataExt;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicIsize, AtomicU64};
+use std::sync::atomic::AtomicU64;
 
 use crate::app::*;
 use crate::imports::*;
@@ -195,9 +195,10 @@ pub(crate) struct KeepPlan {
 pub(crate) fn plan_keep(rows: &[String], present: &[String], top: Option<usize>, focus: Option<usize>, selected: &[String]) -> KeepPlan {
     let have: HashSet<&str> = present.iter().map(String::as_str).collect();
     let alive = |n: &str| !n.is_empty() && have.contains(n);
+    let mut seen: HashSet<&str> = HashSet::new();
     let mut kept = Vec::new();
     for n in selected {
-        if alive(n) && !kept.iter().any(|e: &String| e == n) {
+        if alive(n) && seen.insert(n.as_str()) {
             kept.push(n.clone());
         }
     }
@@ -426,6 +427,8 @@ struct Job {
 struct Win {
     hwnd: isize,
     cookie: u32,
+    /// PIDLs passed to `SHChangeNotifyRegister`. Valid until the cookie is dropped.
+    pidls: Vec<isize>,
     slots: Coalesce,
     grace: Grace,
 }
@@ -603,37 +606,77 @@ fn refreshing_pane(pane: isize) -> bool {
     guard(restores()).iter().any(|r| r.pane == pane)
 }
 
-/// Virtual Desktop, not the user's Desktop directory. Recursive from here is every folder.
-fn root_pidl() -> *mut ITEMIDLIST {
-    static ONCE: Once = Once::new();
-    static PIDL: AtomicIsize = AtomicIsize::new(0);
-    ONCE.call_once(|| {
-        // CSIDL_DESKTOP. The known-folder Desktop is only `...\Desktop`, which would miss other drives.
-        let p = unsafe { SHGetSpecialFolderLocation(None, 0).unwrap_or(std::ptr::null_mut()) };
-        PIDL.store(p as isize, Ordering::Relaxed);
-    });
-    PIDL.load(Ordering::Relaxed) as *mut ITEMIDLIST
+/// Watch the folders on screen, not every drive. Non-recursive: a change in a child
+/// folder does not alter this folder's rows. Called again after each navigation.
+pub(crate) unsafe fn arm(hwnd: HWND) {
+    retarget(hwnd);
 }
 
-pub(crate) unsafe fn arm(hwnd: HWND) {
+pub(crate) unsafe fn retarget(hwnd: HWND) {
     if hwnd.0.is_null() {
         return;
     }
-    let entry = SHChangeNotifyEntry { pidl: root_pidl(), fRecursive: true.into() };
+    let mut seen = HashSet::new();
+    let mut pidls = Vec::new();
+    let mut entries = Vec::new();
+    for path in paths_here() {
+        if blocks(&path) {
+            continue;
+        }
+        let key = norm_key(&path);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        let Some(pidl) = folder_pidl(&path) else { continue };
+        entries.push(SHChangeNotifyEntry { pidl, fRecursive: false.into() });
+        pidls.push(pidl as isize);
+    }
     let watch = SHCNE_RENAMEITEM | SHCNE_CREATE | SHCNE_DELETE | SHCNE_MKDIR | SHCNE_RMDIR | SHCNE_UPDATEDIR | SHCNE_RENAMEFOLDER;
-    let sources = SHCNRF_ShellLevel | SHCNRF_InterruptLevel | SHCNRF_NewDelivery | SHCNRF_RecursiveInterrupt;
-    let cookie = SHChangeNotifyRegister(hwnd, sources, watch.0 as i32, WM_SHELL_CHANGE, 1, std::ptr::addr_of!(entry));
+    // No recursive interrupt. Events outside these folders never reach the UI thread.
+    let sources = SHCNRF_ShellLevel | SHCNRF_InterruptLevel | SHCNRF_NewDelivery;
+    let cookie = if entries.is_empty() {
+        0
+    } else {
+        SHChangeNotifyRegister(hwnd, sources, watch.0 as i32, WM_SHELL_CHANGE, entries.len() as i32, entries.as_ptr())
+    };
     if cookie == 0 {
+        free_pidls(&pidls);
+        pidls.clear();
+    }
+    install_watch(hwnd, cookie, pidls);
+}
+
+unsafe fn folder_pidl(path: &str) -> Option<*mut ITEMIDLIST> {
+    let mut pidl = std::ptr::null_mut();
+    if SHParseDisplayName(&HSTRING::from(path), None, &mut pidl, 0, None).is_err() || pidl.is_null() {
+        return None;
+    }
+    Some(pidl)
+}
+
+unsafe fn free_pidls(pidls: &[isize]) {
+    for p in pidls {
+        if *p != 0 {
+            ILFree(Some(*p as *const ITEMIDLIST));
+        }
+    }
+}
+
+unsafe fn install_watch(hwnd: HWND, cookie: u32, pidls: Vec<isize>) {
+    let mut wins = guard(wins());
+    if let Some(old) = wins.iter().find(|w| w.hwnd == hwnd.0 as isize) {
+        let (old_cookie, old_pidls) = (old.cookie, old.pidls.clone());
+        if old_cookie != 0 {
+            let _ = SHChangeNotifyDeregister(old_cookie);
+        }
+        free_pidls(&old_pidls);
+        if let Some(win) = wins.iter_mut().find(|w| w.hwnd == hwnd.0 as isize) {
+            win.cookie = cookie;
+            win.pidls = pidls;
+        }
         return;
     }
-    let mut wins = guard(wins());
-    if let Some(old) = wins.iter().find(|w| w.hwnd == hwnd.0 as isize).map(|w| w.cookie) {
-        if old != 0 {
-            let _ = SHChangeNotifyDeregister(old);
-        }
-        wins.retain(|w| w.hwnd != hwnd.0 as isize);
-    }
-    wins.push(Win { hwnd: hwnd.0 as isize, cookie, slots: Coalesce::default(), grace: Grace::default() });
+    wins.push(Win { hwnd: hwnd.0 as isize, cookie, pidls, slots: Coalesce::default(), grace: Grace::default() });
 }
 
 pub(crate) unsafe fn disarm(hwnd: HWND) {
@@ -641,16 +684,17 @@ pub(crate) unsafe fn disarm(hwnd: HWND) {
         return;
     }
     let _ = KillTimer(Some(hwnd), TIMER_LIST);
-    let cookie = {
+    let (cookie, pidls) = {
         let mut wins = guard(wins());
-        let cookie = wins.iter().find(|w| w.hwnd == hwnd.0 as isize).map(|w| w.cookie).unwrap_or(0);
+        let found = wins.iter().find(|w| w.hwnd == hwnd.0 as isize).map(|w| (w.cookie, w.pidls.clone())).unwrap_or((0, Vec::new()));
         wins.retain(|w| w.hwnd != hwnd.0 as isize);
-        cookie
+        found
     };
     guard(restores()).retain(|r| r.hwnd != hwnd.0 as isize);
     if cookie != 0 {
         let _ = SHChangeNotifyDeregister(cookie);
     }
+    free_pidls(&pidls);
 }
 
 pub(crate) unsafe fn on_shell(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
@@ -810,7 +854,7 @@ fn cancel_grace(hwnd: HWND, key: &str) {
 fn win_slot(wins: &mut Vec<Win>, hwnd: HWND) -> &mut Win {
     let id = hwnd.0 as isize;
     if !wins.iter().any(|w| w.hwnd == id) {
-        wins.push(Win { hwnd: id, cookie: 0, slots: Coalesce::default(), grace: Grace::default() });
+        wins.push(Win { hwnd: id, cookie: 0, pidls: Vec::new(), slots: Coalesce::default(), grace: Grace::default() });
     }
     wins.iter_mut().find(|w| w.hwnd == id).unwrap()
 }

@@ -527,6 +527,7 @@ pub(crate) unsafe fn attach_live() {
     recolor_due_panes();
     // A delete that finished while this tab was parked can re-list now that the view has a site.
     crate::shell::listsync::relist_shown();
+    crate::shell::listsync::retarget(app(|a| a.main));
 }
 
 pub(crate) unsafe fn sync_filter_edits() {
