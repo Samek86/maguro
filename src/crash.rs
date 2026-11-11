@@ -13,7 +13,8 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, Once, OnceLock, TryLockError};
+use std::sync::{Condvar, Mutex, Once, OnceLock, TryLockError};
+use std::time::Duration;
 
 use windows::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, SetUnhandledExceptionFilter, EXCEPTION_EXECUTE_HANDLER, EXCEPTION_POINTERS,
@@ -34,6 +35,37 @@ static LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 static SHELL: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static WROTE: AtomicBool = AtomicBool::new(false);
 static INSTALLED: Once = Once::new();
+
+/// How often the trace thread looks for a newly loaded module while idle.
+/// Path changes wake it immediately. Nothing is written when the snapshot matches.
+const TRACE_POLL: Duration = Duration::from_secs(3);
+
+struct TraceWake {
+    cv: Condvar,
+    pending: Mutex<bool>,
+}
+
+static TRACE_WAKE: OnceLock<TraceWake> = OnceLock::new();
+
+fn request_trace() {
+    let Some(wake) = TRACE_WAKE.get() else { return };
+    let mut pending = wake.pending.lock().unwrap_or_else(|p| p.into_inner());
+    *pending = true;
+    wake.cv.notify_one();
+}
+
+fn wait_trace() {
+    let Some(wake) = TRACE_WAKE.get() else {
+        std::thread::sleep(TRACE_POLL);
+        return;
+    };
+    let pending = wake.pending.lock().unwrap_or_else(|p| p.into_inner());
+    let (mut pending, _) = wake
+        .cv
+        .wait_timeout_while(pending, TRACE_POLL, |ready| !*ready)
+        .unwrap_or_else(|p| p.into_inner());
+    *pending = false;
+}
 
 struct Cap {
     code: AtomicU32,
@@ -239,13 +271,17 @@ pub(crate) fn install() {
             AddVectoredExceptionHandler(1, Some(veh));
             SetUnhandledExceptionFilter(Some(filter));
         }
-        write_trace();
+        let _ = TRACE_WAKE.set(TraceWake { cv: Condvar::new(), pending: Mutex::new(false) });
+        // Rewrites last-trace.txt on this thread only, and only when the path, the shell
+        // list, or the loaded module count changed. Navigation does not write the file.
         let _ = std::thread::Builder::new().name("maguro-trace".into()).spawn(|| {
+            let mut snap = TraceSnap::default();
+            flush_trace(&mut snap);
             let names = guard(|| crate::shell::blockext::registered_names()).unwrap_or_default();
             set_shell_dlls(names);
             loop {
-                write_trace();
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                wait_trace();
+                flush_trace(&mut snap);
             }
         });
         spawn_watcher(&dir);
@@ -253,12 +289,20 @@ pub(crate) fn install() {
 }
 
 pub(crate) fn note_path(path: &str) {
-    match LAST.lock() {
-        Ok(mut g) => *g = path.to_string(),
-        Err(p) => *p.into_inner() = path.to_string(),
-    }
+    let changed = set_mutex_string(&LAST, path);
     log(&format!("nav {path}"));
-    write_trace();
+    if changed {
+        request_trace();
+    }
+}
+
+fn set_mutex_string(slot: &Mutex<String>, next: &str) -> bool {
+    let mut g = slot.lock().unwrap_or_else(|p| p.into_inner());
+    if *g == next {
+        return false;
+    }
+    *g = next.to_string();
+    true
 }
 
 pub(crate) fn log(line: &str) {
@@ -275,10 +319,13 @@ pub(crate) fn log(line: &str) {
 }
 
 pub(crate) fn set_shell_dlls(names: Vec<String>) {
-    match SHELL.lock() {
-        Ok(mut g) => *g = names,
-        Err(p) => *p.into_inner() = names,
+    let mut g = SHELL.lock().unwrap_or_else(|p| p.into_inner());
+    if *g == names {
+        return;
     }
+    *g = names;
+    drop(g);
+    request_trace();
 }
 
 fn spawn_watcher(dir: &Path) {
@@ -427,8 +474,29 @@ fn write_text_report(dir: &Path, text: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-fn write_trace() {
+#[derive(Default)]
+struct TraceSnap {
+    ready: bool,
+    path: String,
+    shell: Vec<String>,
+    module_count: usize,
+    text: String,
+}
+
+fn trace_inputs_match(snap: &TraceSnap, path: &str, shell: &[String], module_count: usize) -> bool {
+    snap.ready && snap.module_count == module_count && snap.path == path && snap.shell == shell
+}
+
+/// Writes `last-trace.txt` when the path, shell list, or loaded module count differs
+/// from the previous snapshot. An identical report is not written again.
+fn flush_trace(snap: &mut TraceSnap) {
     let Some(dir) = DIR.get() else { return };
+    let path = locked_string(&LAST);
+    let shell = locked_list(&SHELL);
+    let count = module_count();
+    if trace_inputs_match(snap, &path, &shell, count) {
+        return;
+    }
     let loaded = loaded_modules();
     let report = Report {
         version: env!("CARGO_PKG_VERSION").into(),
@@ -439,16 +507,38 @@ fn write_trace() {
         exception: String::new(),
         address: String::new(),
         module: String::new(),
-        last_path: locked_string(&LAST),
-        shell_loaded: matching_shell(&loaded, &locked_list(&SHELL)),
+        last_path: path.clone(),
+        shell_loaded: matching_shell(&loaded, &shell),
         third_party: third_party_modules(&loaded),
         recent: recent_lines(),
     };
-    let path = dir.join("last-trace.txt");
+    let text = format_report(&report);
+    if snap.ready && text == snap.text {
+        snap.path = path;
+        snap.shell = shell;
+        snap.module_count = count;
+        return;
+    }
+    let file = dir.join("last-trace.txt");
     let tmp = dir.join("last-trace.txt.tmp");
-    if std::fs::write(&tmp, format_report(&report)).is_ok() {
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::rename(&tmp, &path);
+    if std::fs::write(&tmp, &text).is_ok() {
+        let _ = std::fs::remove_file(&file);
+        if std::fs::rename(&tmp, &file).is_ok() {
+            snap.ready = true;
+            snap.path = path;
+            snap.shell = shell;
+            snap.module_count = count;
+            snap.text = text;
+        }
+    }
+}
+
+fn module_count() -> usize {
+    unsafe {
+        let proc = GetCurrentProcess();
+        let mut need = 0u32;
+        let _ = EnumProcessModules(proc, std::ptr::null_mut(), 0, &mut need);
+        (need as usize / std::mem::size_of::<HMODULE>()).min(1024)
     }
 }
 
@@ -746,6 +836,22 @@ fn open_folder(folder: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_snapshot_matches_only_the_same_path_shell_and_module_count() {
+        let snap = TraceSnap {
+            ready: true,
+            path: r"F:\CAC\サンプル".into(),
+            shell: vec!["codec.dll".into()],
+            module_count: 40,
+            text: "same".into(),
+        };
+        assert!(trace_inputs_match(&snap, r"F:\CAC\サンプル", &["codec.dll".into()], 40));
+        assert!(!trace_inputs_match(&snap, r"F:\other", &["codec.dll".into()], 40));
+        assert!(!trace_inputs_match(&snap, r"F:\CAC\サンプル", &["other.dll".into()], 40));
+        assert!(!trace_inputs_match(&snap, r"F:\CAC\サンプル", &["codec.dll".into()], 41));
+        assert!(!trace_inputs_match(&TraceSnap::default(), "", &[], 0));
+    }
 
     #[test]
     fn force_kill_exit_is_not_fatal_and_fail_fast_still_is() {
