@@ -1849,12 +1849,18 @@ unsafe fn paint_name(dc: HDC, row: RECT, data: &Row, dpi: i32, st: &PaintSnap, g
     let t = ui_tokens();
     let mut r = text_r;
     if data.locked {
-        let lock_w = sc(dpi, 14);
-        let room = (r.right - r.left - lock_w).max(0);
-        let tw = text_px(dc, st.bold, &data.name).min(room);
-        let lock = RECT { left: r.left + tw, top: r.top, right: r.left + tw + lock_w, bottom: r.bottom };
-        r.right = lock.left;
-        text(dc, lock, ICON_LOCK, st.icon, t.sub, DT_CENTER);
+        // Reserve the measured glyph (at least the icon em) plus the gap, at this DPI.
+        // The name ellipsizes into what is left. A flat 14 DIP slot clipped the glyph
+        // on the tab column's right edge.
+        let bounds = (r.right - r.left).max(0);
+        let glyph = text_px(dc, st.icon, ICON_LOCK).max(0);
+        let name_px = text_px(dc, st.bold, &data.name).max(0);
+        let lay = place_locked_name(bounds, name_px, glyph, dpi);
+        let lock = RECT { left: r.left + lay.lock_left, top: r.top, right: r.left + lay.lock_right, bottom: r.bottom };
+        r.right = r.left + lay.name_right;
+        if lock.right > lock.left {
+            text(dc, lock, ICON_LOCK, st.icon, t.sub, DT_CENTER);
+        }
     }
     paint_marked(dc, r, &data.name, st.bold, &st.query, ground);
 }
@@ -2237,6 +2243,56 @@ fn tablist_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             _ => return DefWindowProcW(h, msg, wp, lp),
         }
         LRESULT(0)
+    }
+}
+
+/// Gap between a locked tab's name and the lock glyph, in DIP.
+const LOCK_NAME_GAP_DIP: i32 = 4;
+/// Extra width inside the lock box, in DIP. DrawText clips to the rect, and an
+/// exact em measure still loses the right edge of a Segoe MDL2 glyph.
+const LOCK_BOX_PAD_DIP: i32 = 2;
+
+/// Name and lock inside the tab column. Edges are relative to the column's left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LockedNameLayout {
+    /// Right edge of the name. A title that fits includes the gap, so an exact
+    /// measure is not ellipsized. A title that does not fit ends before the gap,
+    /// and that width is the ellipsis budget.
+    pub name_right: i32,
+    pub lock_left: i32,
+    pub lock_right: i32,
+}
+
+/// Lock box width. At least the icon em at this DPI, and at least the measured advance.
+pub(crate) fn lock_box_px(dpi: i32, glyph_px: i32) -> i32 {
+    let em = sc(dpi, FONT_ICON_PX);
+    let pad = sc(dpi, LOCK_BOX_PAD_DIP);
+    glyph_px.max(0).max(em).saturating_add(pad)
+}
+
+/// Where the name and the lock sit inside a column of `bounds_w` pixels.
+///
+/// The lock keeps [`lock_box_px`]. A title that does not fit is the part that shrinks,
+/// so the caller can ellipsize into `name_right` and the glyph stays whole. The gap
+/// shrinks only when the column cannot hold both the box and the gap. The box itself
+/// stays full even when the column is narrower than the glyph.
+pub(crate) fn place_locked_name(bounds_w: i32, name_px: i32, glyph_px: i32, dpi: i32) -> LockedNameLayout {
+    let bounds_w = bounds_w.max(0);
+    let name_px = name_px.max(0);
+    let box_w = lock_box_px(dpi, glyph_px);
+    let gap = sc(dpi, LOCK_NAME_GAP_DIP);
+    if bounds_w <= box_w {
+        return LockedNameLayout { name_right: 0, lock_left: 0, lock_right: box_w };
+    }
+    let gap_fit = gap.min(bounds_w - box_w);
+    let room = bounds_w - box_w - gap_fit;
+    if name_px <= room {
+        // The gap is slack in the name rect. DrawText then does not ellipsize an exact measure.
+        let lock_left = name_px + gap_fit;
+        LockedNameLayout { name_right: lock_left, lock_left, lock_right: lock_left.saturating_add(box_w) }
+    } else {
+        let lock_left = room + gap_fit;
+        LockedNameLayout { name_right: room, lock_left, lock_right: lock_left.saturating_add(box_w) }
     }
 }
 
@@ -2800,6 +2856,85 @@ mod tests {
         assert_eq!(row_fill(false, true, false), blend(LIGHT_TOKENS.card, LIGHT_TOKENS.text, 0.04));
         assert_eq!(button_width(10, 96), BTN_MIN_W);
         assert_eq!(button_width(80, 96), 80 + BTN_PAD_X * 2);
+    }
+
+    #[test]
+    fn a_locked_name_keeps_the_full_icon_and_ellipsizes_the_title() {
+        let row = RECT { left: 0, top: 0, right: 800, bottom: 24 };
+        let bounds = {
+            let text = name_text_rect(row, false, 96);
+            text.right - text.left
+        };
+        assert_eq!(bounds, 98);
+
+        let glyph = FONT_ICON_PX;
+        let long = place_locked_name(bounds, 10_000, glyph, 96);
+        let box_w = lock_box_px(96, glyph);
+        assert_eq!(long.lock_right - long.lock_left, box_w, "the lock keeps its full box, not a flat 14 DIP");
+        assert!(box_w > sc(96, 14));
+        assert_eq!(long.lock_right, bounds);
+        assert_eq!(long.lock_left - long.name_right, sc(96, LOCK_NAME_GAP_DIP));
+        assert!(long.name_right < 10_000);
+
+        // A measure under the em still reserves the em, so the glyph is not clipped.
+        let short_glyph = place_locked_name(bounds, 10_000, 14, 96);
+        assert!(short_glyph.lock_right - short_glyph.lock_left >= sc(96, FONT_ICON_PX));
+
+        // A glyph wider than the em keeps its own advance, plus the box pad.
+        let wide = place_locked_name(bounds, 10_000, 22, 96);
+        assert_eq!(wide.lock_right - wide.lock_left, lock_box_px(96, 22));
+        assert!(wide.lock_right - wide.lock_left >= 22 + sc(96, LOCK_BOX_PAD_DIP));
+
+        let short = place_locked_name(bounds, 40, glyph, 96);
+        assert_eq!(short.lock_right - short.lock_left, box_w);
+        assert!(short.lock_right <= bounds);
+        assert!(short.name_right >= 40);
+        assert_eq!(short.lock_left, short.name_right);
+
+        // The column cannot hold the glyph: the name drops, the box does not shrink.
+        let tiny = place_locked_name(10, 100, glyph, 96);
+        assert_eq!(tiny.name_right, 0);
+        assert_eq!(tiny.lock_right - tiny.lock_left, box_w);
+
+        assert_eq!(lock_box_px(96, 15), 17);
+        assert_eq!(lock_box_px(96, 14), 17);
+        assert_eq!(lock_box_px(96, 22), 24);
+        assert_eq!(lock_box_px(192, 30), 34);
+    }
+
+    #[test]
+    fn locked_name_slot_scales_with_dpi_and_keeps_cjk_characters() {
+        for dpi in [96, 120, 144, 192] {
+            let glyph = sc(dpi, FONT_ICON_PX);
+            let bounds = sc(dpi, 98);
+            let lay = place_locked_name(bounds, sc(dpi, 400), glyph, dpi);
+            assert_eq!(lay.lock_right, bounds, "{dpi}");
+            assert_eq!(lay.lock_right - lay.lock_left, lock_box_px(dpi, glyph), "{dpi}");
+            assert_eq!(lay.lock_left - lay.name_right, sc(dpi, LOCK_NAME_GAP_DIP), "{dpi}");
+            assert!(lay.lock_right - lay.lock_left >= glyph, "{dpi}");
+        }
+        // 200% is twice 96 DPI for these sizes.
+        let a = place_locked_name(98, 400, FONT_ICON_PX, 96);
+        let b = place_locked_name(196, 800, FONT_ICON_PX * 2, 192);
+        assert_eq!(b.lock_right - b.lock_left, (a.lock_right - a.lock_left) * 2);
+        assert_eq!(b.name_right, a.name_right * 2);
+        assert_eq!(b.lock_left - b.name_right, (a.lock_left - a.name_right) * 2);
+
+        let cell = 16;
+        let measure = |s: &str| s.chars().count() as i32 * cell;
+        for name in ["포이토코드", "まるぼーど", "PoitoCode", "MaruBoard"] {
+            let bounds = lock_box_px(96, FONT_ICON_PX) + sc(96, LOCK_NAME_GAP_DIP) + cell * 2;
+            let lay = place_locked_name(bounds, measure(name), FONT_ICON_PX, 96);
+            let shown: String = fit_marked_end(&mark_runs(name, ""), lay.name_right, measure).into_iter().map(|run| run.text).collect();
+            let bare: String = shown.chars().filter(|c| *c != '…').collect();
+            assert!(name.starts_with(&bare), "{name} -> {shown}");
+            assert!(shown.ends_with('…'), "{name} -> {shown}");
+            assert!(measure(&bare) + measure("…") <= lay.name_right, "{name} -> {shown}");
+            assert_eq!(lay.lock_right, bounds, "{name}");
+            assert!(lay.lock_right - lay.lock_left >= FONT_ICON_PX, "{name}");
+            // The gap stays between the ellipsis budget and the icon.
+            assert_eq!(lay.lock_left - lay.name_right, sc(96, LOCK_NAME_GAP_DIP), "{name}");
+        }
     }
 
     #[test]
