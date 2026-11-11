@@ -13,6 +13,66 @@ pub(crate) fn xy(lp: LPARAM) -> (i32, i32) {
     ((lp.0 & 0xffff) as i16 as i32, ((lp.0 >> 16) & 0xffff) as i16 as i32)
 }
 
+/// One status-timer pass: the bar, remembered view state, a failed save, and the preview backup.
+pub(crate) unsafe fn status_tick() {
+    update_status();
+    check_dirty();
+    retry_save();
+    poll_preview();
+}
+
+const STATUS_RUNNING: isize = 1;
+const STATUS_PAUSED: isize = 2;
+
+fn status_flag(h: HWND) -> isize {
+    unsafe { GetPropW(h, w!("MaguroStatusOn")).0 as isize }
+}
+
+fn this_process_foreground() -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(fg, Some(&mut pid));
+        pid == std::process::id()
+    }
+}
+
+/// The 300ms timer is off while the window is minimized or the app is in the background.
+/// A timer that was never started stays that way, so creation size messages do not read views.
+pub(crate) unsafe fn pause_status_timer(h: HWND) {
+    if h.0.is_null() {
+        return;
+    }
+    let _ = KillTimer(Some(h), TIMER_STATUS);
+    if status_flag(h) == STATUS_RUNNING {
+        let _ = SetPropW(h, w!("MaguroStatusOn"), Some(HANDLE(STATUS_PAUSED as *mut core::ffi::c_void)));
+    }
+}
+
+/// Starts the timer unless it is already running. Does not restart the countdown.
+pub(crate) unsafe fn arm_status_timer(h: HWND) {
+    if h.0.is_null() || IsIconic(h).as_bool() || status_flag(h) == STATUS_RUNNING {
+        return;
+    }
+    SetTimer(Some(h), TIMER_STATUS, 300, None);
+    let _ = SetPropW(h, w!("MaguroStatusOn"), Some(HANDLE(STATUS_RUNNING as *mut core::ffi::c_void)));
+}
+
+/// Arm the timer after a minimize or an app switch, and read once so the bar is not a tick behind.
+pub(crate) unsafe fn resume_status_timer(h: HWND) {
+    if h.0.is_null() || IsIconic(h).as_bool() {
+        return;
+    }
+    let paused = status_flag(h) == STATUS_PAUSED;
+    arm_status_timer(h);
+    if paused {
+        status_tick();
+    }
+}
+
 /// Marks the splitter under the pointer. Only the old and new lines are repainted.
 pub(crate) unsafe fn gap_hover(h: HWND, d: Option<Hit>) {
     let (old, lines) = app(|a| {
@@ -70,6 +130,13 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if kind != SIZE_MINIMIZED && !app(|a| a.focus_wait) && GetActiveWindow() == h && (f.is_invalid() || f == h) {
                     restore_focus();
                 }
+                // Minimized: stop. Restoring while this process is in front reads once.
+                // A size message while the app is inactive must not start the timer again.
+                if kind == SIZE_MINIMIZED {
+                    pause_status_timer(h);
+                } else if status_flag(h) == STATUS_PAUSED && this_process_foreground() {
+                    resume_status_timer(h);
+                }
             }
             WM_ENTERSIZEMOVE => {
                 app(|a| a.sizing = true);
@@ -100,6 +167,9 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_ACTIVATEAPP => {
                 if wp.0 != 0 {
                     _ = PostMessageW(Some(h), WM_DRIVES, WPARAM(0), LPARAM(0));
+                    resume_status_timer(h);
+                } else {
+                    pause_status_timer(h);
                 }
             }
             WM_DRIVES => {
@@ -125,12 +195,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     SetTimer(Some(h), TIMER_REVEAL, if left == 2 { 330 } else { 550 }, None);
                 }
             }
-            WM_TIMER if wp.0 == TIMER_STATUS => {
-                update_status();
-                check_dirty();
-                retry_save();
-                poll_preview();
-            }
+            WM_TIMER if wp.0 == TIMER_STATUS => status_tick(),
             WM_TIMER if wp.0 == TIMER_PREVIEW => {
                 _ = KillTimer(Some(h), TIMER_PREVIEW);
                 run_preview(false);
@@ -550,7 +615,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 crate::shell::listsync::disarm(h);
                 crate::cliphot::release(h);
                 crate::dialogjump::release(h);
-                _ = KillTimer(Some(h), TIMER_STATUS);
+                pause_status_timer(h);
                 _ = KillTimer(Some(h), TIMER_SAVE);
                 _ = KillTimer(Some(h), TIMER_WINS);
                 crate::shell::warmup::disarm(h);

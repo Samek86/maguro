@@ -119,6 +119,8 @@ pub(crate) struct Pane {
     pub(crate) tab_left: Option<String>,
     /// F5: the up arrow draws as a refresh ring from `.0`, and the glyph returns at `.1`.
     pub(crate) spin: Option<(Instant, Instant)>,
+    /// File list under the shell view. The status timer reuses it while it is still that child.
+    pub(crate) list_hwnd: HWND,
 }
 
 pub(crate) struct Desk {
@@ -179,6 +181,8 @@ pub(crate) struct Desk {
     pub(crate) status_folders: Vec<String>,
     /// Local file bytes, file count, and a partial flag mixed into the folder-size line.
     pub(crate) status_files: (u64, u64, bool),
+    /// Ticks of the 300ms status timer. Panes other than the active one are read every fifth tick.
+    pub(crate) status_phase: u32,
     pub(crate) view_menu: HMENU,
     pub(crate) base: Option<Session>, // last loaded/saved (or startup) state; differs -> green dot
     pub(crate) dirty: bool,
@@ -378,6 +382,7 @@ pub(crate) fn blank_desk() -> Desk {
         status_base: Default::default(),
         status_folders: Vec::new(),
         status_files: (0, 0, false),
+        status_phase: 0,
         view_menu: HMENU::default(),
         base: None,
         dirty: false,

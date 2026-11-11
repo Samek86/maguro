@@ -778,10 +778,37 @@ pub(crate) unsafe fn refresh_save_button() {
     SendMessageW(tip, TTM_UPDATETIPTEXTW, None, Some(LPARAM(&ti as *const _ as isize)));
 }
 
+/// Active pane every tick. The others every fifth tick (1.5s), which is enough for a
+/// column change the user is not looking at. Header drags are stored as they end.
+pub(crate) fn poll_this_pane(i: usize, active: usize, phase: u32) -> bool {
+    i == active || phase % 5 == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::poll_this_pane;
+
+    #[test]
+    fn status_poll_reads_the_active_pane_every_tick() {
+        assert!(poll_this_pane(1, 1, 1));
+        assert!(!poll_this_pane(0, 1, 1));
+        assert!(!poll_this_pane(3, 1, 4));
+        assert!(poll_this_pane(0, 1, 5));
+        assert!(poll_this_pane(3, 1, 10));
+        assert!(poll_this_pane(2, 2, 10));
+    }
+}
+
 // Polled with the status timer: view modes are only observable by asking the views.
 pub(crate) unsafe fn check_dirty() {
-    for i in 0..app(|a| a.s.panes()) {
-        save_view(i);
+    let (n, active, phase) = app(|a| {
+        a.status_phase = a.status_phase.wrapping_add(1);
+        (a.s.panes(), a.s.active, a.status_phase)
+    });
+    for i in 0..n {
+        if poll_this_pane(i, active, phase) {
+            save_view_poll(i);
+        }
     }
     let changed = app(|a| {
         let (n, cols, tab) = (a.s.panes(), a.s.cols.clone(), a.s.tab);
