@@ -20,6 +20,7 @@ mod pins;
 pub(crate) use askdrop::*;
 pub(crate) use tabdrop::*;
 pub(crate) use fav::*;
+pub(crate) use fastcopy::apply_fast_note;
 pub(crate) use fileop::*;
 pub(crate) use gather::*;
 pub(crate) use pins::*;

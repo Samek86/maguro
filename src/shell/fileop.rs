@@ -442,7 +442,6 @@ unsafe fn start_transfer(srcs: Vec<String>, dst: String, rename: bool, mv: bool,
         let later = super::listsync::RefreshLater::new(hwnds, folders);
         let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
         let _ = crate::crash::guard(std::panic::AssertUnwindSafe(|| unsafe {
-        let _busy = busy;
         if after_drop {
             settle_drop_move(&srcs);
         }
@@ -452,9 +451,11 @@ unsafe fn start_transfer(srcs: Vec<String>, dst: String, rename: bool, mv: bool,
         if super::fastcopy::decide_fast(force, setting, network) {
             let srcs: Vec<String> = srcs.iter().map(|s| final_dos(s)).collect();
             let dst = final_dos(&dst);
-            super::fastcopy::run_fast(super::fastcopy::FastJob { owner, accent, snap, srcs, dst, rename, mv });
+            // `busy` stays raised through the copy. run_fast drops it before the completion linger.
+            super::fastcopy::run_fast(super::fastcopy::FastJob { owner, accent, snap, srcs, dst, rename, mv, busy });
             return;
         }
+        let _busy = busy;
         let owner_hwnd = HWND(owner as *mut _);
         let prepared: Vec<String> = srcs.iter().map(|s| final_dos(s)).collect();
         let prepared_dst = final_dos(&dst);
