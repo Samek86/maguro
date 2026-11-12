@@ -69,9 +69,6 @@ pub(crate) fn load_name(card: &RECT, thumb: &RECT, dpi: i32) -> RECT {
 }
 
 pub(crate) fn short_name(path: &str) -> String {
-    if path.contains("20D04FE0-3AEA-1069-A2D8-08002B30309D") {
-        return tr(crate::Key::ThisPc).into();
-    }
     folder_display_name(path)
 }
 

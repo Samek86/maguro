@@ -1148,13 +1148,8 @@ fn tab_text(a: &App, i: usize) -> (String, String) {
         (parked_paths, parked_n, parked_active)
     };
     let path = paths.get(active).map(String::as_str).unwrap_or("");
-    let label = if custom_tab_name(&name).is_none() && path.contains("20D04FE0-3AEA-1069-A2D8-08002B30309D") {
-        tr(crate::Key::ThisPc).into()
-    } else {
-        tab_label(&name, path)
-    };
-    let pc: String = tr(crate::Key::ThisPc).into();
-    let shown: Vec<String> = paths.iter().take(n).map(|p| if p.contains("20D04FE0-3AEA-1069-A2D8-08002B30309D") { pc.clone() } else { p.clone() }).collect();
+    let label = tab_label(&name, path);
+    let shown: Vec<String> = paths.iter().take(n).map(|p| folder_tip_text(p)).collect();
     let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
     (label, tab_tip_text(&refs))
 }
