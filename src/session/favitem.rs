@@ -5,7 +5,12 @@
 //! a field here: an RDP item keeps only `has_password`, and the secret lives in
 //! Windows Credential Manager under `Maguro:rdp:<host>`.
 
+use std::sync::OnceLock;
+
 use serde_json::{json, Map, Value};
+use windows::core::{HSTRING, PCWSTR, PWSTR};
+use windows::Win32::Storage::FileSystem::SearchPathW;
+use windows::Win32::UI::Shell::{AssocQueryStringW, IShellItem, SHCreateItemFromParsingName, ASSOCF_NONE, ASSOCSTR_EXECUTABLE, SIGDN_NORMALDISPLAY};
 
 use crate::Key;
 
@@ -223,6 +228,171 @@ pub(crate) fn shell_places() -> &'static [ShellPlace] {
 pub(crate) fn shell_place_label(path: &str) -> Option<Key> {
     let key = path.trim();
     shell_places().iter().find(|p| p.path.eq_ignore_ascii_case(key)).map(|p| p.label)
+}
+
+/// A `::{CLSID}` or `shell:` parsing name. These are not disk paths.
+pub(crate) fn shell_parsing_name(path: &str) -> bool {
+    let path = path.trim();
+    path.starts_with("::") || path.get(..6).is_some_and(|h| h.eq_ignore_ascii_case("shell:"))
+}
+
+/// Empty, or the raw parsing name. A special folder with either shows the shell's name.
+fn raw_shell_name(name: &str, path: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return true;
+    }
+    let path = path.trim();
+    (!path.is_empty() && name.eq_ignore_ascii_case(path)) || shell_parsing_name(name)
+}
+
+/// Name drawn for a leaf. Special folders with no real display name resolve here, in the
+/// language that is current now, so a saved favourite does not freeze one language's word.
+pub(crate) fn fav_shown_name(kind: ItemKind, stored: &str, path: &str) -> String {
+    let stored = stored.trim();
+    let path = path.trim();
+    if kind == ItemKind::Special && raw_shell_name(stored, path) {
+        if let Some(key) = shell_place_label(path) {
+            let label = crate::tr(key);
+            if !label.is_empty() {
+                return label.to_string();
+            }
+        }
+        if let Some(label) = shell_namespace_name(path) {
+            if !raw_shell_name(&label, path) {
+                return label;
+            }
+        }
+    }
+    if !stored.is_empty() {
+        return stored.to_string();
+    }
+    if path.is_empty() {
+        String::new()
+    } else {
+        crate::short_name(path)
+    }
+}
+
+/// `SIGDN_NORMALDISPLAY` for a shell parsing name. None when the shell cannot name it.
+pub(crate) fn shell_namespace_name(path: &str) -> Option<String> {
+    let path = path.trim();
+    if !shell_parsing_name(path) {
+        return None;
+    }
+    unsafe {
+        let wide = HSTRING::from(path);
+        let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
+        let pw = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
+        let name = crate::pwstr(pw);
+        let name = name.trim().to_string();
+        (!name.is_empty()).then_some(name)
+    }
+}
+
+/// Icon a leaf should draw, and whether a missing file on disk dims the row.
+/// Command, URL, RDP, and shell places are not files that can be "missing".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FavGlyph {
+    pub(crate) path: String,
+    pub(crate) file: bool,
+    pub(crate) index: i32,
+    pub(crate) track_missing: bool,
+    pub(crate) color: Option<u32>,
+}
+
+pub(crate) fn fav_glyph(kind: ItemKind, path: &str, color: Option<u32>, icon: Option<&ItemIcon>) -> FavGlyph {
+    if let Some(icon) = icon {
+        if !icon.path.trim().is_empty() {
+            return FavGlyph {
+                path: icon.path.clone(),
+                file: true,
+                index: icon.index,
+                track_missing: matches!(kind, ItemKind::Folder | ItemKind::File),
+                color,
+            };
+        }
+    }
+    let (icon_path, file) = match kind {
+        ItemKind::Command => (command_icon_path(path), true),
+        ItemKind::Url => (url_icon_path(), true),
+        ItemKind::Rdp => (mstsc_exe(), true),
+        ItemKind::File => (path.to_string(), true),
+        ItemKind::Special | ItemKind::Folder => (path.to_string(), false),
+    };
+    FavGlyph {
+        path: icon_path,
+        file,
+        index: -1,
+        track_missing: matches!(kind, ItemKind::Folder | ItemKind::File),
+        color,
+    }
+}
+
+/// `track_missing` is false for anything that is not a folder or file on disk.
+/// `target_missing` is the favourite path itself, not the icon we borrowed.
+pub(crate) fn glyph_is_missing(g: &FavGlyph, target_missing: bool) -> bool {
+    g.track_missing && target_missing
+}
+
+/// First token of a command line. Quotes keep a path that contains spaces.
+fn command_program(raw: &str) -> String {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix('"') {
+        if let Some(end) = rest.find('"') {
+            return rest[..end].to_string();
+        }
+    }
+    s.split_whitespace().next().unwrap_or("").to_string()
+}
+
+/// Executable whose icon a command row draws. A bare name is resolved on `PATH`.
+pub(crate) fn command_icon_path(raw: &str) -> String {
+    let program = command_program(raw);
+    if program.is_empty() {
+        return String::new();
+    }
+    if program.contains(['\\', '/']) {
+        return program;
+    }
+    search_path_file(&program).unwrap_or(program)
+}
+
+fn search_path_file(name: &str) -> Option<String> {
+    let mut buf = vec![0u16; 32768];
+    let file = HSTRING::from(name);
+    let n = unsafe { SearchPathW(PCWSTR::null(), PCWSTR(file.as_ptr()), PCWSTR::null(), Some(&mut buf), None) };
+    if n == 0 || n as usize >= buf.len() {
+        return None;
+    }
+    let s = String::from_utf16_lossy(&buf[..n as usize]);
+    (!s.is_empty()).then_some(s)
+}
+
+/// Browser (or other handler) registered for web addresses. Not a fake `page.url` file.
+pub(crate) fn url_icon_path() -> String {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        assoc_open_exe("http").or_else(|| assoc_open_exe("https")).or_else(|| {
+            let explorer = command_icon_path("explorer.exe");
+            std::path::Path::new(&explorer).is_file().then_some(explorer)
+        }).unwrap_or_default()
+    })
+    .clone()
+}
+
+fn assoc_open_exe(query: &str) -> Option<String> {
+    let mut buf = vec![0u16; 1024];
+    let mut n = buf.len() as u32;
+    let hr = unsafe {
+        AssocQueryStringW(ASSOCF_NONE, ASSOCSTR_EXECUTABLE, &HSTRING::from(query), &HSTRING::from("open"), Some(PWSTR(buf.as_mut_ptr())), &mut n)
+    };
+    if hr.is_err() {
+        return None;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(n as usize).min(buf.len());
+    let s = String::from_utf16_lossy(&buf[..end]).trim().trim_matches('"').to_string();
+    std::path::Path::new(&s).is_file().then_some(s)
 }
 
 /// What the dialog collected. `password` is memory only and is never written to the favourites file.
@@ -1035,5 +1205,75 @@ mod tests {
         assert!(ItemKind::Special.navigable());
         assert!(!ItemKind::Rdp.navigable());
         assert!(ItemKind::Command.launches());
+    }
+
+    #[test]
+    fn empty_special_name_follows_the_language_and_is_not_saved_as_a_guid() {
+        use std::sync::atomic::Ordering;
+        let bin = "::{645FF040-5081-101B-9F08-00AA002F954E}";
+        let prev = crate::UI.load(Ordering::Relaxed);
+        let shown = |lang: u8, name: &str, path: &str| {
+            crate::UI.store(lang, Ordering::Relaxed);
+            fav_shown_name(ItemKind::Special, name, path)
+        };
+        let en = shown(0, "", bin);
+        let ko = shown(1, "", bin);
+        let ja = shown(2, "", bin);
+        assert_eq!((en.as_str(), ko.as_str(), ja.as_str()), ("Recycle Bin", "휴지통", "ごみ箱"));
+        for label in [&en, &ko, &ja] {
+            assert!(!label.contains("645FF040"), "{label}");
+        }
+        assert_eq!(shown(0, bin, bin), "Recycle Bin");
+        assert_eq!(shown(1, "shell:RecycleBinFolder", bin), "휴지통");
+        assert_eq!(shown(2, "Mine", bin), "Mine");
+        assert_eq!(shown(0, "", "shell:Downloads"), "Downloads");
+        let mut draft = Draft::blank(ItemKind::Special);
+        draft.target = bin.into();
+        let node = crate::node_from_draft(&draft, false);
+        assert!(node.name.is_empty(), "display language is resolved when drawn, not stored");
+        crate::UI.store(0, Ordering::Relaxed);
+        let label = crate::node_label(&node);
+        assert_eq!(label, "Recycle Bin");
+        assert_eq!(crate::visible_rows(std::slice::from_ref(&node))[0].name, label);
+        crate::UI.store(prev, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn command_url_shell_and_rdp_icons_are_not_missing_files() {
+        let bin = "::{645FF040-5081-101B-9F08-00AA002F954E}";
+        let cmd = fav_glyph(ItemKind::Command, "notepad.exe", None, None);
+        assert!(!cmd.track_missing);
+        assert!(std::path::Path::new(&cmd.path).is_file(), "{}", cmd.path);
+        assert!(cmd.path.to_ascii_lowercase().ends_with("notepad.exe"));
+        let quoted = command_icon_path(r#""notepad.exe""#);
+        assert!(std::path::Path::new(&quoted).is_file(), "{quoted}");
+        assert!(!glyph_is_missing(&cmd, true));
+
+        let url = fav_glyph(ItemKind::Url, "https://example.com", None, None);
+        assert!(!url.track_missing);
+        assert_ne!(url.path, "page.url");
+        assert!(url.path.is_empty() || std::path::Path::new(&url.path).is_file(), "{}", url.path);
+        assert!(!glyph_is_missing(&url, true));
+
+        let rdp = fav_glyph(ItemKind::Rdp, "desk.local", None, None);
+        assert!(!rdp.track_missing);
+        assert!(rdp.path.to_ascii_lowercase().ends_with("mstsc.exe"));
+        assert!(!glyph_is_missing(&rdp, true));
+
+        let special = fav_glyph(ItemKind::Special, bin, None, None);
+        assert!(!special.track_missing);
+        assert!(special.path.starts_with("::"));
+        assert!(!glyph_is_missing(&special, true));
+        let shell = fav_glyph(ItemKind::Special, "shell:Downloads", None, None);
+        assert!(shell.path.eq_ignore_ascii_case("shell:Downloads"));
+
+        let gone = r"C:\maguro-no-such-folder-31b3bdd";
+        let folder = fav_glyph(ItemKind::Folder, gone, None, None);
+        assert!(folder.track_missing);
+        assert_eq!(folder.path, gone);
+        assert!(glyph_is_missing(&folder, true));
+        assert!(!glyph_is_missing(&folder, false));
+        assert!(crate::path_is_absent(gone));
+        assert!(!crate::path_is_absent(r"C:\Windows"));
     }
 }

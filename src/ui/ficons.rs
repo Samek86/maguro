@@ -427,7 +427,14 @@ fn store_shell(path: &str, attr: FILE_FLAGS_AND_ATTRIBUTES, real: bool, key: Str
 
 /// `SHGFI_SYSICONINDEX` returns the shared list. `USEFILEATTRIBUTES` skips the disk.
 /// An `HICON` is destroyed if the shell filled one in; the list itself is not.
+/// A `::{CLSID}` or `shell:` name is parsed to a PIDL first. The file-path lookup
+/// treats that string as a missing file and returns the generic folder.
 fn sys_icon(path: &str, attr: FILE_FLAGS_AND_ATTRIBUTES, real: bool) -> Option<(isize, i32)> {
+    if real && shell_place(path) {
+        if let Some(hit) = sys_icon_pidl(path) {
+            return Some(hit);
+        }
+    }
     let wide = HSTRING::from(path);
     let mut info = SHFILEINFOW::default();
     let flags = if real {
@@ -443,6 +450,32 @@ fn sys_icon(path: &str, attr: FILE_FLAGS_AND_ATTRIBUTES, real: bool) -> Option<(
         return None;
     }
     Some((ret as isize, info.iIcon))
+}
+
+fn sys_icon_pidl(path: &str) -> Option<(isize, i32)> {
+    unsafe {
+        let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+        if SHParseDisplayName(&HSTRING::from(path), None, &mut pidl, 0, None).is_err() || pidl.is_null() {
+            return None;
+        }
+        let mut info = SHFILEINFOW::default();
+        let flags = SHGFI_PIDL | SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
+        let ret = SHGetFileInfoW(PCWSTR(pidl as _), FILE_FLAGS_AND_ATTRIBUTES(0), Some(&mut info), size_of::<SHFILEINFOW>() as u32, flags);
+        ILFree(Some(pidl as *const ITEMIDLIST));
+        if !info.hIcon.is_invalid() {
+            let _ = DestroyIcon(info.hIcon);
+        }
+        if ret == 0 || info.iIcon < 0 {
+            None
+        } else {
+            Some((ret as isize, info.iIcon))
+        }
+    }
+}
+
+/// Same check the icon worker uses before it dims a row. Shell places are never absent.
+pub(crate) fn path_is_absent(path: &str) -> bool {
+    path_missing(path)
 }
 
 /// UNC and mapped drives stay off this thread's disk calls. Navigation resolves them in the background.
@@ -569,6 +602,20 @@ mod tests {
             note_missing(&mut mem, format!("x:\\{i}"));
         }
         assert!(mem.missing.len() <= MISSING_CAP);
+    }
+
+    #[test]
+    fn recycle_bin_icon_is_the_shell_namespace_not_a_generic_folder() {
+        unsafe { let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); }
+        let bin = "::{645FF040-5081-101B-9F08-00AA002F954E}";
+        let downloads = "shell:Downloads";
+        let folder = sys_icon("folder", FILE_ATTRIBUTE_DIRECTORY, false).expect("generic folder");
+        let bin_icon = sys_icon_pidl(bin).expect("recycle bin pidl");
+        let downloads_icon = sys_icon_pidl(downloads).expect("downloads pidl");
+        assert_ne!(bin_icon.1, folder.1, "recycle bin is not the generic folder");
+        assert_ne!(downloads_icon.1, folder.1, "downloads is not the generic folder");
+        assert!(!path_is_absent(bin));
+        assert!(!path_is_absent(downloads));
     }
 
     #[test]

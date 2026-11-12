@@ -518,13 +518,10 @@ pub(crate) fn drop_line(hits: &[DropHit], spot: &DropSpot) -> Option<(usize, u8)
 }
 
 pub(crate) fn node_label(n: &FavNode) -> String {
-    if !n.name.is_empty() {
+    if n.is_group() {
         return n.name.clone();
     }
-    if n.path.is_empty() {
-        return String::new();
-    }
-    short_name(&n.path)
+    favitem::fav_shown_name(n.kind(), &n.name, &n.path)
 }
 
 /// Leaves, depth-first, in the `path` or `path\tname` form the rest of the app stores.
