@@ -84,7 +84,6 @@ pub(crate) const KINDS: [ItemKind; 6] = [
 pub(crate) const DEFAULT_CRED_SECS: u32 = 10;
 const MAX_CRED_SECS: u32 = 3600;
 const MAX_MEMO: usize = 2000;
-const MAX_EXTRA: usize = 4000;
 const MAX_TARGET: usize = 1024;
 
 /// Window sizes offered for an RDP session, width then height.
@@ -445,7 +444,6 @@ pub(crate) enum Fault {
     NeedShell,
     BadShell,
     BadCred,
-    BadExtra,
     BadIcon,
 }
 
@@ -461,7 +459,6 @@ impl Fault {
             Fault::NeedShell => Key::NeedShell,
             Fault::BadShell => Key::BadShell,
             Fault::BadCred => Key::BadCredSeconds,
-            Fault::BadExtra => Key::BadRdpExtra,
             Fault::BadIcon => Key::BadIconIndex,
         }
     }
@@ -469,7 +466,7 @@ impl Fault {
 
 pub(crate) fn validate(d: &Draft) -> Result<(), Fault> {
     let target = d.target.trim();
-    if target.chars().count() > MAX_TARGET || d.memo.chars().count() > MAX_MEMO {
+    if target.chars().count() > MAX_TARGET {
         return Err(Fault::NeedPath);
     }
     if d.icon.as_ref().is_some_and(|i| i.path.trim().is_empty() || i.index < 0 || i.index > 1000) {
@@ -511,9 +508,6 @@ pub(crate) fn validate(d: &Draft) -> Result<(), Fault> {
             }
             if d.cred_secs > MAX_CRED_SECS {
                 return Err(Fault::BadCred);
-            }
-            if extra_has_password(&d.rdp_extra) || d.rdp_extra.chars().count() > MAX_EXTRA {
-                return Err(Fault::BadExtra);
             }
         }
     }
@@ -595,17 +589,6 @@ pub(crate) fn split_host(s: &str) -> Option<(&str, Option<u16>)> {
 fn parse_port(s: &str) -> Option<u16> {
     let n: u16 = s.parse().ok()?;
     (n > 0).then_some(n)
-}
-
-fn extra_has_password(extra: &str) -> bool {
-    extra.lines().any(|line| {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            return false;
-        }
-        let key = t.split(':').next().unwrap_or("").trim();
-        key.eq_ignore_ascii_case("password") || key.to_ascii_lowercase().contains("password")
-    })
 }
 
 /// Build the leaf fields the tree stores. The password is not copied onto the item.
@@ -776,7 +759,8 @@ pub(crate) fn explorer_launch(path: &str) -> Launch {
 }
 
 /// `.rdp` body. The password is not a line; mstsc reads TERMSRV from Credential Manager.
-pub(crate) fn rdp_text(host: &str, user: &str, screen: RdpScreen, extra: &str, prompt: bool) -> String {
+/// Clipboard sharing and remote audio on this PC are always written. A stored `rdp_extra` is not applied.
+pub(crate) fn rdp_text(host: &str, user: &str, screen: RdpScreen, prompt: bool) -> String {
     let mut lines = Vec::new();
     lines.push(format!("full address:s:{}", host.trim()));
     let user = user.trim();
@@ -794,13 +778,8 @@ pub(crate) fn rdp_text(host: &str, user: &str, screen: RdpScreen, extra: &str, p
     }
     lines.push(format!("prompt for credentials:i:{}", if prompt { 1 } else { 0 }));
     lines.push("authentication level:i:2".into());
-    for line in extra.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') || extra_has_password(t) {
-            continue;
-        }
-        lines.push(t.to_string());
-    }
+    lines.push("redirectclipboard:i:1".into());
+    lines.push("audiomode:i:0".into());
     let mut text = lines.join("\r\n");
     text.push_str("\r\n");
     text
@@ -1023,9 +1002,14 @@ mod tests {
         host.target = "bad host".into();
         assert_eq!(validate(&host), Err(Fault::BadHost));
         host.target = "pc:3389".into();
-        host.rdp_extra = "password 51:b:secret".into();
-        assert_eq!(validate(&host), Err(Fault::BadExtra));
-        host.rdp_extra = "redirectclipboard:i:1".into();
+        host.rdp_extra = "password 51:b:secret\r\naudiomode:i:2".into();
+        assert!(validate(&host).is_ok());
+        let generated = rdp_text(&host.target, &host.user, RdpScreen::Full, false);
+        assert_eq!(generated.matches("redirectclipboard:i:1").count(), 1, "{generated}");
+        assert_eq!(generated.matches("audiomode:i:0").count(), 1, "{generated}");
+        assert!(!generated.contains("password"), "{generated}");
+        assert!(!generated.contains("audiomode:i:2"), "{generated}");
+        assert!(!generated.contains("secret"), "{generated}");
         host.cred_secs = 9_999;
         assert_eq!(validate(&host), Err(Fault::BadCred));
         host.cred_secs = 0;
@@ -1033,26 +1017,79 @@ mod tests {
     }
 
     #[test]
+    fn rdp_text_always_shares_the_clipboard_and_plays_remote_audio_here() {
+        let full = rdp_text("pc:3389", "ada", RdpScreen::Full, false);
+        assert_eq!(
+            full,
+            concat!(
+                "full address:s:pc:3389\r\n",
+                "username:s:ada\r\n",
+                "screen mode id:i:2\r\n",
+                "prompt for credentials:i:0\r\n",
+                "authentication level:i:2\r\n",
+                "redirectclipboard:i:1\r\n",
+                "audiomode:i:0\r\n",
+            )
+        );
+        let window = rdp_text("pc", "", RdpScreen::Window { w: 1280, h: 720 }, true);
+        assert_eq!(
+            window,
+            concat!(
+                "full address:s:pc\r\n",
+                "screen mode id:i:1\r\n",
+                "desktopwidth:i:1280\r\n",
+                "desktopheight:i:720\r\n",
+                "prompt for credentials:i:1\r\n",
+                "authentication level:i:2\r\n",
+                "redirectclipboard:i:1\r\n",
+                "audiomode:i:0\r\n",
+            )
+        );
+        let auto = rdp_text("pc", "", RdpScreen::Auto, true);
+        assert_eq!(
+            auto,
+            concat!(
+                "full address:s:pc\r\n",
+                "prompt for credentials:i:1\r\n",
+                "authentication level:i:2\r\n",
+                "redirectclipboard:i:1\r\n",
+                "audiomode:i:0\r\n",
+            )
+        );
+        for text in [&full, &window, &auto] {
+            assert_eq!(text.matches("redirectclipboard:i:1").count(), 1, "{text}");
+            assert_eq!(text.matches("audiomode:i:0").count(), 1, "{text}");
+            assert!(!text.contains("password"), "{text}");
+            assert!(!text.contains("audiomode:i:2"), "{text}");
+        }
+    }
+
+    #[test]
     fn rdp_file_has_no_password_and_launch_uses_v() {
-        let text = rdp_text("pc:3389", "ada", RdpScreen::Full, "redirectclipboard:i:1\r\npassword 51:b:secret\r\n", false);
+        let text = rdp_text("pc:3389", "ada", RdpScreen::Full, false);
         assert!(text.contains("full address:s:pc:3389"));
         assert!(text.contains("username:s:ada"));
         assert!(text.contains("screen mode id:i:2"));
         assert!(text.contains("prompt for credentials:i:0"));
-        assert!(text.contains("redirectclipboard:i:1"));
+        assert_eq!(text.matches("redirectclipboard:i:1").count(), 1);
+        assert_eq!(text.matches("audiomode:i:0").count(), 1);
         assert!(!text.to_ascii_lowercase().contains("password"));
         assert!(!text.contains("secret"));
 
-        let window = rdp_text("pc", "", RdpScreen::Window { w: 1280, h: 720 }, "", true);
+        let window = rdp_text("pc", "", RdpScreen::Window { w: 1280, h: 720 }, true);
         assert!(window.contains("screen mode id:i:1"));
         assert!(window.contains("desktopwidth:i:1280"));
         assert!(window.contains("desktopheight:i:720"));
         assert!(window.contains("prompt for credentials:i:1"));
         assert!(!window.contains("username:"));
+        assert_eq!(window.matches("redirectclipboard:i:1").count(), 1);
+        assert_eq!(window.matches("audiomode:i:0").count(), 1);
 
-        let auto = rdp_text("pc", "", RdpScreen::Auto, "", true);
+        let auto = rdp_text("pc", "", RdpScreen::Auto, true);
         assert!(!auto.contains("screen mode id"));
         assert!(!auto.contains("desktopwidth"));
+        assert_eq!(auto.matches("redirectclipboard:i:1").count(), 1);
+        assert_eq!(auto.matches("audiomode:i:0").count(), 1);
 
         let bytes = rdp_bytes("full address:s:pc\r\n");
         assert_eq!(&bytes[..2], &[0xFF, 0xFE]);
@@ -1216,6 +1253,51 @@ mod tests {
         push_item(&mut round, &saved);
         assert_eq!(round.get("memo").and_then(|v| v.as_str()), Some("kept"));
         assert_eq!(round.get("color").and_then(|v| v.as_str()), Some("#3D7EE0"));
+    }
+
+    #[test]
+    fn old_memo_and_rdp_extra_round_trip_and_are_not_generated() {
+        let stale = "password 51:b:secret\r\naudiomode:i:2\r\nredirectclipboard:i:0";
+        let raw: Value = serde_json::from_str(
+            "{\"kind\":\"rdp\",\"path\":\"pc\",\"user\":\"ada\",\"memo\":\"vacation\",\"rdp_extra\":\"password 51:b:secret\\r\\naudiomode:i:2\\r\\nredirectclipboard:i:0\"}",
+        )
+        .expect("memo and rdp_extra stay legal");
+        let (item, file) = pull_item(raw.as_object().unwrap(), false);
+        let item = item.unwrap();
+        assert!(!file);
+        assert_eq!(item.kind, ItemKind::Rdp);
+        assert_eq!(item.memo, "vacation");
+        assert_eq!(item.rdp_extra, stale);
+        let mut round = Map::new();
+        push_item(&mut round, &item);
+        assert_eq!(round.get("memo").and_then(|v| v.as_str()), Some("vacation"));
+        assert_eq!(round.get("rdp_extra").and_then(|v| v.as_str()), Some(stale));
+
+        let mut draft = Draft::blank(ItemKind::Rdp);
+        draft.target = "pc:3389".into();
+        draft.user = "ada".into();
+        draft.memo = item.memo.clone();
+        draft.rdp_extra = item.rdp_extra.clone();
+        assert!(validate(&draft).is_ok());
+        let saved = item_from_draft(&draft, false).unwrap();
+        assert_eq!(saved.memo, "vacation");
+        assert_eq!(saved.rdp_extra, stale);
+        let text = rdp_text("pc:3389", "ada", RdpScreen::Full, false);
+        assert_eq!(
+            text,
+            concat!(
+                "full address:s:pc:3389\r\n",
+                "username:s:ada\r\n",
+                "screen mode id:i:2\r\n",
+                "prompt for credentials:i:0\r\n",
+                "authentication level:i:2\r\n",
+                "redirectclipboard:i:1\r\n",
+                "audiomode:i:0\r\n",
+            )
+        );
+        assert!(!text.contains("password 51:b:secret"));
+        assert!(!text.contains("audiomode:i:2"));
+        assert!(!text.contains("redirectclipboard:i:0"));
     }
 
     #[test]

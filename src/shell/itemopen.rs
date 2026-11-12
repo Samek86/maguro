@@ -63,14 +63,13 @@ unsafe fn open_rdp(owner: HWND, node: &FavNode) -> bool {
     let item = node.item.as_ref();
     let user = item.map(|i| i.user.as_str()).unwrap_or("");
     let screen = item.map(|i| i.screen).unwrap_or_default();
-    let extra = item.map(|i| i.rdp_extra.as_str()).unwrap_or("");
     let hold = cred_hold_secs(item.map(|i| i.cred_secs).unwrap_or(10));
     let mut secret = if item.is_some_and(|i| i.has_password) { read_secret(&store_target(host)) } else { None };
     if secret.as_ref().is_some_and(|s| s.is_empty()) {
         secret = None;
     }
     let will_plant = secret.is_some() && !user.is_empty();
-    let text = rdp_text(host, user, screen, extra, !will_plant);
+    let text = rdp_text(host, user, screen, !will_plant);
     let path = rdp_temp();
     if std::fs::write(&path, rdp_bytes(&text)).is_err() {
         wipe_opt(&mut secret);

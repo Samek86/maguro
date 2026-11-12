@@ -852,7 +852,6 @@ pub(crate) enum Key {
     KindCommand,
     KindUrl,
     KindRdp,
-    ItemMemo,
     ItemIcon,
     Automatic,
     IconCustom,
@@ -863,7 +862,6 @@ pub(crate) enum Key {
     ItemScreen,
     ScreenFull,
     CredentialDeleteSeconds,
-    RdpExtra,
     PasswordInCredentialManager,
     ClearSavedPassword,
     ShellPlace,
@@ -884,13 +882,12 @@ pub(crate) enum Key {
     SavedPassword,
     IconIndex,
     ItemAdd,
-    BadRdpExtra,
     BadIconIndex,
     CouldNotSavePassword,
     UpdateFailReason,
 }
 
-pub(crate) const KEY_COUNT: usize = 883;
+pub(crate) const KEY_COUNT: usize = 880;
 
 const _: () = assert!((Key::UpdateFailReason as usize) + 1 == KEY_COUNT);
 
@@ -1742,7 +1739,6 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Command",
     "URL",
     "RDP",
-    "Memo",
     "Icon",
     "Automatic",
     "Custom",
@@ -1753,7 +1749,6 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Screen",
     "Full screen",
     "Delete credentials after (seconds)",
-    "Extra",
     "The password is kept in Windows Credential Manager, not in the favourites file.",
     "Clear saved password",
     "Place",
@@ -1774,7 +1769,6 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "A password is saved for this host.",
     "Index",
     "Add",
-    "Extra settings cannot contain a password.",
     "The icon index must be from 0 to 1000.",
     "Could not save the password to Credential Manager.",
     "Reason: {reason}",
@@ -2629,7 +2623,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "kind_command",
     "kind_url",
     "kind_rdp",
-    "item_memo",
     "item_icon",
     "automatic",
     "icon_custom",
@@ -2640,7 +2633,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "item_screen",
     "screen_full",
     "credential_delete_seconds",
-    "rdp_extra",
     "password_in_credential_manager",
     "clear_saved_password",
     "shell_place",
@@ -2661,7 +2653,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "saved_password",
     "icon_index",
     "item_add",
-    "bad_rdp_extra",
     "bad_icon_index",
     "could_not_save_password",
     "update_fail_reason",

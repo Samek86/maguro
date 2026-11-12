@@ -1,6 +1,7 @@
-//! Add or edit a favourite. Kind, name, icon, and memo are shared.
+//! Add or edit a favourite. Kind, name, and icon are shared.
 //! Folder and file keep the path they have always stored. A password stays in the
 //! edit and in Credential Manager; the favourites file only records that one exists.
+//! An older memo or RDP extra block is kept on the leaf and written back. It is not shown.
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
@@ -30,8 +31,6 @@ const ID_WORK: i32 = 13;
 const ID_USER: i32 = 14;
 const ID_PASS: i32 = 15;
 const ID_CRED: i32 = 16;
-const ID_EXTRA: i32 = 17;
-const ID_MEMO: i32 = 18;
 const ID_ICON: i32 = 19;
 const ID_INDEX: i32 = 20;
 const ID_PLACE: i32 = 21;
@@ -66,9 +65,7 @@ pub(crate) enum Slot {
     Pass,
     Screen,
     Cred,
-    Extra,
     IconPath,
-    Memo,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +97,10 @@ struct Dlg {
     parent: Vec<usize>,
     /// Colour already stored on this leaf. The dialog does not show it or change it.
     color: Option<u32>,
+    /// Memo already stored on this leaf. The dialog does not show it or change it.
+    memo: String,
+    /// Extra `.rdp` lines already stored. The dialog does not show them, and launch does not apply them.
+    rdp_extra: String,
     screen: RdpScreen,
     admin: bool,
     custom_icon: bool,
@@ -107,7 +108,7 @@ struct Dlg {
     clear_password: bool,
     hot: i32,
     down: i32,
-    edits: [HWND; 11],
+    edits: [HWND; 9],
     place_combo: HWND,
     screen_combo: HWND,
 }
@@ -121,6 +122,8 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
         edit_id: Vec::new(),
         parent: parent.to_vec(),
         color: None,
+        memo: String::new(),
+        rdp_extra: String::new(),
         screen: RdpScreen::Auto,
         admin: false,
         custom_icon: false,
@@ -128,7 +131,7 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
         clear_password: false,
         hot: -1,
         down: -1,
-        edits: [HWND::default(); 11],
+        edits: [HWND::default(); 9],
         place_combo: HWND::default(),
         screen_combo: HWND::default(),
     };
@@ -143,6 +146,8 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
         dlg.edit_id = id.clone();
         dlg.kind = node.kind();
         dlg.color = node.item.as_ref().and_then(|i| i.color);
+        dlg.memo = node.item.as_ref().map(|i| i.memo.clone()).unwrap_or_default();
+        dlg.rdp_extra = node.item.as_ref().map(|i| i.rdp_extra.clone()).unwrap_or_default();
         dlg.screen = node.item.as_ref().map(|i| i.screen).unwrap_or(RdpScreen::Auto);
         dlg.admin = node.item.as_ref().is_some_and(|i| i.admin);
         dlg.custom_icon = node.item.as_ref().and_then(|i| i.icon.as_ref()).is_some();
@@ -181,8 +186,6 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
         (ID_USER, 0),
         (ID_PASS, 0x20),
         (ID_CRED, 0x2000),
-        (ID_EXTRA, 0x4 | 0x40 | 0x1000),
-        (ID_MEMO, 0x4 | 0x40 | 0x1000),
         (ID_ICON, 0),
         (ID_INDEX, 0x2000),
     ];
@@ -205,7 +208,7 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
         fill_edits(ptr, node);
     } else {
         _ = SetWindowTextW((*ptr).edits[6], w!("10"));
-        _ = SetWindowTextW((*ptr).edits[10], w!("0"));
+        _ = SetWindowTextW((*ptr).edits[8], w!("0"));
     }
     place_edits(hwnd);
     round_window(hwnd);
@@ -243,13 +246,11 @@ unsafe fn fill_edits(ptr: *mut Dlg, node: &crate::FavNode) {
     set_text((*ptr).edits[4], item.map(|i| i.user.as_str()).unwrap_or(""));
     let secs = item.map(|i| i.cred_secs).unwrap_or(10);
     set_text((*ptr).edits[6], &secs.to_string());
-    set_text((*ptr).edits[7], item.map(|i| i.rdp_extra.as_str()).unwrap_or(""));
-    set_text((*ptr).edits[8], item.map(|i| i.memo.as_str()).unwrap_or(""));
     if let Some(icon) = item.and_then(|i| i.icon.as_ref()) {
-        set_text((*ptr).edits[9], &icon.path);
-        set_text((*ptr).edits[10], &icon.index.to_string());
+        set_text((*ptr).edits[7], &icon.path);
+        set_text((*ptr).edits[8], &icon.index.to_string());
     } else {
-        set_text((*ptr).edits[10], "0");
+        set_text((*ptr).edits[8], "0");
     }
     sync_place((*ptr).place_combo, &text_of((*ptr).edits[1]));
     sync_screen((*ptr).screen_combo, (*ptr).screen);
@@ -300,42 +301,40 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     y = name.bottom + gap;
 
     let browse_w = s(128).max(s(BTN_MIN_W));
-    // One closure owns the row lists. 0 = field, 1 = field plus browse, 2 = button, 3 = tall field (`extra` is DIP).
+    // One closure owns the row lists. 0 = field, 1 = field plus browse, 2 = button.
     {
-        let mut add = |slot: Slot, y: &mut i32, how: u8, extra: i32| {
+        let mut add = |slot: Slot, y: &mut i32, how: u8| {
             let label = RECT { left: pad, top: *y, right, bottom: *y + lab };
             labels.push((slot, label));
             *y = label.bottom + gap4;
-            let h = if how == 3 { s(extra) } else { edit_h };
             if how == 1 {
-                let b = RECT { left: right - browse_w, top: *y, right, bottom: *y + h };
-                let f = RECT { left: pad, top: *y, right: b.left - gap, bottom: *y + h };
+                let b = RECT { left: right - browse_w, top: *y, right, bottom: *y + edit_h };
+                let f = RECT { left: pad, top: *y, right: b.left - gap, bottom: *y + edit_h };
                 slots.push((slot, f));
                 browse.push((slot, b));
             } else {
-                slots.push((slot, RECT { left: pad, top: *y, right, bottom: *y + h }));
+                slots.push((slot, RECT { left: pad, top: *y, right, bottom: *y + edit_h }));
             }
-            *y += h + gap;
+            *y += edit_h + gap;
         };
         match kind {
-            ItemKind::Folder | ItemKind::File => add(Slot::Target, &mut y, 1, 0),
+            ItemKind::Folder | ItemKind::File => add(Slot::Target, &mut y, 1),
             ItemKind::Special => {
-                add(Slot::Place, &mut y, 2, 0);
-                add(Slot::Target, &mut y, 0, 0);
+                add(Slot::Place, &mut y, 2);
+                add(Slot::Target, &mut y, 0);
             }
             ItemKind::Command => {
-                add(Slot::Target, &mut y, 1, 0);
-                add(Slot::Args, &mut y, 0, 0);
-                add(Slot::Work, &mut y, 1, 0);
+                add(Slot::Target, &mut y, 1);
+                add(Slot::Args, &mut y, 0);
+                add(Slot::Work, &mut y, 1);
             }
-            ItemKind::Url => add(Slot::Target, &mut y, 0, 0),
+            ItemKind::Url => add(Slot::Target, &mut y, 0),
             ItemKind::Rdp => {
-                add(Slot::Target, &mut y, 0, 0);
-                add(Slot::User, &mut y, 0, 0);
-                add(Slot::Pass, &mut y, 0, 0);
-                add(Slot::Screen, &mut y, 2, 0);
-                add(Slot::Cred, &mut y, 0, 0);
-                add(Slot::Extra, &mut y, 3, 52);
+                add(Slot::Target, &mut y, 0);
+                add(Slot::User, &mut y, 0);
+                add(Slot::Pass, &mut y, 0);
+                add(Slot::Screen, &mut y, 2);
+                add(Slot::Cred, &mut y, 0);
             }
         }
     }
@@ -381,13 +380,6 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     } else {
         RECT::default()
     };
-
-    let memo_lab = RECT { left: pad, top: y, right, bottom: y + lab };
-    labels.push((Slot::Memo, memo_lab));
-    y = memo_lab.bottom + gap4;
-    let memo = RECT { left: pad, top: y, right, bottom: y + s(72) };
-    slots.push((Slot::Memo, memo));
-    y = memo.bottom + gap;
 
     let bh = s(BTN_H_FOOTER);
     let bw = (inner - s(BTN_GAP)) / 2;
@@ -436,9 +428,7 @@ fn label_of(kind: ItemKind, slot: Slot) -> &'static str {
         Slot::Pass => tr(crate::Key::Password),
         Slot::Screen => tr(crate::Key::ItemScreen),
         Slot::Cred => tr(crate::Key::CredentialDeleteSeconds),
-        Slot::Extra => tr(crate::Key::RdpExtra),
         Slot::IconPath => tr(crate::Key::ItemIcon),
-        Slot::Memo => tr(crate::Key::ItemMemo),
     }
 }
 
@@ -451,9 +441,7 @@ fn slot_edit(slot: Slot) -> Option<usize> {
         Slot::User => 4,
         Slot::Pass => 5,
         Slot::Cred => 6,
-        Slot::Extra => 7,
-        Slot::Memo => 8,
-        Slot::IconPath => 9,
+        Slot::IconPath => 7,
         Slot::Place | Slot::Screen => return None,
     })
 }
@@ -490,10 +478,8 @@ unsafe fn place_edits(hwnd: HWND) {
     show(Slot::User);
     show(Slot::Pass);
     show(Slot::Cred);
-    show(Slot::Extra);
-    show(Slot::Memo);
     show(Slot::IconPath);
-    let index = (*v).edits[10];
+    let index = (*v).edits[8];
     if (*v).custom_icon && g.index.right > g.index.left {
         crate::place_edit(index, field_edit_rect(g.index, (*v).dpi), true);
     } else {
@@ -749,7 +735,7 @@ unsafe fn paint(h: HWND) {
             paint_field(dc, *r, dpi, focused);
         }
         if g.index.right > g.index.left && g.index.bottom > g.index.top {
-            paint_field(dc, g.index, dpi, focus == edits[10]);
+            paint_field(dc, g.index, dpi, focus == edits[8]);
         }
         for (_, r) in &g.browse {
             paint_button(dc, *r, ButtonKind::Secondary, visual_from_pointer(browse_hit(*r, &g), hot_id, down_id), tr(crate::Key::Browse), body, dpi, ground, FocusRing::Outside);
@@ -888,7 +874,7 @@ unsafe fn activate(h: HWND, id: i32) {
         }
         HIT_BROWSE_ICON => {
             if let Some(path) = pick_icon(h) {
-                set_text((*view(h).unwrap()).edits[9], &path);
+                set_text((*view(h).unwrap()).edits[7], &path);
             }
         }
         HIT_OK => commit(h),
@@ -1007,16 +993,17 @@ fn read_draft(v: *mut Dlg) -> Draft {
         d.password = text_of((*v).edits[5]);
         let cred = text_of((*v).edits[6]);
         d.cred_secs = cred.trim().parse().unwrap_or(10);
-        d.rdp_extra = text_of((*v).edits[7]);
-        d.memo = text_of((*v).edits[8]);
         d.admin = (*v).admin;
         d.clear_password = (*v).clear_password;
-        // An older file may already have a colour. Editing another field must write it back.
+        // An older file may already have a colour, a memo, or RDP extra lines.
+        // Editing another field writes them back. The dialog does not show them.
         d.color = (*v).color;
+        d.memo = (*v).memo.clone();
+        d.rdp_extra = (*v).rdp_extra.clone();
         d.screen = (*v).screen;
         if (*v).custom_icon {
-            let path = text_of((*v).edits[9]);
-            let index = text_of((*v).edits[10]).trim().parse().unwrap_or(0);
+            let path = text_of((*v).edits[7]);
+            let index = text_of((*v).edits[8]).trim().parse().unwrap_or(0);
             d.icon = Some(ItemIcon { path, index });
         }
         d
@@ -1193,6 +1180,9 @@ mod tests {
                         assert_eq!(g.icon_auto.top, g.icon_custom.top);
                         assert!(g.icon_auto.right <= g.icon_custom.left);
                         assert!(g.name.right >= width - 16 * dpi / 96);
+                        for (_, r) in &g.slots {
+                            assert_eq!(r.bottom - r.top, px(dpi, FIELD_H), "{kind:?} {dpi} tall memo or extra");
+                        }
                         let next = g.labels.iter().map(|(_, r)| r.top).filter(|top| *top >= g.name.bottom).min().unwrap();
                         assert_eq!(next, g.name.bottom + px(dpi, SPACE_8), "colour row is gone");
                         if custom {
@@ -1239,7 +1229,11 @@ mod tests {
         assert!(has(&rdp, Slot::Pass));
         assert!(has(&rdp, Slot::Screen));
         assert!(has(&rdp, Slot::Cred));
-        assert!(has(&rdp, Slot::Extra));
+        assert_eq!(
+            rdp.slots.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec![Slot::Name, Slot::Target, Slot::User, Slot::Pass, Slot::Screen, Slot::Cred],
+            "memo and RDP extra are not slots"
+        );
         assert!(rdp.note.bottom > rdp.note.top);
         assert!(rdp.clear_pass.bottom > rdp.clear_pass.top);
         assert!(rdp.admin.bottom == 0);
