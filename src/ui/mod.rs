@@ -10,6 +10,7 @@ mod favpanel;
 mod hovertip;
 mod favpop;
 mod itemdlg;
+mod iconpick;
 mod srvdlg;
 mod keys;
 mod ficons;
