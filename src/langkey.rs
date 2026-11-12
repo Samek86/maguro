@@ -830,6 +830,7 @@ pub(crate) enum Key {
     OpenInTerminalAdministrator,
     FavMgrHint,
     FavExpandAll,
+    FavCollapseAll,
     FavManage,
     FavMoveUp,
     FavMoveDown,
@@ -845,7 +846,7 @@ pub(crate) enum Key {
     RestoreDefaultsNone,
 }
 
-pub(crate) const KEY_COUNT: usize = 838;
+pub(crate) const KEY_COUNT: usize = 839;
 
 const _: () = assert!((Key::RestoreDefaultsNone as usize) + 1 == KEY_COUNT);
 
@@ -1674,6 +1675,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Open in Terminal (Administrator)",
     "Add a folder or a group from the toolbar. Removing a row leaves the original folder in place.",
     "Expand all",
+    "Collapse all",
     "Manage favourites\u{2026}",
     "Move up",
     "Move down",
@@ -2516,6 +2518,7 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "open_in_terminal_administrator",
     "fav_mgr_hint",
     "fav_expand_all",
+    "fav_collapse_all",
     "fav_manage",
     "fav_move_up",
     "fav_move_down",
