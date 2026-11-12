@@ -758,6 +758,7 @@ unsafe fn toggle_home(kind: RowKind) {
 
 unsafe fn delete_id(id: &[usize]) {
     let links = crate::servers_at(id);
+    let hosts = crate::fav_rdp_hosts(id);
     app(|a| {
         a.s.ensure_fav_tree();
         delete_at(&mut a.s.tree, id);
@@ -765,6 +766,7 @@ unsafe fn delete_id(id: &[usize]) {
         a.fav_hot = None;
     });
     crate::release_servers(links);
+    crate::forget_hosts(&hosts);
     ST.with(|s| {
         let mut st = s.borrow_mut();
         if st.sel.as_ref().is_some_and(|s| s.kind == RowKind::Tree && s.id.starts_with(id)) {
@@ -882,7 +884,7 @@ unsafe fn run_act(h: HWND, id: Act) {
     pop_tip_leave(h);
     button_tip(h, None, RECT::default());
     match id {
-        Act::Add => add_folder(h),
+        Act::Add => add_menu(h),
         Act::Group => on_add_group(h),
         Act::Up => nudge_sel(false),
         Act::Down => nudge_sel(true),
@@ -893,6 +895,63 @@ unsafe fn run_act(h: HWND, id: Act) {
             set_every_group(open);
         }
         Act::Close => close_fav_manager(),
+    }
+}
+
+/// The toolbar add button keeps the folder picker and also opens the item dialog.
+unsafe fn add_menu(owner: HWND) {
+    let Ok(menu) = CreatePopupMenu() else { return };
+    _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from(tr(crate::Key::AddFolder)));
+    _ = AppendMenuW(menu, MF_STRING, 2, &HSTRING::from(tr(crate::Key::AddItem)));
+    let lay = client_lay(owner);
+    let mut pt = POINT { x: lay.icons[0].left, y: lay.icons[0].bottom };
+    let _ = ClientToScreen(owner, &mut pt);
+    let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, None, owner, None).0;
+    _ = DestroyMenu(menu);
+    match cmd {
+        1 => add_folder(owner),
+        2 => {
+            bind_owner();
+            let parent = group_parent(&shown());
+            crate::open_item_dialog(owner, &parent, None);
+        }
+        _ => {}
+    }
+}
+
+unsafe fn row_menu(h: HWND, x: i32, y: i32) {
+    let lay = client_lay(h);
+    if inside(lay.search, x, y) || inside(lay.edit, x, y) {
+        return;
+    }
+    let hit = hit_row(h, x, y);
+    let leaf = hit.as_ref().filter(|hit| hit.row.in_tree() && !hit.row.group && fav_row_editable(&hit.row));
+    let server = leaf.is_some_and(|hit| app(|a| node_ref(&a.s.tree, &hit.row.id).is_some_and(|n| n.server.is_some())));
+    let Ok(menu) = CreatePopupMenu() else { return };
+    _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from(tr(crate::Key::AddItem)));
+    if leaf.is_some() && !server {
+        _ = AppendMenuW(menu, MF_STRING, 2, &HSTRING::from(tr(crate::Key::EditItem)));
+    }
+    let mut pt = POINT { x, y };
+    let _ = ClientToScreen(h, &mut pt);
+    let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, None, h, None).0;
+    _ = DestroyMenu(menu);
+    bind_owner();
+    match cmd {
+        1 => {
+            let parent = if let Some(hit) = hit.as_ref().filter(|hit| hit.row.in_tree()) {
+                if hit.row.group { hit.row.id.clone() } else { hit.row.id[..hit.row.id.len().saturating_sub(1)].to_vec() }
+            } else {
+                group_parent(&shown())
+            };
+            crate::open_item_dialog(h, &parent, None);
+        }
+        2 => {
+            if let Some(hit) = leaf {
+                crate::open_item_dialog(h, &[], Some(&hit.row.id));
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1404,6 +1463,13 @@ fn fav_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if changed {
                     let _ = InvalidateRect(Some(h), None, false);
                 }
+            }
+            WM_CONTEXTMENU => {
+                let mut pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
+                if pt.x != -1 || pt.y != -1 {
+                    let _ = ScreenToClient(h, &mut pt);
+                }
+                row_menu(h, pt.x, pt.y);
             }
             WM_LBUTTONUP => {
                 let x = (lp.0 & 0xffff) as i16 as i32;

@@ -209,6 +209,7 @@ unsafe fn remove_row(row: &FavRow) {
     match row.kind {
         RowKind::Tree => {
             let links = if row.id.is_empty() { app(|a| server_by_path(&a.s.tree, &row.path).into_iter().collect()) } else { servers_at(&row.id) };
+            let hosts = if row.id.is_empty() { Vec::new() } else { fav_rdp_hosts(&row.id) };
             app(|a| {
                 a.s.ensure_fav_tree();
                 if row.id.is_empty() || !delete_at(&mut a.s.tree, &row.id) {
@@ -217,6 +218,7 @@ unsafe fn remove_row(row: &FavRow) {
                 a.s.sync_favs();
             });
             release_servers(links);
+            forget_hosts(&hosts);
             commit_favs();
         }
         RowKind::Pins | RowKind::Files => {

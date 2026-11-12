@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use super::favitem::{self, Draft, FavItem, ItemKind};
 use super::{fav_path, short_name, Session};
 
 /// A saved server. The password is never a field: it lives in Credential Manager.
@@ -28,23 +29,30 @@ pub(crate) struct FavNode {
     pub(crate) children: Vec<FavNode>,
     /// Set on a server favourite. Absent on every older leaf.
     pub(crate) server: Option<ServerLink>,
+    /// Colour, icon, memo, or a kind other than a plain folder or file. Absent on older leaves.
+    pub(crate) item: Option<FavItem>,
 }
 
 impl FavNode {
     pub(crate) fn group(name: &str) -> Self {
-        FavNode { name: name.to_string(), path: String::new(), file: false, open: true, children: Vec::new(), server: None }
+        FavNode { name: name.to_string(), path: String::new(), file: false, open: true, children: Vec::new(), server: None, item: None }
     }
 
     pub(crate) fn leaf(path: &str, name: &str, file: bool) -> Self {
-        FavNode { name: name.to_string(), path: path.to_string(), file, open: false, children: Vec::new(), server: None }
+        FavNode { name: name.to_string(), path: path.to_string(), file, open: false, children: Vec::new(), server: None, item: None }
     }
 
     pub(crate) fn server_leaf(name: &str, path: &str, link: ServerLink) -> Self {
-        FavNode { name: name.to_string(), path: path.to_string(), file: false, open: false, children: Vec::new(), server: Some(link) }
+        FavNode { name: name.to_string(), path: path.to_string(), file: false, open: false, children: Vec::new(), server: Some(link), item: None }
     }
 
+    /// A group has no path and is not a command, link, or remote desktop item.
     pub(crate) fn is_group(&self) -> bool {
-        self.path.is_empty()
+        self.path.is_empty() && !self.item.as_ref().is_some_and(|i| i.kind.launches())
+    }
+
+    pub(crate) fn kind(&self) -> ItemKind {
+        self.item.as_ref().map(|i| i.kind).unwrap_or(if self.file { ItemKind::File } else { ItemKind::Folder })
     }
 }
 
@@ -528,6 +536,10 @@ pub(crate) fn flat_favs(tree: &[FavNode]) -> Vec<String> {
                 walk(&n.children, out);
                 continue;
             }
+            // Command, URL, and RDP leaves stay in the tree. The flat list is folder and file paths.
+            if !n.kind().navigable() {
+                continue;
+            }
             let custom = !n.name.is_empty() && n.name != short_name(&n.path);
             if custom {
                 out.push(format!("{}\t{}", n.path, n.name));
@@ -582,7 +594,7 @@ pub(crate) fn contains_path(tree: &[FavNode], path: &str) -> bool {
         return false;
     }
     tree.iter().any(|n| {
-        (!n.path.is_empty() && n.path.eq_ignore_ascii_case(path)) || (n.is_group() && contains_path(&n.children, path))
+        (!n.path.is_empty() && n.kind().navigable() && n.path.eq_ignore_ascii_case(path)) || (n.is_group() && contains_path(&n.children, path))
     })
 }
 
@@ -599,7 +611,7 @@ pub(crate) fn add_item(tree: &mut Vec<FavNode>, path: &str, file: bool) -> bool 
 pub(crate) fn remove_path(tree: &mut Vec<FavNode>, path: &str) -> bool {
     fn rec(nodes: &mut Vec<FavNode>, path: &str) -> bool {
         let before = nodes.len();
-        nodes.retain(|n| n.path.is_empty() || !n.path.eq_ignore_ascii_case(path));
+        nodes.retain(|n| n.path.is_empty() || !n.kind().navigable() || !n.path.eq_ignore_ascii_case(path));
         let mut hit = nodes.len() != before;
         for n in nodes.iter_mut() {
             if n.is_group() && rec(&mut n.children, path) {
@@ -785,7 +797,7 @@ pub(crate) fn path_clash(tree: &[FavNode], skip: &[usize], path: &str) -> bool {
 }
 
 pub(crate) fn append_node(tree: &mut Vec<FavNode>, parent: &[usize], node: FavNode) -> bool {
-    if node.path.is_empty() || contains_path(tree, &node.path) {
+    if node.path.is_empty() || (node.kind().navigable() && contains_path(tree, &node.path)) {
         return false;
     }
     insert_child(tree, parent, usize::MAX, node).is_some()
@@ -804,6 +816,59 @@ pub(crate) fn write_server(tree: &mut [FavNode], id: &[usize], name: String, pat
     n.file = false;
     n.server = Some(link);
     true
+}
+
+/// Replace a leaf's name, path, and item fields. A group is left alone. The server link stays.
+pub(crate) fn write_leaf(tree: &mut [FavNode], id: &[usize], node: FavNode) -> bool {
+    if id.is_empty() || node.path.is_empty() {
+        return false;
+    }
+    if node.kind().navigable() && path_clash(tree, id, &node.path) {
+        return false;
+    }
+    let Some(n) = node_mut(tree, id) else { return false };
+    if n.is_group() {
+        return false;
+    }
+    n.name = node.name;
+    n.path = node.path;
+    n.file = node.file;
+    n.item = node.item;
+    true
+}
+
+pub(crate) fn node_from_draft(d: &Draft, has_password: bool) -> FavNode {
+    let mut n = FavNode::leaf(d.target.trim(), d.name.trim(), d.kind == ItemKind::File);
+    n.item = favitem::item_from_draft(d, has_password);
+    if d.kind.launches() {
+        n.file = false;
+    }
+    n
+}
+
+/// RDP hosts on this node, including every RDP item inside a group, that keep a credential flag.
+pub(crate) fn rdp_hosts_in(n: &FavNode) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(n: &FavNode, out: &mut Vec<String>) {
+        if let Some(host) = favitem::rdp_host_of(n.item.as_ref(), &n.path) {
+            out.push(host);
+        }
+        for c in &n.children {
+            walk(c, out);
+        }
+    }
+    walk(n, &mut out);
+    out
+}
+
+pub(crate) fn rdp_host_used(tree: &[FavNode], host: &str) -> bool {
+    fn walk(nodes: &[FavNode], host: &str) -> bool {
+        nodes.iter().any(|n| {
+            n.item.as_ref().is_some_and(|i| i.kind == ItemKind::Rdp && i.has_password && favitem::same_rdp_host(&n.path, host))
+                || walk(&n.children, host)
+        })
+    }
+    walk(tree, host)
 }
 
 pub(crate) fn set_open(tree: &mut Vec<FavNode>, id: &[usize], open: bool) {
@@ -1039,6 +1104,9 @@ fn node_value(n: &FavNode) -> Value {
     if let Some(s) = &n.server {
         m.insert("server".into(), server_value(s));
     }
+    if let Some(item) = &n.item {
+        favitem::push_item(&mut m, item);
+    }
     Value::Object(m)
 }
 
@@ -1094,7 +1162,9 @@ fn node_from_value(v: &Value) -> Option<FavNode> {
     let open = if path.is_empty() { o.get("open").and_then(|x| x.as_bool()).unwrap_or(true) } else { false };
     // A password key in an old or hand-edited file is ignored and not written back.
     let server = o.get("server").and_then(server_from);
-    Some(FavNode { name, path: path.clone(), file: file && !path.is_empty(), open, children, server })
+    let (item, file) = favitem::pull_item(o, file && !path.is_empty());
+    let file = file && (!path.is_empty() || item.as_ref().is_some_and(|i| i.kind.launches()));
+    Some(FavNode { name, path: path.clone(), file, open, children, server, item })
 }
 
 impl Session {
@@ -1215,6 +1285,7 @@ fn adjust(path: &[usize], removed: &[usize]) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{Draft, ItemKind};
 
     fn work() -> Vec<FavNode> {
         tree_from_flat(&["C:\\WORK\tWork".into(), "D:\\Photos".into()])
@@ -1370,6 +1441,73 @@ mod tests {
         assert_eq!(again.server, node.server);
     }
 
+    #[test]
+    fn old_favourites_round_trip_without_new_keys() {
+        let old = json!({"name": "Desk", "path": r"C:\WORK"});
+        let node = node_from_value(&old).unwrap();
+        assert!(node.item.is_none());
+        assert!(!node.file);
+        assert_eq!(node.kind(), ItemKind::Folder);
+        let stored = node_value(&node);
+        assert!(stored.get("kind").is_none());
+        assert!(stored.get("memo").is_none());
+        assert!(stored.get("has_password").is_none());
+        assert_eq!(stored.get("path").and_then(|v| v.as_str()), Some(r"C:\WORK"));
+        let file = node_from_value(&json!({"path": r"C:\a\note.txt", "name": "note", "file": true})).unwrap();
+        assert!(file.file);
+        assert!(file.item.is_none());
+        assert!(!node_value(&file).to_string().contains("kind"));
+        let group = node_from_value(&json!({"name": "Jobs", "children": [{"path": r"C:\a"}]})).unwrap();
+        assert!(group.is_group());
+        assert!(group.children[0].item.is_none());
+        assert_eq!(node_from_value(&node_value(&group)).unwrap(), group);
+    }
+
+    #[test]
+    fn new_kinds_round_trip_and_a_password_is_not_stored() {
+        let leaked = json!({
+            "name": "Office",
+            "kind": "rdp",
+            "path": "pc:3389",
+            "user": "ada",
+            "screen": "full",
+            "cred_delete": 15,
+            "has_password": true,
+            "password": "s3cret-pl4in",
+            "memo": "desk"
+        });
+        let node = node_from_value(&leaked).unwrap();
+        assert_eq!(node.kind(), ItemKind::Rdp);
+        assert!(!node.file);
+        assert!(!node.is_group());
+        assert!(node.item.as_ref().unwrap().has_password);
+        let stored = node_value(&node).to_string();
+        assert!(stored.contains("\"kind\":\"rdp\"") || stored.contains("\"kind\": \"rdp\""));
+        assert!(stored.contains("has_password"));
+        assert!(!stored.contains("s3cret-pl4in"));
+        assert!(!stored.contains("\"password\""));
+        let again = node_from_value(&node_value(&node)).unwrap();
+        assert_eq!(again.item, node.item);
+        assert_eq!(again.path, "pc:3389");
+
+        let mut tree = vec![node.clone()];
+        assert!(!contains_path(&tree, "pc:3389"));
+        assert!(flat_favs(&tree).is_empty());
+        assert!(append_node(&mut tree, &[], FavNode::leaf(r"C:\Work", "Work", false)));
+        assert!(contains_path(&tree, r"C:\Work"));
+        let cmd = node_from_draft(&{
+            let mut d = Draft::blank(ItemKind::Command);
+            d.name = "Build".into();
+            d.target = r"C:\Tools\build.bat".into();
+            d.args = "--release".into();
+            d.admin = true;
+            d
+        }, false);
+        assert!(append_node(&mut tree, &[], cmd));
+        assert_eq!(tree.last().unwrap().kind(), ItemKind::Command);
+        assert!(!flat_favs(&tree).iter().any(|f| f.contains("build.bat")));
+    }
+
     fn jobs_and_desk() -> Vec<FavNode> {
         vec![
             FavNode {
@@ -1379,6 +1517,7 @@ mod tests {
                 open: true,
                 children: vec![FavNode::leaf(r"C:\a", "a", false), FavNode::leaf(r"C:\b", "b", false)],
                 server: None,
+                item: None,
             },
             FavNode {
                 name: "Desk".into(),
@@ -1387,6 +1526,7 @@ mod tests {
                 open: true,
                 children: vec![FavNode::leaf(r"C:\c", "c", false), FavNode::leaf(r"C:\d", "d", true)],
                 server: None,
+                item: None,
             },
         ]
     }
