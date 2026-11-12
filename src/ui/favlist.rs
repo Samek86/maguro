@@ -1,13 +1,14 @@
 // Favourites list shared by the settings page and the favourites window.
 // Filtering and row geometry are pure. Painting matches the settings table:
 // indented name, shell icon, path, rename and delete.
+// A group uses the left panel's accent glyph instead of that shell folder icon.
 // The favourites window also shows Explorer pins above the tree.
 
 use crate::imports::*;
 use crate::i18n::tr;
 use crate::session::{home_rows, short_name, tree_rows, visible_rows, FavNode, FavRow, Pinned, RowKind};
 
-use super::{draw_fav_icon, ellipse, fill, indexed_icon, known_missing, pal, shell_icon, text};
+use super::{draw_fav_icon, ellipse, fill, indexed_icon, known_missing, on_color, pal, shell_icon, text};
 
 fn px(dpi: i32, v: i32) -> i32 {
     v * dpi / 96
@@ -132,6 +133,95 @@ fn filter_popup_rows(rows: &[FavRow], q: &str) -> Vec<FavRow> {
         }
     }
     rows.iter().zip(on).filter(|(_, keep)| *keep).map(|(row, _)| row.clone()).collect()
+}
+
+/// Footer link on the favourites window. Collapse only when every collapsible group is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExpandToggle {
+    Expand,
+    Collapse,
+}
+
+/// A group counts when another row sits under it. An empty group does not, and neither does
+/// a list with no groups: the link stays on Expand.
+pub(crate) fn expand_toggle(rows: &[FavRow]) -> ExpandToggle {
+    if groups_all_expanded(rows) {
+        ExpandToggle::Collapse
+    } else {
+        ExpandToggle::Expand
+    }
+}
+
+pub(crate) fn expand_toggle_key(which: ExpandToggle) -> crate::Key {
+    match which {
+        ExpandToggle::Collapse => crate::Key::FavCollapseAll,
+        ExpandToggle::Expand => crate::Key::FavExpandAll,
+    }
+}
+
+/// Rows that decide the link. An empty query keeps children of a collapsed group, so a closed
+/// group with children is not mistaken for an empty one. A query uses the rows on screen.
+pub(crate) fn expand_scope_rows(
+    tree: &[FavNode],
+    pins_open: bool,
+    pins: &[Pinned],
+    pins_label: &str,
+    files_open: bool,
+    files: &[Pinned],
+    files_label: &str,
+    q: &str,
+) -> Vec<FavRow> {
+    let q = q.trim();
+    if q.is_empty() {
+        let mut rows = home_rows(pins_open, pins, pins_label, files_open, files, files_label, true);
+        rows.extend(tree_rows(tree));
+        rows
+    } else {
+        popup_rows(tree, pins_open, pins, pins_label, files_open, files, files_label, q)
+    }
+}
+
+fn groups_all_expanded(rows: &[FavRow]) -> bool {
+    let mut any = false;
+    for group in rows.iter().filter(|row| row.group) {
+        if !rows.iter().any(|other| row_is_under(group, other)) {
+            continue;
+        }
+        any = true;
+        if !group.open {
+            return false;
+        }
+    }
+    any
+}
+
+/// Tree: a longer id with the group's prefix. Pins and files: the one header's leaves.
+fn row_is_under(group: &FavRow, other: &FavRow) -> bool {
+    if other.kind != group.kind || other.id == group.id {
+        return false;
+    }
+    match group.kind {
+        RowKind::Tree => other.id.len() > group.id.len() && other.id.starts_with(&group.id),
+        RowKind::Pins | RowKind::Files => !other.group,
+    }
+}
+
+/// Segoe MDL2 folder mark the left panel paints on a favourite group.
+/// Folder rows keep the shell icon, so this glyph is what tells a group apart.
+pub(crate) const FAV_GROUP_GLYPH: &str = "\u{E8B7}";
+
+/// Accent on the ordinary row. A solid accent fill (selected or drop-into on the left panel)
+/// flips to the contrasting ink. The favourites window's selection is a mist, so it stays accent.
+pub(crate) fn fav_group_icon_ink(accent: u32, on_accent_fill: bool) -> u32 {
+    if on_accent_fill {
+        on_color(accent)
+    } else {
+        accent
+    }
+}
+
+pub(crate) unsafe fn paint_fav_group_icon(dc: HDC, rect: RECT, font: HFONT, ink: u32) {
+    text(dc, rect, FAV_GROUP_GLYPH, font, ink, DT_CENTER);
 }
 
 pub(crate) fn fav_head_h(dpi: i32) -> i32 {
@@ -317,24 +407,30 @@ pub(crate) unsafe fn paint_fav_row(dc: HDC, row: Option<&FavRow>, r: RECT, dpi: 
         icon_left = chev.right;
     }
     let icon = RECT { left: icon_left, right: icon_left + icon_w, ..r };
-    let iy = r.top + (r.bottom - r.top - slot).max(0) / 2;
-    let ix = icon.left + (icon_w - slot).max(0) / 2;
-    let drawn = if icon_index >= 0 {
-        if let Some(hicon) = indexed_icon(&shell_path, icon_index) {
-            let _ = DrawIconEx(dc, ix, iy, hicon, slot, slot, 0, None, DI_NORMAL);
-            true
+    if row.group {
+        // The left panel's group glyph. A shell folder here matched the folder rows.
+        // The row wash is a mist, not a solid accent, so the glyph keeps the accent in both themes.
+        paint_fav_group_icon(dc, icon, icon_font, fav_group_icon_ink(crate::live_accent(), false));
+    } else {
+        let iy = r.top + (r.bottom - r.top - slot).max(0) / 2;
+        let ix = icon.left + (icon_w - slot).max(0) / 2;
+        let drawn = if icon_index >= 0 {
+            if let Some(hicon) = indexed_icon(&shell_path, icon_index) {
+                let _ = DrawIconEx(dc, ix, iy, hicon, slot, slot, 0, None, DI_NORMAL);
+                true
+            } else {
+                false
+            }
         } else {
             false
-        }
-    } else {
-        false
-    };
-    if !drawn {
-        if let Some((list, index, dim)) = shell_icon(&shell_path, shell_file) {
-            draw_fav_icon(dc, list, index, ix, iy, slot, dim);
-        } else {
-            let glyph = if shell_file { "\u{E8A5}" } else { "\u{E8B7}" };
-            text(dc, icon, glyph, icon_font, pal().sub, DT_CENTER);
+        };
+        if !drawn {
+            if let Some((list, index, dim)) = shell_icon(&shell_path, shell_file) {
+                draw_fav_icon(dc, list, index, ix, iy, slot, dim);
+            } else {
+                let glyph = if shell_file { "\u{E8A5}" } else { "\u{E8B7}" };
+                text(dc, icon, glyph, icon_font, pal().sub, DT_CENTER);
+            }
         }
     }
     let mut name_r = RECT { left: icon.right + s(4), right: name_right.max(icon.right + s(4)), ..r };
@@ -583,5 +679,73 @@ mod tests {
         let home = listed(&tree, &pins, &files, true, true, "HOME");
         assert_eq!(names(&home), vec!["Home"]);
         assert!(home[0].in_tree() && home[0].id == vec![1]);
+    }
+
+    fn scope(tree: &[FavNode], pins: &[Pinned], files: &[Pinned], pins_open: bool, files_open: bool, q: &str) -> Vec<FavRow> {
+        expand_scope_rows(tree, pins_open, pins, "Explorer pins", files_open, files, "Explorer favourite files", q)
+    }
+
+    #[test]
+    fn all_expanded_groups_collapse_and_a_mix_expands() {
+        assert_eq!(expand_toggle(&[]), ExpandToggle::Expand);
+        assert_eq!(expand_toggle_key(ExpandToggle::Expand), crate::Key::FavExpandAll);
+        assert_eq!(expand_toggle_key(ExpandToggle::Collapse), crate::Key::FavCollapseAll);
+        assert_eq!(crate::langkey::EN[crate::Key::FavCollapseAll as usize], "Collapse all");
+
+        let mut tree = vec![FavNode::group("Work"), FavNode::group("Home")];
+        tree[0].children.push(FavNode::leaf(r"C:\work\notes.txt", "notes", true));
+        tree[1].children.push(FavNode::leaf(r"C:\home", "photo", false));
+        let pins = vec![pin(r"D:\z", "Zed")];
+        let files = vec![pin(r"C:\file.txt", "note")];
+
+        // Both tree groups open, and both Explorer sections open.
+        assert_eq!(expand_toggle(&scope(&tree, &pins, &files, true, true, "")), ExpandToggle::Collapse);
+        // One tree group shut.
+        tree[1].open = false;
+        assert_eq!(expand_toggle(&scope(&tree, &pins, &files, true, true, "")), ExpandToggle::Expand);
+        tree[1].open = true;
+        // Pins section shut, even though its children are hidden in the window.
+        assert_eq!(expand_toggle(&scope(&tree, &pins, &files, false, true, "")), ExpandToggle::Expand);
+        assert!(scope(&tree, &pins, &[], false, true, "").iter().any(|r| r.kind == RowKind::Pins && !r.group));
+        // Files section shut.
+        assert_eq!(expand_toggle(&scope(&tree, &pins, &files, true, false, "")), ExpandToggle::Expand);
+
+        // An empty group does not count. A closed empty group beside an open group stays Collapse.
+        let mut empty = vec![FavNode::group("Box"), FavNode::group("Work")];
+        empty[0].open = false;
+        empty[1].children.push(FavNode::leaf(r"C:\work", "notes", false));
+        assert_eq!(expand_toggle(&scope(&empty, &[], &[], true, true, "")), ExpandToggle::Collapse);
+        // No collapsible group at all.
+        let lone = vec![FavNode::leaf(r"C:\home", "Home", false)];
+        assert_eq!(expand_toggle(&scope(&lone, &[], &[], false, false, "")), ExpandToggle::Expand);
+        let bare = vec![FavNode::group("Box")];
+        assert_eq!(expand_toggle(&scope(&bare, &[], &[], true, true, "")), ExpandToggle::Expand);
+
+        // A nested group that is shut keeps the link on Expand, even under an open parent.
+        let mut nested = vec![FavNode::group("Work")];
+        let mut sub = FavNode::group("Sub");
+        sub.open = false;
+        sub.children.push(FavNode::leaf(r"C:\a", "a", false));
+        nested[0].children.push(sub);
+        assert_eq!(expand_toggle(&scope(&nested, &[], &[], true, true, "")), ExpandToggle::Expand);
+        nested[0].children[0].open = true;
+        assert_eq!(expand_toggle(&scope(&nested, &[], &[], true, true, "")), ExpandToggle::Collapse);
+
+        // A search only counts groups it still shows.
+        tree[0].open = true;
+        tree[1].open = false;
+        assert_eq!(expand_toggle(&scope(&tree, &pins, &files, true, true, "notes.txt")), ExpandToggle::Collapse);
+        assert_eq!(expand_toggle(&scope(&tree, &pins, &files, true, true, "photo")), ExpandToggle::Expand);
+        assert_eq!(expand_toggle(&scope(&tree, &pins, &files, true, true, "")), ExpandToggle::Expand);
+        assert_eq!(expand_toggle(&scope(&tree, &pins, &files, true, true, "없는")), ExpandToggle::Expand);
+    }
+
+    #[test]
+    fn group_icon_keeps_the_panel_glyph_and_flips_only_on_a_solid_accent() {
+        assert_eq!(FAV_GROUP_GLYPH, "\u{E8B7}");
+        let accent = 0x0A9BD6;
+        assert_eq!(fav_group_icon_ink(accent, false), accent);
+        assert_eq!(fav_group_icon_ink(accent, true), on_color(accent));
+        assert_ne!(fav_group_icon_ink(accent, true), accent);
     }
 }

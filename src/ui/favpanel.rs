@@ -686,8 +686,9 @@ pub(crate) unsafe fn paint_side(h: HWND) {
                 text(dc, chev, if f.open { "\u{E70D}" } else { "\u{E76C}" }, icon, pal().sub, DT_CENTER);
                 x += s(16);
                 let ir = RECT { left: x, top: y, right: x + s(18), bottom: y + rh };
-                let glyph_ink = if sel == Some(i) || into { on_color(accent) } else { accent };
-                text(dc, ir, "\u{E8B7}", icon, glyph_ink, DT_CENTER);
+                // Selected and drop-into fills are mostly accent, so the glyph flips. Same glyph as the list.
+                let glyph_ink = fav_group_icon_ink(accent, sel == Some(i) || into);
+                paint_fav_group_icon(dc, ir, icon, glyph_ink);
                 label_left = ir.right + s(4);
             } else {
                 let slot = (16 * dpi / 96).max(1);

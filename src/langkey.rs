@@ -830,6 +830,7 @@ pub(crate) enum Key {
     OpenInTerminalAdministrator,
     FavMgrHint,
     FavExpandAll,
+    FavCollapseAll,
     FavManage,
     FavMoveUp,
     FavMoveDown,
@@ -887,11 +888,12 @@ pub(crate) enum Key {
     BadRdpExtra,
     BadIconIndex,
     CouldNotSavePassword,
+    UpdateFailReason,
 }
 
-pub(crate) const KEY_COUNT: usize = 882;
+pub(crate) const KEY_COUNT: usize = 884;
 
-const _: () = assert!((Key::CouldNotSavePassword as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::UpdateFailReason as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1718,6 +1720,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Open in Terminal (Administrator)",
     "Add a folder or a group from the toolbar. Removing a row leaves the original folder in place.",
     "Expand all",
+    "Collapse all",
     "Manage favourites\u{2026}",
     "Move up",
     "Move down",
@@ -1776,6 +1779,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Extra settings cannot contain a password.",
     "The icon index must be from 0 to 1000.",
     "Could not save the password to Credential Manager.",
+    "Reason: {reason}",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2604,6 +2608,7 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "open_in_terminal_administrator",
     "fav_mgr_hint",
     "fav_expand_all",
+    "fav_collapse_all",
     "fav_manage",
     "fav_move_up",
     "fav_move_down",
@@ -2662,4 +2667,5 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "bad_rdp_extra",
     "bad_icon_index",
     "could_not_save_password",
+    "update_fail_reason",
 ];

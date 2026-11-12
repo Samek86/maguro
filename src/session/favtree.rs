@@ -892,6 +892,19 @@ pub(crate) fn expand_all(tree: &mut [FavNode]) {
     walk(tree);
 }
 
+/// Close every group, including groups nested inside a collapsed parent.
+pub(crate) fn collapse_all(tree: &mut [FavNode]) {
+    fn walk(nodes: &mut [FavNode]) {
+        for n in nodes.iter_mut() {
+            if n.is_group() {
+                n.open = false;
+                walk(&mut n.children);
+            }
+        }
+    }
+    walk(tree);
+}
+
 pub(crate) fn toggle_open(tree: &mut Vec<FavNode>, id: &[usize]) -> bool {
     let Some(n) = node_mut(tree, id) else { return false };
     if !n.is_group() {
@@ -1377,6 +1390,18 @@ mod tests {
         expand_all(&mut tree);
         assert!(tree[0].open);
         assert_eq!(visible_rows(&tree).len(), 2);
+        collapse_all(&mut tree);
+        assert!(!tree[0].open);
+        assert_eq!(visible_rows(&tree).len(), 1, "closing every group hides the child again");
+        expand_all(&mut tree);
+        let mut nested = vec![FavNode::group("Work")];
+        let mut sub = FavNode::group("Sub");
+        sub.children.push(FavNode::leaf(r"C:\a", "a", false));
+        nested[0].children.push(sub);
+        collapse_all(&mut nested);
+        assert!(!nested[0].open && !nested[0].children[0].open, "a nested group closes with its parent");
+        expand_all(&mut nested);
+        assert!(nested[0].open && nested[0].children[0].open);
         let stored = tree_rows(&tree);
         assert_eq!(stored.len(), 2, "expanding a group keeps the child that was hidden while it was closed");
         assert_eq!(stored[1].depth, 1);

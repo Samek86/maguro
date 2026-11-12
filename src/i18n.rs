@@ -574,6 +574,18 @@ mod tests {
     }
 
     #[test]
+    fn collapse_all_is_translated_beside_expand_all() {
+        assert_eq!(EN[Key::FavExpandAll as usize], "Expand all");
+        assert_eq!(EN[Key::FavCollapseAll as usize], "Collapse all");
+        let expect = [("ko", KO_INI, "모두 닫기"), ("ja", JA_INI, "すべて閉じる"), ("fr", FR_INI, "Tout réduire"), ("de", DE_INI, "Alle zuklappen")];
+        for (code, text, collapse) in expect {
+            let (_, map) = parse_ini(text);
+            assert_eq!(map["fav_collapse_all"], collapse, "{code}");
+            assert_ne!(map["fav_collapse_all"], map["fav_expand_all"], "{code}");
+        }
+    }
+
+    #[test]
     fn bundled_files_cover_every_key_and_no_unknown_keys() {
         for (code, text) in [("ko", KO_INI), ("ja", JA_INI), ("fr", FR_INI), ("de", DE_INI)] {
             let (meta, map) = parse_ini(text);
@@ -681,6 +693,18 @@ mod tests {
         assert_eq!(tr(Key::Appearance), "外観");
         assert_eq!(tr(Key::Behavior), "動作");
         UI.store(prev, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn update_fail_reason_keeps_the_placeholder() {
+        assert!(EN[Key::UpdateFailReason as usize].contains("{reason}"));
+        assert!(EN[Key::UpdateFailReason as usize].starts_with("Reason:"));
+        for (code, text) in [("ko", KO_INI), ("ja", JA_INI), ("fr", FR_INI), ("de", DE_INI)] {
+            let (_, map) = parse_ini(text);
+            let v = &map["update_fail_reason"];
+            assert!(v.contains("{reason}"), "{code} {v}");
+            assert!(!v.to_ascii_lowercase().contains("github"), "{code} {v}");
+        }
     }
 
     #[test]

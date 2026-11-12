@@ -10,8 +10,9 @@ use crate::session::*;
 use crate::settings;
 
 use super::{
-    blend, buffered, button_colors, clear_icon_refresh, drop_pop_fav_tip, drop_side, fav_chevron_rect, fav_popup_can_drop, fav_row_editable, files_section_label, fill, hide_pop_fav_tip, note_side,
-    paint_button, paint_card, paint_fav_head, paint_fav_row, paint_field, paint_window, pal, pins_section_label, place_edit, popup_rows, show_pop_fav_tip, text, tip_drop, tip_enter, tip_leave,
+    blend, buffered, button_colors, clear_icon_refresh, drop_pop_fav_tip, drop_side, expand_scope_rows, expand_toggle, expand_toggle_key, fav_chevron_rect, fav_popup_can_drop, fav_row_editable,
+    files_section_label, fill, hide_pop_fav_tip, note_side, paint_button, paint_card, paint_fav_head, paint_fav_row, paint_field, paint_window, pal, pins_section_label, place_edit, popup_rows,
+    show_pop_fav_tip, text, tip_drop, tip_enter, tip_leave, ExpandToggle,
     draw_line_icon, LineIcon,
     tip_screen_rect, ui_tokens, BTN_GAP, BTN_H_FOOTER, BTN_H_TOOL, BTN_MIN_W, ButtonKind, ButtonVisual, FIELD_H, FIELD_PAD_X, FONT_ICON_PX, FONT_META_PX, FONT_PX, FocusRing, PAD_BODY_X, PAD_BODY_Y, RADIUS,
     TrackEffect, Tracker, TipSide,
@@ -438,7 +439,7 @@ fn act_tip(id: Act) -> &'static str {
         Act::Down => tr(crate::Key::FavMoveDown),
         Act::Rename => tr(crate::Key::Rename2),
         Act::Del => tr(crate::Key::Delete),
-        Act::Expand => tr(crate::Key::FavExpandAll),
+        Act::Expand => tr(expand_act_key()),
         Act::Close => tr(crate::Key::Close),
     }
 }
@@ -527,6 +528,28 @@ fn shown() -> Vec<FavRow> {
         let files = crate::pin_files();
         popup_rows(&a.s.tree, a.s.pins_open, &pins, pins_label, a.s.files_open, &files, files_label, &q)
     })
+}
+
+/// Groups that decide the footer link, including children a collapsed group is hiding.
+fn expand_scope() -> Vec<FavRow> {
+    let q = ST.with(|s| s.borrow().query.clone());
+    let pins_label = pins_section_label();
+    let files_label = files_section_label();
+    app(|a| {
+        a.s.ensure_fav_tree();
+        let pins = crate::pin_list();
+        let files = crate::pin_files();
+        expand_scope_rows(&a.s.tree, a.s.pins_open, &pins, pins_label, a.s.files_open, &files, files_label, &q)
+    })
+}
+
+fn expand_act_key() -> crate::Key {
+    expand_toggle_key(expand_toggle(&expand_scope()))
+}
+
+/// Pixel width of the footer link. The wider label wins, then `pad`, and never under `min_w`.
+fn expand_link_width(expand_px: i32, collapse_px: i32, pad: i32, min_w: i32) -> i32 {
+    expand_px.max(collapse_px).saturating_add(pad.max(0)).max(min_w)
 }
 
 fn sel_from(row: &FavRow) -> Sel {
@@ -835,16 +858,22 @@ unsafe fn nudge_sel(down: bool) {
     commit();
 }
 
-/// Open every group, and the pins and files sections the list shares with the side panel.
-unsafe fn expand_everything() {
+/// Open or close every group, and the pins and files sections the list shares with the side panel.
+unsafe fn set_every_group(open: bool) {
     app(|a| {
         a.s.ensure_fav_tree();
-        expand_all(&mut a.s.tree);
-        a.s.pins_open = true;
-        a.s.files_open = true;
+        if open {
+            expand_all(&mut a.s.tree);
+        } else {
+            collapse_all(&mut a.s.tree);
+        }
+        a.s.pins_open = open;
+        a.s.files_open = open;
         a.s.sync_favs();
     });
-    crate::request_pins(false);
+    if open {
+        crate::request_pins(false);
+    }
     commit();
 }
 
@@ -861,7 +890,10 @@ unsafe fn run_act(h: HWND, id: Act) {
         Act::Down => nudge_sel(true),
         Act::Rename => fav_manager_rename_sel(),
         Act::Del => fav_manager_delete_sel(),
-        Act::Expand => expand_everything(),
+        Act::Expand => {
+            let open = expand_toggle(&expand_scope()) == ExpandToggle::Expand;
+            set_every_group(open);
+        }
         Act::Close => close_fav_manager(),
     }
 }
@@ -991,8 +1023,14 @@ unsafe fn layout(h: HWND) {
 unsafe fn place(h: HWND, rc: RECT) {
     let dpi = ST.with(|s| s.borrow().dpi.max(96));
     let font = ST.with(|s| s.borrow().font);
-    let ew = measure_label(font, tr(crate::Key::FavExpandAll)) + px(dpi, 8);
-    ST.with(|s| s.borrow_mut().expand_w = ew.max(px(dpi, 48)));
+    // Wider of the two labels, so neither string clips when the link flips.
+    let ew = expand_link_width(
+        measure_label(font, tr(crate::Key::FavExpandAll)),
+        measure_label(font, tr(crate::Key::FavCollapseAll)),
+        px(dpi, 8),
+        px(dpi, 48),
+    );
+    ST.with(|s| s.borrow_mut().expand_w = ew);
     let lay = lay_client(rc.right, rc.bottom, dpi);
     let q = ST.with(|s| s.borrow().query.clone());
     let rows = shown();
@@ -1032,6 +1070,7 @@ unsafe fn paint(h: HWND) {
     });
     bind_owner();
     let rows = shown();
+    let expand_label = tr(expand_act_key());
     let mark = shown_mark();
     ST.with(|s| s.borrow_mut().rows_mark = Some(mark));
     buffered(h, |dc, rc| {
@@ -1090,7 +1129,7 @@ unsafe fn paint(h: HWND) {
         if saved != 0 {
             let _ = RestoreDC(dc, saved);
         }
-        paint_button(dc, lay.expand, ButtonKind::Link, track.visual(Act::Expand, false), tr(crate::Key::FavExpandAll), font, dpi, ground, FocusRing::Outside);
+        paint_button(dc, lay.expand, ButtonKind::Link, track.visual(Act::Expand, false), expand_label, font, dpi, ground, FocusRing::Outside);
         paint_button(dc, lay.close, ButtonKind::Primary, track.visual(Act::Close, false), tr(crate::Key::Close), font, dpi, ground, FocusRing::Outside);
     });
 }
@@ -1606,6 +1645,20 @@ mod tests {
             assert_eq!(lay.head.bottom - lay.head.top, px(dpi, MGR_HEAD));
             assert!(lay.body.top >= lay.head.bottom);
             assert_eq!(row_h(dpi), px(dpi, MGR_ROW));
+        }
+    }
+
+    #[test]
+    fn expand_link_is_wide_enough_for_both_labels() {
+        assert_eq!(expand_link_width(64, 88, 8, 48), 96);
+        assert_eq!(expand_link_width(90, 40, 8, 48), 98);
+        assert_eq!(expand_link_width(10, 12, 8, 48), 48);
+        // Min client is 640. A label wider than either English string still sits left of Close.
+        for dpi in [96, 120, 144, 192] {
+            let wide = expand_link_width(px(dpi, 160), px(dpi, 140), px(dpi, 8), px(dpi, 48));
+            let lay = pop_lay(px(dpi, 640), px(dpi, 420), dpi, wide);
+            assert_eq!(lay.expand.right - lay.expand.left, wide, "dpi {dpi}");
+            assert!(lay.expand.right + px(dpi, BTN_GAP) <= lay.close.left, "dpi {dpi}");
         }
     }
 }
