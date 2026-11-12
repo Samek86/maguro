@@ -318,6 +318,38 @@ pub(crate) fn log(line: &str) {
     g.push_back(line);
 }
 
+/// `log`, and make sure the line reaches `last-trace.txt`.
+/// The UI process asks the trace thread to rewrite the report. A helper that never installed
+/// the hooks appends the line beside the settings file instead (portable folder, or %APPDATA%\Maguro).
+pub(crate) fn log_kept(line: &str) {
+    log(line);
+    if cfg!(test) {
+        return;
+    }
+    if DIR.get().is_some() {
+        append_trace_line(line);
+        TRACE_EXTRA.store(true, Ordering::SeqCst);
+        request_trace();
+        return;
+    }
+    let dir = crate::store::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("last-trace.txt")) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+fn append_trace_line(line: &str) {
+    let Some(dir) = DIR.get() else { return };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("last-trace.txt")) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+fn trace_unchanged(force: bool, snap: &TraceSnap, path: &str, shell: &[String], modules: usize) -> bool {
+    !force && trace_inputs_match(snap, path, shell, modules)
+}
+
 pub(crate) fn set_shell_dlls(names: Vec<String>) {
     let mut g = SHELL.lock().unwrap_or_else(|p| p.into_inner());
     if *g == names {
@@ -326,6 +358,16 @@ pub(crate) fn set_shell_dlls(names: Vec<String>) {
     *g = names;
     drop(g);
     request_trace();
+}
+
+static WATCHER_PID: AtomicU32 = AtomicU32::new(0);
+/// The trace thread rewrites `last-trace.txt` even when the path and module list are unchanged.
+static TRACE_EXTRA: AtomicBool = AtomicBool::new(false);
+
+/// Pid of the `--crash-watch` process, or 0 when it did not start.
+/// The updater passes it to `--apply-update` so the swap waits until this process has exited.
+pub(crate) fn watcher_pid() -> u32 {
+    WATCHER_PID.load(Ordering::SeqCst)
 }
 
 fn spawn_watcher(dir: &Path) {
@@ -339,7 +381,9 @@ fn spawn_watcher(dir: &Path) {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let _ = cmd.spawn();
+    if let Ok(child) = cmd.spawn() {
+        WATCHER_PID.store(child.id(), Ordering::SeqCst);
+    }
 }
 
 fn watch_main(args: &[String]) {
@@ -351,6 +395,7 @@ fn watch_main(args: &[String]) {
         let mut code = 0u32;
         let ok = GetExitCodeProcess(h, &mut code).is_ok();
         let _ = CloseHandle(h);
+        // Exit 0 is a normal quit, including the update hand-off. That is not a crash.
         if !ok || !watch_is_fatal(code) {
             return;
         }
@@ -491,10 +536,11 @@ fn trace_inputs_match(snap: &TraceSnap, path: &str, shell: &[String], module_cou
 /// from the previous snapshot. An identical report is not written again.
 fn flush_trace(snap: &mut TraceSnap) {
     let Some(dir) = DIR.get() else { return };
+    let force = TRACE_EXTRA.swap(false, Ordering::SeqCst);
     let path = locked_string(&LAST);
     let shell = locked_list(&SHELL);
     let count = module_count();
-    if trace_inputs_match(snap, &path, &shell, count) {
+    if trace_unchanged(force, snap, &path, &shell, count) {
         return;
     }
     let loaded = loaded_modules();
@@ -847,6 +893,8 @@ mod tests {
             text: "same".into(),
         };
         assert!(trace_inputs_match(&snap, r"F:\CAC\サンプル", &["codec.dll".into()], 40));
+        assert!(trace_unchanged(false, &snap, r"F:\CAC\サンプル", &["codec.dll".into()], 40));
+        assert!(!trace_unchanged(true, &snap, r"F:\CAC\サンプル", &["codec.dll".into()], 40), "a kept log line rewrites the trace");
         assert!(!trace_inputs_match(&snap, r"F:\other", &["codec.dll".into()], 40));
         assert!(!trace_inputs_match(&snap, r"F:\CAC\サンプル", &["other.dll".into()], 40));
         assert!(!trace_inputs_match(&snap, r"F:\CAC\サンプル", &["codec.dll".into()], 41));
@@ -859,6 +907,7 @@ mod tests {
         assert!(is_fatal(0xC000_0409), "STATUS_STACK_BUFFER_OVERRUN");
         assert!(!watch_is_fatal(0xFFFF_FFFF), "Stop-Process -Force");
         assert!(!watch_is_fatal(0xC000_013A), "CTRL+C");
+        assert!(!watch_is_fatal(0), "a normal exit, including the update hand-off");
         assert!(watch_is_fatal(0xC000_0409), "fail-fast");
     }
 

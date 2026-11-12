@@ -843,11 +843,12 @@ pub(crate) enum Key {
     RestoreDefaultFolders,
     RestoreDefaultsAdded,
     RestoreDefaultsNone,
+    UpdateFailReason,
 }
 
-pub(crate) const KEY_COUNT: usize = 838;
+pub(crate) const KEY_COUNT: usize = 839;
 
-const _: () = assert!((Key::RestoreDefaultsNone as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::UpdateFailReason as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1688,6 +1689,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Restore default folders",
     "{n} added",
     "Nothing to add",
+    "Reason: {reason}",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2530,4 +2532,5 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "restore_default_folders",
     "restore_defaults_added",
     "restore_defaults_none",
+    "update_fail_reason",
 ];

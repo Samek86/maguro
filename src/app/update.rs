@@ -2,12 +2,19 @@
 //! No token and no Actions: one unauthenticated GET to the public releases API, then the raw
 //! `maguro.exe` asset and its `maguro.exe.sha256`. The exe is replaced only when the
 //! SHA-256 matches. A missing checksum, a mismatch, or a zip-only release is reported and not installed.
+//!
+//! The running exe is not renamed in this process. The UI and the `--crash-watch` monitor both
+//! map it, and that rename fails with access denied. After the download is verified, this process
+//! starts `maguro.new.exe --apply-update`, closes every Maguro window so it can exit, and the
+//! helper swaps the files only once those processes are gone.
 
 use crate::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
+use std::time::Duration;
 use windows::Win32::Networking::WinHttp::*;
+use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
 
 /// Test builds can point at a local mock or pretend to be older; release builds use the real values.
 const API: &str = match option_env!("MAGURO_UPDATE_API") {
@@ -29,6 +36,21 @@ const SHA_ASSET: &str = "maguro.exe.sha256";
 /// Downloaded build, next to the running exe, until the swap moves it into place.
 const NEW_EXE: &str = "maguro.new.exe";
 const OLD_EXE: &str = "maguro.old.exe";
+/// One-line reason the restarted exe shows. Next to the exe, so portable mode and %APPDATA% stay as they are.
+const FAIL_FILE: &str = "maguro.update-fail.txt";
+/// Helper mode. The downloaded exe swaps the real one after this process and the crash monitor exit.
+const APPLY_UPDATE: &str = "--apply-update";
+/// Restarted exe should show the failure dialog. The reason text is in `FAIL_FILE`.
+pub(crate) const UPDATE_FAILED: &str = "--update-failed";
+/// How long the helper waits for the UI and the monitor to exit.
+const EXIT_WAIT: Duration = Duration::from_secs(30);
+/// AV and indexers hold the exe for a moment after the last process exits.
+const SWAP_TRIES: u32 = 8;
+const SWAP_PAUSE: Duration = Duration::from_millis(250);
+/// `GetExitCodeProcess` while the process is still alive.
+const STILL_ACTIVE: u32 = 259;
+/// `OpenProcess` when that pid is already gone.
+const ERROR_INVALID_PARAMETER: i32 = 87;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Release {
@@ -54,12 +76,48 @@ enum InstallFail {
     MissingSha,
     /// Checksum text was not a sha256sum line for maguro.exe, or the digest differed.
     Mismatch,
-    Other,
+    /// `reason` is one line: step, OS message, and code. `rename running exe: Access is denied (5)`.
+    Other(String),
+}
+
+/// One rename attempt. A lock is retried. A missing path is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RenameOutcome {
+    Moved,
+    Locked,
+    Failed,
+}
+
+/// What the retry loop does after this attempt (`attempt` is 0-based).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AttemptNext {
+    Done,
+    SleepAndRetry,
+    GiveUp,
+}
+
+/// Where a two-step swap finished. The running exe is put back when the new one never lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SwapEnd {
+    Swapped,
+    Kept,
+    RolledBack,
+    RestoreFailed,
+}
+
+/// Args for `maguro.new.exe --apply-update <target exe> <ui pid> <monitor pid>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ApplyJob {
+    pub target: PathBuf,
+    pub ui_pid: u32,
+    pub monitor_pid: u32,
 }
 
 static FOUND: Mutex<Option<Release>> = Mutex::new(None);
 static INSTALLING: AtomicBool = AtomicBool::new(false);
 static CHECKING: AtomicBool = AtomicBool::new(false);
+/// Stage 2 (`InstallFail::Other`). The worker stores it; the dialog reads it.
+static FAIL_REASON: Mutex<String> = Mutex::new(String::new());
 
 /// True while a manual check or an install is in flight. The settings button stays disabled.
 pub(crate) fn update_busy() -> bool {
@@ -278,9 +336,121 @@ fn http_get(url: &str, max: usize) -> Option<Vec<u8>> {
     }
 }
 
-fn download(url: &str, dest: &Path) -> bool {
-    _ = std::fs::remove_file(dest);
-    http_get(url, EXE_MAX).is_some_and(|b| std::fs::write(dest, b).is_ok())
+/// `step: message (code)` when Windows returned a code. The message's trailing period is dropped.
+pub(crate) fn format_fail_reason(step: &str, message: &str, code: Option<i32>) -> String {
+    let message = message.trim().trim_end_matches(['.', '。']).trim();
+    if message.is_empty() {
+        return match code {
+            Some(code) => format!("{step} ({code})"),
+            None => step.to_string(),
+        };
+    }
+    match code {
+        Some(code) => format!("{step}: {message} ({code})"),
+        None => format!("{step}: {message}"),
+    }
+}
+
+/// Rust's `io::Error` text is `Access is denied. (os error 5)`. Keep the words, not the suffix.
+pub(crate) fn io_message(text: &str, code: i32) -> String {
+    let suffix = format!(" (os error {code})");
+    text.trim().strip_suffix(&suffix).unwrap_or(text.trim()).trim().to_string()
+}
+
+fn io_reason(step: &str, err: &std::io::Error) -> String {
+    let code = err.raw_os_error();
+    let message = match code {
+        Some(c) => io_message(&err.to_string(), c),
+        None => err.to_string(),
+    };
+    format_fail_reason(step, &message, code)
+}
+
+/// Win32 facility HRESULTs (`0x8007xxxx`) become the original code. A plain code is unchanged.
+pub(crate) fn win32_code(hr: i32) -> i32 {
+    let u = hr as u32;
+    if u & 0xFFFF_0000 == 0x8007_0000 { (u & 0xFFFF) as i32 } else { hr }
+}
+
+/// One short line for the dialog, the result file, and the trace. Control characters become spaces.
+pub(crate) fn one_line(reason: &str) -> String {
+    let flat: String = reason.chars().take(300).map(|ch| if ch.is_control() { ' ' } else { ch }).collect();
+    flat.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn rename_outcome(code: Option<i32>) -> RenameOutcome {
+    match code {
+        // Not found, bad path, or a name that is not a file. Retrying will not create it.
+        Some(2 | 3 | 161 | 206 | 267) => RenameOutcome::Failed,
+        Some(_) => RenameOutcome::Locked,
+        None => RenameOutcome::Failed,
+    }
+}
+
+pub(crate) fn next_attempt(outcome: RenameOutcome, attempt: u32, tries: u32) -> AttemptNext {
+    match outcome {
+        RenameOutcome::Moved => AttemptNext::Done,
+        RenameOutcome::Failed => AttemptNext::GiveUp,
+        RenameOutcome::Locked if attempt + 1 < tries => AttemptNext::SleepAndRetry,
+        RenameOutcome::Locked => AttemptNext::GiveUp,
+    }
+}
+
+/// `running_moved` is exe -> maguro.old.exe. `new_in_place` is the new bytes at the exe path
+/// (rename or copy). `restored` is maguro.old.exe put back after the new bytes failed to land.
+pub(crate) fn swap_status(running_moved: bool, new_in_place: bool, restored: bool) -> SwapEnd {
+    if !running_moved {
+        SwapEnd::Kept
+    } else if new_in_place {
+        SwapEnd::Swapped
+    } else if restored {
+        SwapEnd::RolledBack
+    } else {
+        SwapEnd::RestoreFailed
+    }
+}
+
+pub(crate) fn parse_apply_args(args: &[String]) -> Option<ApplyJob> {
+    if args.first().map(String::as_str) != Some(APPLY_UPDATE) || args.len() != 4 {
+        return None;
+    }
+    let target = args.get(1)?;
+    if target.is_empty() || target.starts_with("--") {
+        return None;
+    }
+    let ui_pid = args.get(2)?.parse::<u32>().ok()?;
+    if ui_pid == 0 {
+        return None;
+    }
+    let monitor_pid = args.get(3)?.parse::<u32>().ok()?;
+    Some(ApplyJob { target: PathBuf::from(target), ui_pid, monitor_pid })
+}
+
+/// Top-level windows this process owns. Child classes (`MaguroPane`) are not in `EnumWindows`.
+pub(crate) fn is_maguro_class(name: &str) -> bool {
+    name.starts_with("Maguro")
+}
+
+pub(crate) fn install_fail_notice(reason: &str) -> String {
+    let base = tr(crate::Key::UpdateCouldNotBeInstalledMaguroWas).to_string();
+    let reason = one_line(reason);
+    if reason.is_empty() {
+        return base;
+    }
+    let line = tr(crate::Key::UpdateFailReason).replace("{reason}", &reason);
+    format!("{base}\n\n{line}")
+}
+
+fn download(url: &str, dest: &Path) -> std::result::Result<(), String> {
+    if let Err(e) = std::fs::remove_file(dest) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(io_reason("remove previous download", &e));
+        }
+    }
+    let Some(body) = http_get(url, EXE_MAX) else {
+        return Err(format_fail_reason("download", "could not download maguro.exe", None));
+    };
+    std::fs::write(dest, &body).map_err(|e| io_reason("write download", &e))
 }
 
 fn exe_path() -> Option<PathBuf> {
@@ -374,16 +544,25 @@ pub(crate) fn check_now(main: HWND) {
 }
 
 /// Startup: remove the exe a previous update left behind, then ask GitHub when the setting is on.
-pub(crate) fn startup(main: HWND, check: bool) {
+/// `drop_new` is set for `--updated`: the apply helper has exited, so its `maguro.new.exe` can go too.
+/// A normal launch leaves that file alone. The helper may still be running from it.
+pub(crate) fn startup(main: HWND, check: bool, drop_new: bool) {
     let h = main.0 as isize;
     _ = std::thread::Builder::new().name("maguro-update".into()).spawn(move || {
-        if let Some(old) = exe_path().and_then(|e| e.parent().map(|d| d.join(OLD_EXE))) {
+        if let Some(dir) = exe_path().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
             // The previous process may still be closing for a moment.
-            for _ in 0..20 {
-                if !old.exists() || std::fs::remove_file(&old).is_ok() {
-                    break;
+            let mut names = vec![OLD_EXE];
+            if drop_new {
+                names.push(NEW_EXE);
+            }
+            for name in names {
+                let path = dir.join(name);
+                for _ in 0..20 {
+                    if !path.exists() || std::fs::remove_file(&path).is_ok() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
         if !check {
@@ -396,28 +575,33 @@ pub(crate) fn startup(main: HWND, check: bool) {
     });
 }
 
-/// Download the raw exe and its checksum, then swap only when the SHA-256 matches.
-/// On a missing checksum or a mismatch, `maguro.new.exe` is deleted and the running exe stays.
+fn other(reason: String) -> InstallFail {
+    InstallFail::Other(one_line(&reason))
+}
+
+/// Download the raw exe and check its size, MZ header, and SHA-256.
+/// The swap happens in `--apply-update`, after this process and the crash monitor have exited.
+/// On a missing checksum, a mismatch, or any other failure, `maguro.new.exe` is deleted.
 fn install(rel: &Release) -> std::result::Result<(), InstallFail> {
     let Release::Exe { url, size, sha_url, sha_size, .. } = rel else { return Err(InstallFail::MissingSha) };
-    let exe = exe_path().ok_or(InstallFail::Other)?;
-    let dir = exe.parent().ok_or(InstallFail::Other)?.to_path_buf();
+    let exe = exe_path().ok_or_else(|| other(format_fail_reason("exe path", "could not locate maguro.exe", None)))?;
+    let dir = exe.parent().map(|p| p.to_path_buf()).ok_or_else(|| other(format_fail_reason("exe path", "could not locate the install folder", None)))?;
     let new = dir.join(NEW_EXE);
     let res = (|| {
         if *size == 0 || *size > EXE_MAX as u64 {
-            return Err(InstallFail::Other);
+            return Err(other(format_fail_reason("download size", &format!("release asset is {size} bytes"), None)));
         }
-        if !download(url, &new) {
-            return Err(InstallFail::Other);
-        }
-        if std::fs::metadata(&new).map(|m| m.len()).ok() != Some(*size) {
-            return Err(InstallFail::Other);
+        download(url, &new).map_err(other)?;
+        let got = std::fs::metadata(&new).map(|m| m.len()).map_err(|e| other(io_reason("download size", &e)))?;
+        if got != *size {
+            return Err(other(format_fail_reason("download size", &format!("expected {size} bytes, got {got}"), None)));
         }
         let mut magic = [0u8; 2];
         {
-            let mut f = std::fs::File::open(&new).map_err(|_| InstallFail::Other)?;
-            if std::io::Read::read(&mut f, &mut magic).ok() != Some(2) || &magic != b"MZ" {
-                return Err(InstallFail::Other);
+            let mut f = std::fs::File::open(&new).map_err(|e| other(io_reason("read header", &e)))?;
+            let n = std::io::Read::read(&mut f, &mut magic).map_err(|e| other(io_reason("read header", &e)))?;
+            if n != 2 || &magic != b"MZ" {
+                return Err(other(format_fail_reason("read header", "not a Windows executable", None)));
             }
         }
         let sha_body = http_get(sha_url, SHA_MAX).ok_or(InstallFail::MissingSha)?;
@@ -425,37 +609,128 @@ fn install(rel: &Release) -> std::result::Result<(), InstallFail> {
             return Err(InstallFail::MissingSha);
         }
         let expected = parse_sha256sum(&String::from_utf8_lossy(&sha_body)).ok_or(InstallFail::Mismatch)?;
-        let actual = sha256_file(&new).ok_or(InstallFail::Other)?;
+        let actual = sha256_file(&new).ok_or_else(|| other(format_fail_reason("sha256", "could not hash maguro.new.exe", None)))?;
         if !hashes_match(&expected, &actual) {
             return Err(InstallFail::Mismatch);
         }
-        swap(&exe, &new, &dir.join(OLD_EXE)).map_err(|_| InstallFail::Other)
+        Ok(())
     })();
-    // Success renamed `new` onto the exe. A mismatch, a missing checksum, or any other failure
-    // leaves the temp file behind; drop it and do not install.
-    _ = std::fs::remove_file(&new);
+    if res.is_err() {
+        _ = std::fs::remove_file(&new);
+    }
     res
 }
 
-/// Running exe -> maguro.old.exe, new -> exe. Puts the old one back if the second move fails.
-fn swap(exe: &Path, new: &Path, old: &Path) -> std::result::Result<(), &'static str> {
-    if old.exists() && std::fs::remove_file(old).is_err() {
-        return Err("old exe busy");
+fn move_retry(from: &Path, to: &Path, step: &str) -> std::result::Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..SWAP_TRIES {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = io_reason(step, &e);
+                if next_attempt(rename_outcome(e.raw_os_error()), attempt, SWAP_TRIES) != AttemptNext::SleepAndRetry {
+                    return Err(last);
+                }
+                std::thread::sleep(SWAP_PAUSE);
+            }
+        }
     }
-    std::fs::rename(exe, old).map_err(|_| "rename running exe")?;
-    if std::fs::rename(new, exe).is_err() {
-        _ = std::fs::rename(old, exe);
-        return Err("move new exe");
-    }
-    Ok(())
+    Err(last)
 }
 
-fn rollback(exe: &Path) {
-    let old = exe.with_file_name(OLD_EXE);
-    if old.exists() {
-        _ = std::fs::remove_file(exe);
-        _ = std::fs::rename(&old, exe);
+fn remove_retry(path: &Path, step: &str) -> std::result::Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..SWAP_TRIES {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                last = io_reason(step, &e);
+                if next_attempt(rename_outcome(e.raw_os_error()), attempt, SWAP_TRIES) != AttemptNext::SleepAndRetry {
+                    return Err(last);
+                }
+                std::thread::sleep(SWAP_PAUSE);
+            }
+        }
     }
+    Err(last)
+}
+
+/// The helper is running `maguro.new.exe`, so renaming that file can be denied even after the UI
+/// and the monitor have exited. A copy leaves the helper's file for the new process to delete.
+fn copy_retry(from: &Path, to: &Path) -> std::result::Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..SWAP_TRIES {
+        match std::fs::copy(from, to) {
+            Ok(n) => {
+                let expect = std::fs::metadata(from).map(|m| m.len()).unwrap_or(n);
+                if n == expect && n > 0 {
+                    return Ok(());
+                }
+                _ = std::fs::remove_file(to);
+                last = format_fail_reason("copy new exe", &format!("copied {n} bytes, expected {expect}"), None);
+                if n != 0 || next_attempt(RenameOutcome::Locked, attempt, SWAP_TRIES) != AttemptNext::SleepAndRetry {
+                    return Err(last);
+                }
+                std::thread::sleep(SWAP_PAUSE);
+            }
+            Err(e) => {
+                last = io_reason("copy new exe", &e);
+                if next_attempt(rename_outcome(e.raw_os_error()), attempt, SWAP_TRIES) != AttemptNext::SleepAndRetry {
+                    return Err(last);
+                }
+                std::thread::sleep(SWAP_PAUSE);
+            }
+        }
+    }
+    Err(last)
+}
+
+fn place_new(new: &Path, exe: &Path) -> std::result::Result<(), String> {
+    match move_retry(new, exe, "rename new exe") {
+        Ok(()) => Ok(()),
+        Err(rename_err) => match copy_retry(new, exe) {
+            Ok(()) => Ok(()),
+            Err(copy_err) => Err(format!("{rename_err}; {copy_err}")),
+        },
+    }
+}
+
+/// Running exe -> maguro.old.exe, then the new bytes onto the exe. Puts the old one back if that fails.
+fn swap(exe: &Path, new: &Path, old: &Path) -> std::result::Result<(), String> {
+    if old.exists() {
+        remove_retry(old, "remove previous maguro.old.exe")?;
+    }
+    if let Err(e) = move_retry(exe, old, "rename running exe") {
+        return finish_swap(false, false, false, Some(e));
+    }
+    if let Err(e) = place_new(new, exe) {
+        return match rollback(exe) {
+            Ok(()) => finish_swap(true, false, true, Some(e)),
+            Err(restore) => finish_swap(true, false, false, Some(format!("{e}; {restore}"))),
+        };
+    }
+    finish_swap(true, true, false, None)
+}
+
+fn finish_swap(running_moved: bool, new_in_place: bool, restored: bool, err: Option<String>) -> std::result::Result<(), String> {
+    match swap_status(running_moved, new_in_place, restored) {
+        SwapEnd::Swapped => Ok(()),
+        SwapEnd::Kept | SwapEnd::RolledBack | SwapEnd::RestoreFailed => {
+            Err(err.unwrap_or_else(|| format_fail_reason("swap", "update was not installed", None)))
+        }
+    }
+}
+
+fn rollback(exe: &Path) -> std::result::Result<(), String> {
+    let old = exe.with_file_name(OLD_EXE);
+    if !old.exists() {
+        return Err(format_fail_reason("restore previous exe", "maguro.old.exe is missing", None));
+    }
+    if exe.exists() {
+        remove_retry(exe, "remove failed update")?;
+    }
+    move_retry(&old, exe, "restore previous exe")
 }
 
 /// WM_UPDATE on the main window.
@@ -481,9 +756,18 @@ pub(crate) unsafe fn on_update(h: HWND, stage: usize) {
             let spawned = std::thread::Builder::new().name("maguro-update-install".into()).spawn(move || {
                 let stage = match install(&rel) {
                     Ok(()) => 1,
-                    Err(InstallFail::MissingSha) => 4,
-                    Err(InstallFail::Mismatch) => 5,
-                    Err(InstallFail::Other) => 2,
+                    Err(InstallFail::MissingSha) => {
+                        crate::crash::log_kept("update install: checksum missing");
+                        4
+                    }
+                    Err(InstallFail::Mismatch) => {
+                        crate::crash::log_kept("update install: checksum mismatch");
+                        5
+                    }
+                    Err(InstallFail::Other(reason)) => {
+                        store_fail_reason(&reason);
+                        2
+                    }
                 };
                 _ = PostMessageW(Some(HWND(hv as _)), WM_UPDATE, WPARAM(stage), LPARAM(0));
             });
@@ -509,24 +793,20 @@ pub(crate) unsafe fn on_update(h: HWND, stage: usize) {
         }
         6 => up_to_date(h),
         7 => could_not_check(h),
-        1 => {
-            let Some(exe) = exe_path() else { return };
-            // current_exe still names the original path, which now holds the new build.
-            let started = std::process::Command::new(&exe)
-                .arg("--updated")
-                .arg(std::process::id().to_string())
-                .current_dir(exe.parent().unwrap_or(Path::new(".")))
-                .spawn()
-                .is_ok();
-            if !started {
-                rollback(&exe);
+        1 => match launch_apply_helper() {
+            // The helper waits for this process. WM_CLOSE is queued, so the save in the main
+            // window still runs, then the process exits and the monitor follows without a crash report.
+            Ok(()) => close_all_windows(),
+            Err(reason) => {
+                store_fail_reason(&reason);
+                if let Some(exe) = exe_path() {
+                    _ = std::fs::remove_file(exe.with_file_name(NEW_EXE));
+                }
                 INSTALLING.store(false, Ordering::SeqCst);
                 poke_update_button();
                 failed(h);
-                return;
             }
-            close_all_windows();
-        }
+        },
         _ => {
             INSTALLING.store(false, Ordering::SeqCst);
             poke_update_button();
@@ -575,23 +855,52 @@ unsafe fn could_not_check(h: HWND) {
     MessageBoxW(Some(h), &HSTRING::from(text), &HSTRING::from(title), MB_OK | MB_ICONWARNING);
 }
 
-unsafe fn failed(h: HWND) {
-    let text = tr(crate::Key::UpdateCouldNotBeInstalledMaguroWas);
-    let title = tr(crate::Key::MaguroUpdate);
-    MessageBoxW(Some(h), &HSTRING::from(text), &HSTRING::from(title), MB_OK | MB_ICONWARNING);
+fn store_fail_reason(reason: &str) {
+    let reason = one_line(reason);
+    *FAIL_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason.clone();
+    crate::crash::log_kept(&format!("update install: {reason}"));
 }
 
-/// Every Maguro main window of this process gets WM_CLOSE, so each saves as on a normal exit.
+fn take_fail_reason() -> String {
+    std::mem::take(&mut *FAIL_REASON.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+unsafe fn failed(h: HWND) {
+    show_fail_dialog(h, &take_fail_reason());
+}
+
+/// The restarted exe, after a failed apply. The reason was logged when the dialog is shown.
+pub(crate) unsafe fn show_update_failed(h: HWND, reason: &str) {
+    let reason = one_line(reason);
+    if !reason.is_empty() {
+        crate::crash::log_kept(&format!("update install: {reason}"));
+    }
+    show_fail_dialog(h, &reason);
+}
+
+unsafe fn show_fail_dialog(h: HWND, reason: &str) {
+    let text = install_fail_notice(reason);
+    let title = tr(crate::Key::MaguroUpdate);
+    let owner = if h.0.is_null() { None } else { Some(h) };
+    MessageBoxW(owner, &HSTRING::from(text), &HSTRING::from(title), MB_OK | MB_ICONWARNING);
+}
+
+/// Every top-level Maguro window of this process gets WM_CLOSE.
+/// The last main window saves, then `WM_DESTROY` posts quit, so Settings and the other
+/// Maguro windows do not keep the process (and the mapped exe) alive.
 unsafe fn close_all_windows() {
     unsafe extern "system" fn each(h: HWND, _a1: LPARAM) -> BOOL {
-        crate::crash::catch_bool(std::panic::AssertUnwindSafe(|| unsafe { each_inner(h, _a1) }))
+        crate::crash::catch_bool(std::panic::AssertUnwindSafe(|| unsafe { each_inner(h) }))
     }
-    unsafe fn each_inner(h: HWND, _a1: LPARAM) -> BOOL {
+    unsafe fn each_inner(h: HWND) -> BOOL {
         let mut pid = 0u32;
         GetWindowThreadProcessId(h, Some(&mut pid));
-        let mut cls = [0u16; 32];
+        if pid != std::process::id() {
+            return TRUE;
+        }
+        let mut cls = [0u16; 64];
         let n = GetClassNameW(h, &mut cls) as usize;
-        if pid == std::process::id() && String::from_utf16_lossy(&cls[..n]) == "MaguroMain" {
+        if is_maguro_class(&String::from_utf16_lossy(&cls[..n])) {
             _ = PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
         TRUE
@@ -625,21 +934,224 @@ pub(crate) unsafe fn relaunch_same_session() -> bool {
     started
 }
 
-/// `--updated <pid>` from the old process: wait for it to save and exit before reading settings.
-pub(crate) fn wait_for_previous(args: &mut Vec<String>) {
+/// `--updated <pid>` from the old process: wait for it to save and exit before reading settings,
+/// and before this process registers the global hotkey. True when the flag was present, which
+/// also means a leftover `maguro.new.exe` (the apply helper) can be deleted.
+pub(crate) fn wait_for_previous(args: &mut Vec<String>) -> bool {
     if args.first().map(String::as_str) != Some("--updated") {
-        return;
+        return false;
     }
     let pid = args.get(1).and_then(|p| p.parse::<u32>().ok());
     args.drain(..args.len().min(2));
     if let Some(pid) = pid {
         unsafe {
-            if let Ok(p) = OpenProcess(windows::Win32::System::Threading::PROCESS_SYNCHRONIZE, false, pid) {
-                windows::Win32::System::Threading::WaitForSingleObject(p, 20_000);
+            if let Ok(p) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+                _ = WaitForSingleObject(p, 20_000);
                 _ = CloseHandle(p);
             }
         }
     }
+    true
+}
+
+/// Drop `--update-failed` so it is not opened as a folder. True when it was present.
+pub(crate) fn take_update_failed_flag(args: &mut Vec<String>) -> bool {
+    let had = args.iter().any(|a| a == UPDATE_FAILED);
+    args.retain(|a| a != UPDATE_FAILED);
+    had
+}
+
+fn fail_path(exe: &Path) -> PathBuf {
+    exe.with_file_name(FAIL_FILE)
+}
+
+fn write_fail_file(exe: &Path, reason: &str) -> std::result::Result<(), String> {
+    let path = fail_path(exe);
+    std::fs::write(&path, one_line(reason).as_bytes()).map_err(|e| io_reason("write update result", &e))
+}
+
+fn consume_fail_file(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    _ = std::fs::remove_file(path);
+    Some(one_line(&text))
+}
+
+/// Whether startup should show the failure dialog.
+/// A successful `--updated` launch drops a stale note. The failure restart sets the flag.
+/// A note with no flag still shows, so a helper that died after writing the file is not silent.
+pub(crate) fn fail_note_to_show(flagged: bool, updated: bool, note: Option<String>) -> Option<String> {
+    if updated && !flagged {
+        return None;
+    }
+    match (flagged, note) {
+        (false, None) => None,
+        (_, Some(text)) => Some(text),
+        (true, None) => Some(String::new()),
+    }
+}
+
+/// `--update-failed`, or a result file the helper wrote beside the exe. The file is removed.
+/// Empty means the flag was set and the file was already gone: the dialog has no extra line.
+pub(crate) fn take_update_failed(args: &mut Vec<String>) -> Option<String> {
+    let flagged = take_update_failed_flag(args);
+    let updated = args.first().map(String::as_str) == Some("--updated");
+    let from_file = exe_path().and_then(|exe| consume_fail_file(&fail_path(&exe)));
+    fail_note_to_show(flagged, updated, from_file)
+}
+
+/// `--apply-update` never installs hooks or opens a window. It swaps the exe and starts the new one.
+pub(crate) fn apply_helper(args: &[String]) -> bool {
+    if args.first().map(String::as_str) != Some(APPLY_UPDATE) {
+        return false;
+    }
+    let code = match parse_apply_args(args) {
+        Some(job) => apply_update(&job),
+        None => {
+            let reason = format_fail_reason("apply update", "expected the exe path, the window pid, and the monitor pid", None);
+            unsafe { show_fail_dialog(HWND::default(), &reason) };
+            2
+        }
+    };
+    std::process::exit(code);
+}
+
+fn apply_update(job: &ApplyJob) -> i32 {
+    let target = &job.target;
+    let new = target.with_file_name(NEW_EXE);
+    let old = target.with_file_name(OLD_EXE);
+    if let Err(reason) = wait_pids(job) {
+        return report_failure(job, &reason);
+    }
+    if let Err(reason) = swap(target, &new, &old) {
+        return report_failure(job, &reason);
+    }
+    _ = std::fs::remove_file(fail_path(target));
+    match spawn_updated(target) {
+        Ok(()) => 0,
+        Err(reason) => {
+            let reason = match rollback(target) {
+                Ok(()) => reason,
+                Err(restore) => format!("{reason}; {restore}"),
+            };
+            report_failure(job, &reason)
+        }
+    }
+}
+
+fn wait_pids(job: &ApplyJob) -> std::result::Result<(), String> {
+    wait_pid(job.ui_pid, "wait for ui process", EXIT_WAIT)?;
+    if job.monitor_pid != 0 {
+        wait_pid(job.monitor_pid, "wait for crash monitor", EXIT_WAIT)?;
+    }
+    Ok(())
+}
+
+fn wait_pid(pid: u32, step: &str, timeout: Duration) -> std::result::Result<(), String> {
+    if pid == 0 {
+        return Err(format_fail_reason(step, "missing process id", None));
+    }
+    let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+    unsafe {
+        match OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(h) => {
+                let wait = WaitForSingleObject(h, ms);
+                _ = CloseHandle(h);
+                if wait == WAIT_OBJECT_0 {
+                    return Ok(());
+                }
+                if wait == WAIT_TIMEOUT {
+                    return Err(format_fail_reason(step, &format!("pid {pid} still running after {}s", timeout.as_secs()), Some(WAIT_TIMEOUT.0 as i32)));
+                }
+                Err(format_fail_reason(step, &format!("pid {pid} wait failed"), Some(wait.0 as i32)))
+            }
+            Err(e) => {
+                let code = win32_code(e.code().0);
+                if code == ERROR_INVALID_PARAMETER {
+                    return Ok(());
+                }
+                Err(format_fail_reason(step, &e.to_string(), Some(code)))
+            }
+        }
+    }
+}
+
+fn process_running(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) else { return false };
+        let mut code = STILL_ACTIVE;
+        let running = GetExitCodeProcess(h, &mut code).is_ok() && code == STILL_ACTIVE;
+        _ = CloseHandle(h);
+        running
+    }
+}
+
+fn report_failure(job: &ApplyJob, reason: &str) -> i32 {
+    let reason = one_line(reason);
+    crate::crash::log_kept(&format!("update install: {reason}"));
+    // The UI is still up. A second maguro.exe would hand off to it and the dialog would never show.
+    if process_running(job.ui_pid) || !job.target.is_file() {
+        unsafe { show_fail_dialog(HWND::default(), &reason) };
+        return 1;
+    }
+    if let Err(e) = write_fail_file(&job.target, &reason) {
+        unsafe { show_fail_dialog(HWND::default(), &format!("{reason}; {e}")) };
+        return 1;
+    }
+    match spawn_failed(&job.target) {
+        Ok(()) => 1,
+        Err(e) => {
+            unsafe { show_fail_dialog(HWND::default(), &format!("{reason}; {e}")) };
+            1
+        }
+    }
+}
+
+fn launch_apply_helper() -> std::result::Result<(), String> {
+    let exe = exe_path().ok_or_else(|| format_fail_reason("exe path", "could not locate maguro.exe", None))?;
+    let new = exe.with_file_name(NEW_EXE);
+    if !new.is_file() {
+        return Err(format_fail_reason("start apply helper", "maguro.new.exe is missing", None));
+    }
+    let dir = exe.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let args = vec![
+        APPLY_UPDATE.to_string(),
+        exe.to_string_lossy().into_owned(),
+        std::process::id().to_string(),
+        crate::crash::watcher_pid().to_string(),
+    ];
+    spawn_detached(&new, &args, &dir, "start apply helper", true)
+}
+
+fn spawn_updated(exe: &Path) -> std::result::Result<(), String> {
+    let dir = exe.parent().unwrap_or(Path::new(".")).to_path_buf();
+    // The new process waits for this helper before it registers Alt+Z, then deletes the leftovers.
+    let args = vec!["--updated".to_string(), std::process::id().to_string()];
+    spawn_detached(exe, &args, &dir, "start updated maguro", false)
+}
+
+fn spawn_failed(exe: &Path) -> std::result::Result<(), String> {
+    let dir = exe.parent().unwrap_or(Path::new(".")).to_path_buf();
+    // `--updated` waits out this helper so it can delete maguro.new.exe. The flag shows the dialog.
+    let args = vec!["--updated".to_string(), std::process::id().to_string(), UPDATE_FAILED.to_string()];
+    spawn_detached(exe, &args, &dir, "restart maguro", false)
+}
+
+fn spawn_detached(exe: &Path, args: &[String], dir: &Path, step: &str, no_window: bool) -> std::result::Result<(), String> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args).current_dir(dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    // The helper is the same Windows subsystem binary. No console. The restarted app must still show its window.
+    if no_window {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| io_reason(step, &e))
 }
 
 #[cfg(test)]
@@ -791,13 +1303,160 @@ mod tests {
         assert!(swap(&exe, &new, &old).is_ok());
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "new");
         assert_eq!(std::fs::read_to_string(&old).unwrap(), "old");
-        rollback(&exe);
+        assert!(rollback(&exe).is_ok());
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
         assert!(!old.exists());
-        // A missing new file leaves the running exe in place.
-        assert!(swap(&exe, &new, &old).is_err());
+        // A missing new file is put back, and the error names the step.
+        let err = swap(&exe, &new, &old).unwrap_err();
+        assert!(err.contains("rename new exe") || err.contains("copy new exe"), "{err}");
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "old");
+        assert_eq!(swap_status(false, false, false), SwapEnd::Kept);
+        assert_eq!(swap_status(true, false, true), SwapEnd::RolledBack);
         _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn fail_reason_names_the_step_and_the_os_code() {
+        assert_eq!(
+            format_fail_reason("rename running exe", &io_message("Access is denied. (os error 5)", 5), Some(5)),
+            "rename running exe: Access is denied (5)"
+        );
+        assert_eq!(format_fail_reason("download", "could not download maguro.exe", None), "download: could not download maguro.exe");
+        assert_eq!(format_fail_reason("rename running exe", "Access is denied.\r\n", Some(5)), "rename running exe: Access is denied (5)");
+        assert_eq!(format_fail_reason("wait for ui process", "", Some(258)), "wait for ui process (258)");
+        let err = std::io::Error::from_raw_os_error(5);
+        let reason = io_reason("rename running exe", &err);
+        assert!(reason.starts_with("rename running exe: "), "{reason}");
+        assert!(reason.ends_with(" (5)"), "{reason}");
+        assert!(!reason.contains("os error"), "{reason}");
+        assert_eq!(win32_code(0x8007_0005u32 as i32), 5);
+        assert_eq!(win32_code(5), 5);
+        assert_eq!(one_line("rename running exe: Access is denied (5)\r\nextra"), "rename running exe: Access is denied (5) extra");
+    }
+
+    #[test]
+    fn retry_gives_up_and_rollback_follows_the_second_failure() {
+        assert_eq!(rename_outcome(Some(5)), RenameOutcome::Locked);
+        assert_eq!(rename_outcome(Some(32)), RenameOutcome::Locked);
+        assert_eq!(rename_outcome(Some(33)), RenameOutcome::Locked);
+        assert_eq!(rename_outcome(Some(2)), RenameOutcome::Failed);
+        assert_eq!(rename_outcome(Some(3)), RenameOutcome::Failed);
+        assert_eq!(rename_outcome(None), RenameOutcome::Failed);
+        assert_eq!(next_attempt(RenameOutcome::Locked, 0, SWAP_TRIES), AttemptNext::SleepAndRetry);
+        assert_eq!(next_attempt(RenameOutcome::Locked, SWAP_TRIES - 1, SWAP_TRIES), AttemptNext::GiveUp);
+        assert_eq!(next_attempt(RenameOutcome::Moved, 3, SWAP_TRIES), AttemptNext::Done);
+        assert_eq!(next_attempt(RenameOutcome::Failed, 0, SWAP_TRIES), AttemptNext::GiveUp);
+        // A lock, then success: the new exe is in place. No rollback.
+        assert_eq!(scripted_swap(&[RenameOutcome::Locked, RenameOutcome::Moved], &[RenameOutcome::Moved], &[RenameOutcome::Failed]), SwapEnd::Swapped);
+        // The running exe never moves. It stays where it is.
+        assert_eq!(scripted_swap(&[RenameOutcome::Locked, RenameOutcome::Locked, RenameOutcome::Locked], &[], &[]), SwapEnd::Kept);
+        // The new exe never lands, and the old one is put back.
+        assert_eq!(
+            scripted_swap(&[RenameOutcome::Moved], &[RenameOutcome::Locked, RenameOutcome::Failed], &[RenameOutcome::Moved]),
+            SwapEnd::RolledBack
+        );
+        // The new exe never lands, and putting the old one back fails too.
+        assert_eq!(
+            scripted_swap(&[RenameOutcome::Moved], &[RenameOutcome::Failed], &[RenameOutcome::Locked, RenameOutcome::Locked, RenameOutcome::Locked]),
+            SwapEnd::RestoreFailed
+        );
+    }
+
+    /// Replay rename attempts the way `move_retry` does. `tries` is 3 so the scripts stay short.
+    fn scripted_swap(running: &[RenameOutcome], new_exe: &[RenameOutcome], restore: &[RenameOutcome]) -> SwapEnd {
+        const TRIES: u32 = 3;
+        let running_moved = phase_moved(running, TRIES);
+        if !running_moved {
+            return swap_status(false, false, false);
+        }
+        if phase_moved(new_exe, TRIES) {
+            return swap_status(true, true, false);
+        }
+        swap_status(true, false, phase_moved(restore, TRIES))
+    }
+
+    fn phase_moved(outcomes: &[RenameOutcome], tries: u32) -> bool {
+        for (i, outcome) in outcomes.iter().copied().enumerate() {
+            match next_attempt(outcome, i as u32, tries) {
+                AttemptNext::Done => return true,
+                AttemptNext::GiveUp => return false,
+                AttemptNext::SleepAndRetry => {}
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn apply_update_args_round_trip() {
+        let args = vec![
+            "--apply-update".into(),
+            r"D:\Tools\Maguro\maguro.exe".into(),
+            "4242".into(),
+            "4243".into(),
+        ];
+        let job = parse_apply_args(&args).unwrap();
+        assert_eq!(job.target, PathBuf::from(r"D:\Tools\Maguro\maguro.exe"));
+        assert_eq!((job.ui_pid, job.monitor_pid), (4242, 4243));
+        let spaced = vec!["--apply-update".into(), r"C:\Program Files\Maguro\maguro.exe".into(), "9".into(), "0".into()];
+        let no_mon = parse_apply_args(&spaced).unwrap();
+        assert_eq!(no_mon.monitor_pid, 0);
+        assert_eq!(no_mon.target, PathBuf::from(r"C:\Program Files\Maguro\maguro.exe"));
+        assert!(parse_apply_args(&["--apply-update".into()]).is_none());
+        assert!(parse_apply_args(&["--apply-update".into(), r"C:\maguro.exe".into(), "nope".into(), "1".into()]).is_none());
+        assert!(parse_apply_args(&["--apply-update".into(), r"C:\maguro.exe".into(), "0".into(), "1".into()]).is_none());
+        assert!(parse_apply_args(&["--updated".into(), "1".into()]).is_none());
+        assert!(parse_apply_args(&["--apply-update".into(), "--updated".into(), "1".into(), "2".into()]).is_none());
+        let note = Some("rename running exe: Access is denied (5)".to_string());
+        assert_eq!(fail_note_to_show(true, true, note.clone()), note);
+        assert_eq!(fail_note_to_show(false, true, note.clone()), None);
+        assert_eq!(fail_note_to_show(false, false, note.clone()), note);
+        assert_eq!(fail_note_to_show(true, false, None), Some(String::new()));
+        assert_eq!(fail_note_to_show(false, false, None), None);
+    }
+
+    #[test]
+    fn update_failed_flag_is_removed_and_the_note_is_one_line() {
+        let mut args = vec!["--updated".into(), "12".into(), "--update-failed".into(), r"C:\Work".into()];
+        assert!(take_update_failed_flag(&mut args));
+        assert_eq!(args, vec!["--updated".to_string(), "12".to_string(), r"C:\Work".to_string()]);
+        assert!(!take_update_failed_flag(&mut args));
+        let dir = std::env::temp_dir().join(format!("maguro-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("maguro.exe");
+        std::fs::write(&exe, b"x").unwrap();
+        write_fail_file(&exe, "rename running exe: Access is denied (5)\r\nsecond").unwrap();
+        let got = consume_fail_file(&fail_path(&exe)).unwrap();
+        assert_eq!(got, "rename running exe: Access is denied (5) second");
+        assert!(!fail_path(&exe).exists());
+        assert!(consume_fail_file(&fail_path(&exe)).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failure_dialog_adds_a_translated_reason_line() {
+        let reason = "rename running exe: Access is denied (5)";
+        let prev = crate::UI.load(Ordering::Relaxed);
+        crate::UI.store(0, Ordering::Relaxed);
+        let en = install_fail_notice(reason);
+        assert!(en.contains("The update could not be installed. Maguro was left as it was."), "{en}");
+        assert!(en.contains("Reason: rename running exe: Access is denied (5)"), "{en}");
+        assert!(!en.contains("{reason}"), "{en}");
+        assert_eq!(install_fail_notice("  \n"), "The update could not be installed. Maguro was left as it was.");
+        crate::UI.store(1, Ordering::Relaxed);
+        let ko = install_fail_notice(reason);
+        assert!(ko.contains("이유:"), "{ko}");
+        assert!(ko.contains(reason), "{ko}");
+        crate::UI.store(2, Ordering::Relaxed);
+        let ja = install_fail_notice(reason);
+        assert!(ja.contains("理由:"), "{ja}");
+        assert!(ja.contains("更新をインストールできませんでした"), "{ja}");
+        crate::UI.store(prev, Ordering::Relaxed);
+        assert!(is_maguro_class("MaguroMain"));
+        assert!(is_maguro_class("MaguroSettings"));
+        assert!(is_maguro_class("MaguroAbout"));
+        assert!(!is_maguro_class("Notepad"));
+        assert!(!is_maguro_class(""));
     }
 
     fn exe_json(tag: &str) -> String {
