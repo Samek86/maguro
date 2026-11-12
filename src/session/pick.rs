@@ -202,10 +202,10 @@ fn tab_heading(name: &str, index: usize) -> String {
 }
 
 fn path_line(index: usize, path: &str) -> String {
-    // Shell folders (::{CLSID}) read as their name, e.g. This PC, not the raw id.
+    // Shell places read as the OS display name, not the parsing name.
     let shown = if path.is_empty() {
         tr(crate::Key::Empty2).to_string()
-    } else if path.starts_with("::") {
+    } else if shell_parsing_name(path) {
         crate::short_name(path)
     } else {
         path.to_string()

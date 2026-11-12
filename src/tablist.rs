@@ -231,11 +231,8 @@ pub(crate) fn grid_label(heights: &[usize]) -> String {
     }
 }
 
-/// Folder name on a chip. This PC uses the same label as a tab, not the shell CLSID.
+/// Folder name on a chip. Same label as a tab, including the OS name of a shell place.
 pub(crate) fn chip_name(path: &str) -> String {
-    if path.contains("20D04FE0-3AEA-1069-A2D8-08002B30309D") {
-        return tr(Key::ThisPc).into();
-    }
     folder_display_name(path)
 }
 
@@ -244,15 +241,9 @@ pub(crate) fn path_text<'a>(name: &'a str, tip: &'a str) -> &'a str {
     if tip.contains('\\') || tip.contains('/') { tip } else { name }
 }
 
-/// Tooltip for a chip: the pane's full path. This PC is the localized name. An empty path shows nothing.
+/// Tooltip for a chip. A shell place is the OS display name. Any other folder is its path.
 pub(crate) fn chip_tip(path: &str) -> String {
-    if path.is_empty() {
-        return String::new();
-    }
-    if path.contains("20D04FE0-3AEA-1069-A2D8-08002B30309D") {
-        return tr(Key::ThisPc).into();
-    }
-    path.to_string()
+    folder_tip_text(path)
 }
 
 /// Case-insensitive match on the tab name, a folder's display name, or its full path.
@@ -794,11 +785,7 @@ fn snapshot() -> Vec<Row> {
             let active = if live { a.s.active } else { t.active };
             let active = active.min(count - 1);
             let path = paths.get(active).map(String::as_str).unwrap_or("");
-            let name = if custom_tab_name(&t.name).is_none() && path.contains("20D04FE0-3AEA-1069-A2D8-08002B30309D") {
-                tr(Key::ThisPc).to_string()
-            } else {
-                tab_label(&t.name, path)
-            };
+            let name = tab_label(&t.name, path);
             let mut chips = Vec::new();
             for pane in 0..count {
                 let (list, cur) = if live {
@@ -2741,15 +2728,20 @@ mod tests {
     }
 
     #[test]
-    fn chip_tip_is_the_full_path_and_this_pc_is_substituted() {
+    fn chip_tip_is_the_full_path_and_shell_places_use_the_display_name() {
         assert_eq!(chip_name(r"C:\Work\docs\"), "docs");
         assert_eq!(chip_tip(r"C:\Work\docs\"), r"C:\Work\docs\");
         assert!(chip_tip("").is_empty());
+        assert_eq!(chip_name(r"::{DEADBEEF}"), r"::{DEADBEEF}");
+        assert_eq!(chip_tip(r"::{DEADBEEF}"), r"::{DEADBEEF}");
         let pc = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
-        let this_pc = tr(Key::ThisPc);
-        assert_eq!(chip_name(pc), this_pc);
-        assert_eq!(chip_tip(pc), this_pc);
-        assert!(!chip_tip(pc).contains("20D04FE0"));
+        let bin = "::{645FF040-5081-101B-9F08-00AA002F954E}";
+        for path in [pc, bin, "shell:RecycleBinFolder"] {
+            let name = chip_name(path);
+            assert!(!name.is_empty() && !name.eq_ignore_ascii_case(path), "{path} -> {name}");
+            assert!(!name.contains("20D04FE0") && !name.contains("645FF040"), "{name}");
+            assert_eq!(chip_tip(path), name);
+        }
     }
 
     fn fold(index: usize, name: &str, folders: &[(&str, &str)]) -> TabFold {

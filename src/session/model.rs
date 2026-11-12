@@ -69,11 +69,11 @@ pub(crate) fn stored_pane_tab_name(typed: &str) -> String {
 ///
 /// `C:\` and `C:` are `C:`. A trailing slash is ignored, so `C:\Work\docs\` is `docs`.
 /// A UNC path uses its last component (`\\server\share` is `share`, `\\server\share\docs` is `docs`).
-/// This PC's shell name is `This PC`. An empty path is empty. Any other path with no usable
-/// segment (a `::{…}` name that is not This PC) falls back to the path itself.
+/// A shell place (`::{CLSID}`, `shell:…`) uses the OS display name. When the shell cannot
+/// name it, the path itself is the fallback. An empty path is empty.
 pub(crate) fn folder_display_name(path: &str) -> String {
-    if path.contains("20D04FE0-3AEA-1069-A2D8-08002B30309D") {
-        return "This PC".into();
+    if let Some(name) = shell_display_name(path) {
+        return name;
     }
     let t = path.trim_end_matches(['\\', '/']);
     if let Some(name) = t.rsplit(['\\', '/']).next() {
@@ -82,6 +82,15 @@ pub(crate) fn folder_display_name(path: &str) -> String {
         }
     }
     t.to_string()
+}
+
+/// Tooltip for one folder. A shell place is the OS display name. A filesystem path stays
+/// the path, so it can be copied and opened again. The address bar does not use this.
+pub(crate) fn folder_tip_text(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    if shell_parsing_name(path) { folder_display_name(path) } else { path.to_string() }
 }
 
 /// Label on the tab strip: a custom title, otherwise the active pane's folder.
@@ -3378,9 +3387,33 @@ mod tab_name_tests {
         assert_eq!(folder_display_name(r"\\server\share"), "share");
         assert_eq!(folder_display_name(r"\\server"), "server");
         assert_eq!(folder_display_name(""), "");
-        assert_eq!(folder_display_name(r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"), "This PC");
-        // A shell name that is not This PC has no leaf. The path itself is the fallback.
+        // A shell name the shell cannot resolve has no leaf. The path itself is the fallback.
         assert_eq!(folder_display_name(r"::{DEADBEEF}"), r"::{DEADBEEF}");
+        assert_eq!(folder_tip_text(r"::{DEADBEEF}"), r"::{DEADBEEF}");
+        assert!(crate::shell_parsing_name(r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"));
+        assert!(crate::shell_parsing_name("shell:RecycleBinFolder"));
+        assert!(crate::shell_parsing_name("  SHELL:Desktop"));
+        assert!(!crate::shell_parsing_name(r"C:\Users\me\Documents"));
+        assert!(!crate::shell_parsing_name(r"\\server\share"));
+        assert!(!crate::shell_parsing_name(""));
+        let pc = r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+        let bin = r"::{645FF040-5081-101B-9F08-00AA002F954E}";
+        for path in [pc, bin, "shell:RecycleBinFolder"] {
+            let name = folder_display_name(path);
+            let via = crate::shell_namespace_name(path).expect(path);
+            assert!(!name.is_empty(), "{path}");
+            assert!(!name.eq_ignore_ascii_case(path), "{path} -> {name}");
+            assert!(!crate::shell_parsing_name(&name), "{path} -> {name}");
+            assert_eq!(name, via, "{path}");
+            assert_eq!(folder_tip_text(path), name);
+            assert_eq!(crate::shell_namespace_name(&path.to_ascii_lowercase()).as_deref(), Some(name.as_str()));
+        }
+        assert_eq!(folder_display_name("shell:RecycleBinFolder"), folder_display_name("SHELL:recyclebinfolder"));
+        assert_eq!(crate::short_name(pc), folder_display_name(pc));
+        let title = crate::window_title(bin);
+        assert!(title.starts_with(&folder_display_name(bin)), "{title}");
+        assert!(title.ends_with(" - Maguro"), "{title}");
+        assert!(!title.contains("645FF040"), "{title}");
     }
 
     #[test]
@@ -3394,7 +3427,12 @@ mod tab_name_tests {
         // No folder yet: the stored token keeps the tab from going blank.
         assert_eq!(tab_label("1", ""), "1");
         assert_eq!(tab_label("", ""), "");
-        assert_eq!(tab_label("1", r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"), "This PC");
+        let pc = r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+        let bin = r"::{645FF040-5081-101B-9F08-00AA002F954E}";
+        assert_eq!(tab_label("1", pc), folder_display_name(pc));
+        assert_eq!(tab_label("Work", bin), "Work");
+        assert_eq!(tab_label("", bin), folder_display_name(bin));
+        assert!(!tab_label("1", bin).contains("645FF040"));
         assert_eq!(stored_tab_name("  Work  "), "Work");
         assert_eq!(stored_tab_name("1"), "");
         assert_eq!(stored_tab_name("   "), "");

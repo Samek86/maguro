@@ -5,11 +5,13 @@
 //! a field here: an RDP item keeps only `has_password`, and the secret lives in
 //! Windows Credential Manager under `Maguro:rdp:<host>`.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Map, Value};
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Storage::FileSystem::SearchPathW;
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Shell::{AssocQueryStringW, IShellItem, SHCreateItemFromParsingName, ASSOCF_NONE, ASSOCSTR_EXECUTABLE, SIGDN_NORMALDISPLAY};
 
 use crate::Key;
@@ -273,19 +275,54 @@ pub(crate) fn fav_shown_name(kind: ItemKind, stored: &str, path: &str) -> String
     }
 }
 
+/// OS display name for a shell parsing name, when it is not the parsing name itself.
+pub(crate) fn shell_display_name(path: &str) -> Option<String> {
+    let name = shell_namespace_name(path)?;
+    if raw_shell_name(&name, path) { None } else { Some(name) }
+}
+
 /// `SIGDN_NORMALDISPLAY` for a shell parsing name. None when the shell cannot name it.
+/// Names are cached for the process. The OS language does not change while Maguro is running,
+/// and a tab paint must not ask the shell again.
 pub(crate) fn shell_namespace_name(path: &str) -> Option<String> {
     let path = path.trim();
     if !shell_parsing_name(path) {
         return None;
     }
+    let key = path.to_ascii_lowercase();
+    if let Some(hit) = shell_name_cache().get(&key) {
+        return hit.clone();
+    }
+    let (name, cacheable) = query_shell_namespace_name(path);
+    if cacheable {
+        shell_name_cache().insert(key, name.clone());
+    }
+    name
+}
+
+fn shell_name_cache() -> std::sync::MutexGuard<'static, HashMap<String, Option<String>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `(name, cacheable)`. A miss is cached only after COM was ready, so a not-yet-initialized
+/// thread does not freeze `None` for a real shell place.
+fn query_shell_namespace_name(path: &str) -> (Option<String>, bool) {
     unsafe {
-        let wide = HSTRING::from(path);
-        let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
-        let pw = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
-        let name = crate::pwstr(pw);
-        let name = name.trim().to_string();
-        (!name.is_empty()).then_some(name)
+        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let balanced = hr.is_ok();
+        let name = (|| {
+            let wide = HSTRING::from(path);
+            let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
+            let pw = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
+            let name = crate::pwstr(pw).trim().to_string();
+            (!name.is_empty()).then_some(name)
+        })();
+        if balanced {
+            CoUninitialize();
+        }
+        let cacheable = name.is_some() || balanced;
+        (name, cacheable)
     }
 }
 

@@ -929,7 +929,9 @@ mod tests {
         assert!(!fav_removes(&[], |_| true) && !fav_removes(&[r"C:\Work", r"D:\"], |p| p.eq_ignore_ascii_case(r"C:\Work")));
         assert_eq!((fav_anchor(Some(5), 8), fav_anchor(None, 8), fav_anchor(Some(9), 3), fav_anchor(None, 0)), (5, 7, 2, 0));
         assert!(!f.snapshot().contains("fav="));
-        assert_eq!((short_name(r"C:\Users\x\"), short_name("C:\\"), short_name(THIS_PC)), ("x".into(), "C:".into(), "This PC".into()));
+        let pc_name = short_name(THIS_PC);
+        assert_eq!((short_name(r"C:\Users\x\"), short_name("C:\\")), ("x".into(), "C:".into()));
+        assert!(!pc_name.is_empty() && pc_name != THIS_PC && !pc_name.contains("20D04FE0"), "{pc_name}");
 
         // cells tile the length exactly, with `gap` between neighbours
         let c = cells(10, 305, &[0.25, 0.25, 0.5], 5);

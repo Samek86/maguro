@@ -396,7 +396,7 @@ unsafe fn tab_screen(h: HWND, i: usize, k: usize, slot: bool) -> Option<RECT> {
 unsafe fn path_tip(h: HWND, i: usize, k: usize) {
     let (added_path, added_lock) = app(|a| (a.pane_tab_tip, a.pane_tab_lock_tip));
     let (lock, _) = tip_leave(h, PANE_TAB_LOCK_TIP, added_lock);
-    let text = app(|a| a.s.pane_tab_list(i).get(k).cloned().unwrap_or_default());
+    let text = app(|a| folder_tip_text(a.s.pane_tab_list(i).get(k).map(String::as_str).unwrap_or("")));
     let Some(item) = (!text.is_empty()).then(|| tab_screen(h, i, k, false)).flatten() else {
         let (path, _) = tip_leave(h, PANE_TAB_TIP, added_path);
         app(|a| {
