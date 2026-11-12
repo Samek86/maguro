@@ -65,6 +65,17 @@ const MIGRATED: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "src/ui/iconpick.rs",
+        &[
+            "paint_window(",
+            "paint_segment(",
+            "paint_button(",
+            "paint_section_header(",
+            "style_popup_chrome(",
+            "FocusRing",
+        ],
+    ),
+    (
         "src/basket.rs",
         &[
             "paint_window(",

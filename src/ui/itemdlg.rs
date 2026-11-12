@@ -51,6 +51,7 @@ const HIT_BROWSE_WORK: i32 = 29;
 const HIT_BROWSE_ICON: i32 = 30;
 const HIT_OK: i32 = 31;
 const HIT_CANCEL: i32 = 32;
+const HIT_ICON_LIST: i32 = 33;
 
 static EDIT_PROC: AtomicIsize = AtomicIsize::new(0);
 
@@ -81,6 +82,7 @@ pub(crate) struct Geom {
     pub(crate) icon_auto: RECT,
     pub(crate) icon_custom: RECT,
     pub(crate) index: RECT,
+    pub(crate) icon_list: RECT,
     pub(crate) note: RECT,
     pub(crate) saved: RECT,
     pub(crate) clear_pass: RECT,
@@ -224,6 +226,16 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
                 PostQuitMessage(msg.wParam.0 as i32);
             }
             break;
+        }
+        if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_TAB.0 as usize {
+            let mine = msg.hwnd == hwnd || IsChild(hwnd, msg.hwnd).as_bool();
+            let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
+            let alt = GetKeyState(VK_MENU.0 as i32) < 0;
+            // A composition owns Tab the same way the list owns arrows while an IME syllable is open.
+            if mine && !ctrl && !alt && !crate::app::ime_composing(msg.hwnd) {
+                move_tab(hwnd, GetKeyState(VK_SHIFT.0 as i32) < 0);
+                continue;
+            }
         }
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
@@ -369,16 +381,18 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     let icon_auto = RECT { left: pad, top: y, right: pad + half, bottom: y + seg_h };
     let icon_custom = RECT { left: icon_auto.right + gap, top: y, right, bottom: y + seg_h };
     y = icon_custom.bottom + gap;
-    let index = if custom_icon {
+    let (index, icon_list) = if custom_icon {
+        let list_w = s(BTN_MIN_W);
         let b = RECT { left: right - browse_w, top: y, right, bottom: y + edit_h };
-        let index = RECT { left: b.left - gap - s(56), top: y, right: b.left - gap, bottom: y + edit_h };
+        let list = RECT { left: b.left - gap - list_w, top: y, right: b.left - gap, bottom: y + edit_h };
+        let index = RECT { left: list.left - gap - s(56), top: y, right: list.left - gap, bottom: y + edit_h };
         let path = RECT { left: pad, top: y, right: index.left - gap, bottom: y + edit_h };
         browse.push((Slot::IconPath, b));
         slots.push((Slot::IconPath, path));
         y = b.bottom + gap;
-        index
+        (index, list)
     } else {
-        RECT::default()
+        (RECT::default(), RECT::default())
     };
 
     let bh = s(BTN_H_FOOTER);
@@ -398,6 +412,7 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
         icon_auto,
         icon_custom,
         index,
+        icon_list,
         note,
         saved,
         clear_pass,
@@ -444,6 +459,134 @@ fn slot_edit(slot: Slot) -> Option<usize> {
         Slot::IconPath => 7,
         Slot::Place | Slot::Screen => return None,
     })
+}
+
+/// Visible inputs for one kind. Buttons stay out of this list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabStop {
+    Name,
+    Target,
+    Args,
+    Work,
+    User,
+    Pass,
+    Place,
+    Screen,
+    Cred,
+    IconPath,
+    IconIndex,
+}
+
+fn tab_fields(kind: ItemKind, custom_icon: bool) -> Vec<TabStop> {
+    let mut v = vec![TabStop::Name];
+    match kind {
+        ItemKind::Folder | ItemKind::File => v.push(TabStop::Target),
+        ItemKind::Command => v.extend([TabStop::Target, TabStop::Args, TabStop::Work]),
+        ItemKind::Url => v.push(TabStop::Target),
+        ItemKind::Special => v.extend([TabStop::Place, TabStop::Target]),
+        ItemKind::Rdp => v.extend([TabStop::Target, TabStop::User, TabStop::Pass, TabStop::Screen, TabStop::Cred]),
+    }
+    if custom_icon {
+        v.extend([TabStop::IconPath, TabStop::IconIndex]);
+    }
+    v
+}
+
+fn next_tab(fields: &[TabStop], current: Option<TabStop>, back: bool) -> Option<TabStop> {
+    let n = fields.len();
+    if n == 0 {
+        return None;
+    }
+    let pos = current.and_then(|c| fields.iter().position(|s| *s == c));
+    let i = match (pos, back) {
+        (Some(i), false) => (i + 1) % n,
+        (Some(i), true) => (i + n - 1) % n,
+        (None, false) => 0,
+        (None, true) => n - 1,
+    };
+    Some(fields[i])
+}
+
+fn kept_or_first(fields: &[TabStop], current: Option<TabStop>) -> Option<TabStop> {
+    if current.is_some_and(|c| fields.contains(&c)) {
+        return current;
+    }
+    fields.first().copied()
+}
+
+fn stop_hwnd(v: &Dlg, stop: TabStop) -> HWND {
+    match stop {
+        TabStop::Name => v.edits[0],
+        TabStop::Target => v.edits[1],
+        TabStop::Args => v.edits[2],
+        TabStop::Work => v.edits[3],
+        TabStop::User => v.edits[4],
+        TabStop::Pass => v.edits[5],
+        TabStop::Cred => v.edits[6],
+        TabStop::IconPath => v.edits[7],
+        TabStop::IconIndex => v.edits[8],
+        TabStop::Place => v.place_combo,
+        TabStop::Screen => v.screen_combo,
+    }
+}
+
+unsafe fn hwnd_visible(h: HWND) -> bool {
+    !h.0.is_null() && IsWindowVisible(h).as_bool()
+}
+
+unsafe fn focused_stop(v: &Dlg) -> Option<TabStop> {
+    let f = GetFocus();
+    if f.0.is_null() {
+        return None;
+    }
+    const STOPS: [TabStop; 11] = [
+        TabStop::Name,
+        TabStop::Target,
+        TabStop::Args,
+        TabStop::Work,
+        TabStop::User,
+        TabStop::Pass,
+        TabStop::Cred,
+        TabStop::IconPath,
+        TabStop::IconIndex,
+        TabStop::Place,
+        TabStop::Screen,
+    ];
+    for stop in STOPS {
+        let h = stop_hwnd(v, stop);
+        if h == f || (!h.0.is_null() && IsChild(h, f).as_bool()) {
+            return Some(stop);
+        }
+    }
+    None
+}
+
+unsafe fn focus_stop(v: &Dlg, stop: TabStop) {
+    let h = stop_hwnd(v, stop);
+    if !h.0.is_null() {
+        let _ = SetFocus(Some(h));
+    }
+}
+
+unsafe fn move_tab(h: HWND, back: bool) {
+    let Some(v) = view(h) else { return };
+    let fields = tab_fields((*v).kind, (*v).custom_icon);
+    let cur = focused_stop(&*v).filter(|s| hwnd_visible(stop_hwnd(&*v, *s)));
+    if let Some(stop) = next_tab(&fields, cur, back) {
+        focus_stop(&*v, stop);
+        let _ = InvalidateRect(Some(h), None, false);
+    }
+}
+
+unsafe fn settle_focus(h: HWND) {
+    let Some(v) = view(h) else { return };
+    let fields = tab_fields((*v).kind, (*v).custom_icon);
+    let cur = focused_stop(&*v).filter(|s| hwnd_visible(stop_hwnd(&*v, *s)));
+    let Some(stop) = kept_or_first(&fields, cur) else { return };
+    if cur != Some(stop) {
+        focus_stop(&*v, stop);
+        let _ = InvalidateRect(Some(h), None, false);
+    }
 }
 
 fn sc(dpi: i32, dip: i32) -> i32 {
@@ -740,6 +883,19 @@ unsafe fn paint(h: HWND) {
         for (_, r) in &g.browse {
             paint_button(dc, *r, ButtonKind::Secondary, visual_from_pointer(browse_hit(*r, &g), hot_id, down_id), tr(crate::Key::Browse), body, dpi, ground, FocusRing::Outside);
         }
+        if g.icon_list.bottom > g.icon_list.top {
+            paint_button(
+                dc,
+                g.icon_list,
+                ButtonKind::Secondary,
+                visual_from_pointer(HIT_ICON_LIST, hot_id, down_id),
+                tr(crate::Key::IconList),
+                body,
+                dpi,
+                ground,
+                FocusRing::Outside,
+            );
+        }
         if g.admin.bottom > g.admin.top {
             let tick_w = sc(dpi, 16);
             let tick = RECT { left: g.admin.left, top: g.admin.top + sc(dpi, 4), right: g.admin.left + tick_w, bottom: g.admin.top + tick_w + sc(dpi, 4) };
@@ -793,6 +949,7 @@ unsafe fn hit(h: HWND, lp: LPARAM, down: bool, up: bool) {
         (g.clear_pass, HIT_CLEAR_PASS),
         (g.ok, HIT_OK),
         (g.cancel, HIT_CANCEL),
+        (g.icon_list, HIT_ICON_LIST),
     ];
     for (r, hit) in pairs {
         if r.bottom > r.top && inside(r, x, y) {
@@ -842,6 +999,7 @@ unsafe fn activate(h: HWND, id: i32) {
             (*v).clear_password = false;
         }
         fit_window(h);
+        settle_focus(h);
         sync_place((*v).place_combo, &text_of((*v).edits[1]));
         sync_screen((*v).screen_combo, (*v).screen);
         let _ = InvalidateRect(Some(h), None, true);
@@ -855,11 +1013,13 @@ unsafe fn activate(h: HWND, id: i32) {
         HIT_ICON_AUTO => {
             (*v).custom_icon = false;
             fit_window(h);
+            settle_focus(h);
             let _ = InvalidateRect(Some(h), None, true);
         }
         HIT_ICON_CUSTOM => {
             (*v).custom_icon = true;
             fit_window(h);
+            settle_focus(h);
             let _ = InvalidateRect(Some(h), None, true);
         }
         HIT_CLEAR_PASS => {
@@ -875,6 +1035,17 @@ unsafe fn activate(h: HWND, id: i32) {
         HIT_BROWSE_ICON => {
             if let Some(path) = pick_icon(h) {
                 set_text((*view(h).unwrap()).edits[7], &path);
+            }
+        }
+        HIT_ICON_LIST => {
+            let Some(v) = view(h) else { return };
+            let path = text_of((*v).edits[7]);
+            let index = text_of((*v).edits[8]).trim().parse().unwrap_or(0);
+            if let Some(hit) = super::iconpick::pick_system_icon(h, &path, index) {
+                let Some(v) = view(h) else { return };
+                set_text((*v).edits[7], &hit.path);
+                set_text((*v).edits[8], &hit.index.to_string());
+                let _ = InvalidateRect(Some(h), None, false);
             }
         }
         HIT_OK => commit(h),
@@ -1139,7 +1310,7 @@ mod tests {
         v.extend(g.labels.iter().map(|(_, r)| *r));
         v.extend(g.slots.iter().map(|(_, r)| *r));
         v.extend(g.browse.iter().map(|(_, r)| *r));
-        for r in [g.admin, g.icon_auto, g.icon_custom, g.index, g.note, g.saved, g.clear_pass, g.ok, g.cancel] {
+        for r in [g.admin, g.icon_auto, g.icon_custom, g.index, g.icon_list, g.note, g.saved, g.clear_pass, g.ok, g.cancel] {
             if r.bottom > r.top && r.right > r.left {
                 v.push(r);
             }
@@ -1188,9 +1359,15 @@ mod tests {
                         if custom {
                             assert!(has(&g, Slot::IconPath));
                             let path = g.slots.iter().find(|(s, _)| *s == Slot::IconPath).unwrap().1;
+                            let browse = g.browse.iter().find(|(s, _)| *s == Slot::IconPath).unwrap().1;
                             assert!(path.top >= g.icon_custom.bottom);
-                            assert!(path.right <= g.index.left);
-                            assert!(g.index.right < g.browse.iter().find(|(s, _)| *s == Slot::IconPath).unwrap().1.left || g.index.right == g.browse.iter().find(|(s, _)| *s == Slot::IconPath).unwrap().1.left);
+                            assert!(path.right <= g.index.left, "{kind:?} {dpi}");
+                            assert!(g.index.right <= g.icon_list.left, "{kind:?} {dpi}");
+                            assert!(g.icon_list.right <= browse.left, "{kind:?} {dpi}");
+                            assert!(browse.right <= width, "{kind:?} {dpi}");
+                            assert_eq!(g.icon_list.top, browse.top, "{kind:?} {dpi}");
+                            assert_eq!(g.icon_list.bottom - g.icon_list.top, px(dpi, FIELD_H), "{kind:?} {dpi}");
+                            assert_eq!(browse.bottom - browse.top, px(dpi, FIELD_H), "{kind:?} {dpi}");
                         }
                         let all = boxes(&g);
                         for r in &all {
@@ -1206,6 +1383,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tab_cycles_the_visible_fields_only() {
+        assert_eq!(tab_fields(ItemKind::Folder, false), vec![TabStop::Name, TabStop::Target]);
+        assert_eq!(tab_fields(ItemKind::File, false), vec![TabStop::Name, TabStop::Target]);
+        assert_eq!(tab_fields(ItemKind::Command, false), vec![TabStop::Name, TabStop::Target, TabStop::Args, TabStop::Work]);
+        assert_eq!(tab_fields(ItemKind::Url, false), vec![TabStop::Name, TabStop::Target]);
+        assert_eq!(tab_fields(ItemKind::Special, false), vec![TabStop::Name, TabStop::Place, TabStop::Target]);
+        assert_eq!(
+            tab_fields(ItemKind::Rdp, false),
+            vec![TabStop::Name, TabStop::Target, TabStop::User, TabStop::Pass, TabStop::Screen, TabStop::Cred]
+        );
+        for kind in KINDS {
+            let v = tab_fields(kind, true);
+            let n = v.len();
+            assert_eq!(v[n - 2], TabStop::IconPath, "{kind:?}");
+            assert_eq!(v[n - 1], TabStop::IconIndex, "{kind:?}");
+        }
+        let folder = tab_fields(ItemKind::Folder, false);
+        assert_eq!(next_tab(&folder, Some(TabStop::Name), false), Some(TabStop::Target));
+        assert_eq!(next_tab(&folder, Some(TabStop::Target), false), Some(TabStop::Name));
+        assert_eq!(next_tab(&folder, Some(TabStop::Name), true), Some(TabStop::Target));
+        assert_eq!(next_tab(&folder, None, false), Some(TabStop::Name));
+        assert_eq!(next_tab(&folder, Some(TabStop::Pass), true), Some(TabStop::Target));
+        let rdp = tab_fields(ItemKind::Rdp, true);
+        assert_eq!(kept_or_first(&rdp, Some(TabStop::User)), Some(TabStop::User));
+        assert_eq!(kept_or_first(&folder, Some(TabStop::Pass)), Some(TabStop::Name));
+        assert_eq!(kept_or_first(&folder, Some(TabStop::IconIndex)), Some(TabStop::Name));
+        assert_eq!(kept_or_first(&rdp, Some(TabStop::IconIndex)), Some(TabStop::IconIndex));
     }
 
     #[test]

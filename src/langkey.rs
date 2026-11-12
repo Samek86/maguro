@@ -885,11 +885,12 @@ pub(crate) enum Key {
     BadIconIndex,
     CouldNotSavePassword,
     UpdateFailReason,
+    IconList,
 }
 
-pub(crate) const KEY_COUNT: usize = 880;
+pub(crate) const KEY_COUNT: usize = 881;
 
-const _: () = assert!((Key::UpdateFailReason as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::IconList as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1772,6 +1773,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "The icon index must be from 0 to 1000.",
     "Could not save the password to Credential Manager.",
     "Reason: {reason}",
+    "List",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2656,4 +2658,5 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "bad_icon_index",
     "could_not_save_password",
     "update_fail_reason",
+    "icon_list",
 ];
