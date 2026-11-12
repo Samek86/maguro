@@ -696,6 +696,18 @@ mod tests {
     }
 
     #[test]
+    fn update_fail_reason_keeps_the_placeholder() {
+        assert!(EN[Key::UpdateFailReason as usize].contains("{reason}"));
+        assert!(EN[Key::UpdateFailReason as usize].starts_with("Reason:"));
+        for (code, text) in [("ko", KO_INI), ("ja", JA_INI), ("fr", FR_INI), ("de", DE_INI)] {
+            let (_, map) = parse_ini(text);
+            let v = &map["update_fail_reason"];
+            assert!(v.contains("{reason}"), "{code} {v}");
+            assert!(!v.to_ascii_lowercase().contains("github"), "{code} {v}");
+        }
+    }
+
+    #[test]
     fn update_and_help_copy_names_no_site() {
         let ids = [
             "asks_github_for_newer_maguro_release_and",

@@ -41,7 +41,7 @@ pub(crate) use settings::store;
 
 fn main() -> Result<()> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    if crash::helper(&raw) {
+    if crash::helper(&raw) || apply_helper(&raw) {
         return Ok(());
     }
     // Hooks and the fast-fail watcher go in before settings, COM, or a window, so a fault
@@ -51,7 +51,10 @@ fn main() -> Result<()> {
         // A moved exe keeps the folder registration pointed at the binary that is running.
         folderapp::repair_moved_exe();
         let mut raw: Vec<String> = std::env::args().skip(1).collect();
-        wait_for_previous(&mut raw);
+        // Strip the failure flag before `--updated` consumes the front of the list.
+        let update_fail = take_update_failed(&mut raw);
+        // The previous process, or the apply helper, must be gone before the hotkey and the window class.
+        let updated = wait_for_previous(&mut raw);
         // A theme restart asks for the tabs just saved, not the startup-mode layout.
         let keep_tabs = take_keep_tabs(&mut raw);
         let args: Vec<String> = raw.into_iter().map(resolve).collect();
@@ -278,6 +281,9 @@ fn main() -> Result<()> {
         crash::show_previous();
         shell::blockext::apply(&s.blocked_shell_extensions);
         let main = open_window(s)?;
+        if let Some(reason) = update_fail {
+            show_update_failed(main, &reason);
+        }
         watch::start();
         apply_ext(app(|a| a.s.ext));
         if restore && boot != 0 && !keep_tabs {
@@ -285,7 +291,7 @@ fn main() -> Result<()> {
         }
         // Other saved windows open after this one is on screen, so the first paint is one window.
         SetTimer(Some(main), TIMER_WINS, 50, None);
-        startup(main, app(|a| a.s.update_check));
+        startup(main, app(|a| a.s.update_check), updated);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
