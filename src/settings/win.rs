@@ -1506,9 +1506,59 @@ unsafe fn restore_default_favs(h: HWND) {
     let _ = MessageBoxW(Some(h), &HSTRING::from(text), w!("Maguro"), MB_OK | MB_ICONINFORMATION);
 }
 
+unsafe fn fav_page_menu(h: HWND, lp: LPARAM) {
+    let mut pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
+    if pt.x == -1 && pt.y == -1 {
+        return;
+    }
+    let _ = ScreenToClient(h, &mut pt);
+    let sn = snap();
+    let mut rc = RECT::default();
+    let _ = GetClientRect(h, &mut rc);
+    let g = geo(rc, &sn);
+    let row = g.items.iter().find_map(|it| match it {
+        Item::FavRow { i, rect, .. } if *i != usize::MAX && inside(*rect, pt.x, pt.y) => Some(*i),
+        _ => None,
+    });
+    let on_list = row.is_some()
+        || g.items.iter().any(|it| match it {
+            Item::FavHead(r) | Item::Table(r) if inside(*r, pt.x, pt.y) => true,
+            _ => false,
+        });
+    if !on_list {
+        return;
+    }
+    let leaf = row.and_then(fav_node).filter(|r| !r.group);
+    let server = leaf.as_ref().is_some_and(|r| app(|a| crate::node_ref(&a.s.tree, &r.id).is_some_and(|n| n.server.is_some())));
+    let Ok(menu) = CreatePopupMenu() else { return };
+    let _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from(tx(crate::Key::AddItem)));
+    if leaf.is_some() && !server {
+        let _ = AppendMenuW(menu, MF_STRING, 2, &HSTRING::from(tx(crate::Key::EditItem)));
+    }
+    let mut screen = pt;
+    let _ = ClientToScreen(h, &mut screen);
+    let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, screen.x, screen.y, None, h, None).0;
+    let _ = DestroyMenu(menu);
+    let parent = if let Some(row) = row.and_then(fav_node) {
+        if row.group { row.id } else { row.id[..row.id.len().saturating_sub(1)].to_vec() }
+    } else {
+        Vec::new()
+    };
+    match cmd {
+        1 => crate::open_item_dialog(h, &parent, None),
+        2 => {
+            if let Some(row) = leaf {
+                crate::open_item_dialog(h, &[], Some(&row.id));
+            }
+        }
+        _ => {}
+    }
+}
+
 unsafe fn delete_fav(k: usize) {
     let Some(id) = fav_node(k).map(|r| r.id) else { return };
     let links = crate::servers_at(&id);
+    let hosts = crate::fav_rdp_hosts(&id);
     app(|a| {
         a.s.ensure_fav_tree();
         crate::delete_at(&mut a.s.tree, &id);
@@ -1516,6 +1566,7 @@ unsafe fn delete_fav(k: usize) {
         a.fav_hot = None;
     });
     crate::release_servers(links);
+    crate::forget_hosts(&hosts);
     crate::commit_favs();
 }
 
@@ -2161,6 +2212,7 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 return crate::color_field_edit(dc);
             }
             WM_COMMAND => on_command(h, (wp.0 & 0xffff) as i32, ((wp.0 >> 16) & 0xffff) as u32),
+            WM_CONTEXTMENU => fav_page_menu(h, lp),
             WM_LBUTTONDOWN => {
                 let x = (lp.0 & 0xffff) as i16 as i32;
                 let y = ((lp.0 >> 16) & 0xffff) as i16 as i32;

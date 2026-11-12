@@ -5,6 +5,7 @@ use crate::pane::*;
 use crate::session::*;
 use crate::i18n::*;
 use crate::settings;
+use super::{forget_hosts, launches, open_leaf};
 
 // ---------- favourites: ☆+ in each pane header; Ctrl+B opens the same list ----------
 
@@ -79,6 +80,11 @@ fn server_of(row: &FavRow) -> Option<crate::session::ServerLink> {
 /// Servers on this node, including every server inside a group, before it is deleted.
 pub(crate) fn servers_at(id: &[usize]) -> Vec<crate::session::ServerLink> {
     app(|a| node_ref(&a.s.tree, id).map(servers_in).unwrap_or_default())
+}
+
+/// RDP hosts on this node whose password flag should be dropped if nothing else uses them.
+pub(crate) fn fav_rdp_hosts(id: &[usize]) -> Vec<String> {
+    app(|a| node_ref(&a.s.tree, id).map(rdp_hosts_in).unwrap_or_default())
 }
 
 /// Unmount after the node is gone, when no remaining favourite uses the same mount.
@@ -182,6 +188,17 @@ pub(crate) unsafe fn open_fav_row(row: &FavRow) {
     if let Some(link) = server_of(row) {
         launch_server(app(|a| a.main), link, None);
         return;
+    }
+    if row.in_tree() && !row.id.is_empty() {
+        let node = app(|a| node_ref(&a.s.tree, &row.id).cloned());
+        if let Some(node) = node.filter(|n| launches(n)) {
+            let owner = app(|a| a.main);
+            if !open_leaf(owner, &node) {
+                let q = tr(crate::Key::CouldNotStartItem);
+                let _ = MessageBoxW(Some(owner), &HSTRING::from(q), w!("Maguro"), MB_ICONWARNING);
+            }
+            return;
+        }
     }
     let unc = unc_path(&row.path);
     // Mapped drives are remote only when the path is not already a UNC. share_path stats a drive root, never the share itself.
@@ -1728,12 +1745,14 @@ fn fav_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let id = fav_rows().get(k).map(|r| r.id.clone());
                     if let Some(id) = id {
                         let links = servers_at(&id);
+                        let hosts = fav_rdp_hosts(&id);
                         app(|a| {
                             delete_at(&mut a.s.tree, &id);
                             a.s.sync_favs();
                             a.fav_hot = None;
                         });
                         release_servers(links);
+                        forget_hosts(&hosts);
                         favs_changed();
                     }
                 };

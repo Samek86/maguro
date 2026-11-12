@@ -839,7 +839,12 @@ unsafe fn side_menu(h: HWND, index: Option<usize>, x: i32, y: i32) {
         if row.as_ref().is_some_and(|r| r.file) {
             add(5, tr(crate::Key::Reveal));
         }
-        let server = row.as_ref().is_some_and(|r| r.in_tree() && !r.group && app(|a| node_ref(&a.s.tree, &r.id).is_some_and(|n| n.server.is_some())));
+        add(9, tr(crate::Key::AddItem));
+        let leaf = row.as_ref().is_some_and(|r| r.in_tree() && !r.group);
+        let server = leaf && row.as_ref().is_some_and(|r| app(|a| node_ref(&a.s.tree, &r.id).is_some_and(|n| n.server.is_some())));
+        if leaf && !server {
+            add(10, tr(crate::Key::EditItem));
+        }
         match crate::remote::menu_extra(row.is_some(), row.as_ref().is_some_and(|r| r.in_tree()), row.as_ref().is_some_and(|r| r.group), server) {
             crate::remote::MenuExtra::Add => add(7, tr(crate::Key::AddServerConnection)),
             crate::remote::MenuExtra::Edit => add(8, tr(crate::Key::EditServerConnection)),
@@ -855,6 +860,8 @@ unsafe fn side_menu(h: HWND, index: Option<usize>, x: i32, y: i32) {
             new_group(&[]);
         } else if cmd == 7 {
             open_server_dialog(app(|a| a.main), &[], None, None);
+        } else if cmd == 9 {
+            open_item_dialog(app(|a| a.main), &[], None);
         }
         return;
     };
@@ -881,12 +888,14 @@ unsafe fn side_menu(h: HWND, index: Option<usize>, x: i32, y: i32) {
         2 => begin_side_rename(&row.id),
         3 => {
             let links = servers_at(&row.id);
+            let hosts = fav_rdp_hosts(&row.id);
             app(|a| {
                 delete_at(&mut a.s.tree, &row.id);
                 a.s.sync_favs();
                 a.side_sel = None;
             });
             release_servers(links);
+            forget_hosts(&hosts);
             changed();
         }
         7 => {
@@ -894,6 +903,11 @@ unsafe fn side_menu(h: HWND, index: Option<usize>, x: i32, y: i32) {
             open_server_dialog(app(|a| a.main), &parent, None, None);
         }
         8 => open_server_dialog(app(|a| a.main), &[], Some(&row.id), None),
+        9 => {
+            let parent = if row.group { row.id.clone() } else { row.id[..row.id.len() - 1].to_vec() };
+            open_item_dialog(app(|a| a.main), &parent, None);
+        }
+        10 => open_item_dialog(app(|a| a.main), &[], Some(&row.id)),
         4 => open_fav_row(&row),
         6 => unpin_path(&row.path, row.kind == RowKind::Files),
         5 => {
@@ -1471,12 +1485,14 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                             let row = app(|a| a.side_sel).and_then(|i| rows().get(i).cloned());
                             if let Some(row) = row.filter(|r| r.in_tree()) {
                                 let links = servers_at(&row.id);
+                                let hosts = fav_rdp_hosts(&row.id);
                                 app(|a| {
                                     delete_at(&mut a.s.tree, &row.id);
                                     a.s.sync_favs();
                                     a.side_sel = None;
                                 });
                                 release_servers(links);
+                                forget_hosts(&hosts);
                                 changed();
                             }
                         }

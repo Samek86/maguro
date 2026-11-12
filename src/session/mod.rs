@@ -1,3 +1,4 @@
+mod favitem;
 mod favseed;
 mod favtree;
 mod files;
@@ -7,6 +8,7 @@ mod pick;
 mod split;
 pub(crate) mod workspace;
 
+pub(crate) use favitem::*;
 pub(crate) use favseed::*;
 pub(crate) use favtree::*;
 // `split` also exports `retarget_path` (saved-session path maps). Call this name from outside.

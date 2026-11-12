@@ -7,7 +7,7 @@ use crate::imports::*;
 use crate::i18n::tr;
 use crate::session::{home_rows, short_name, tree_rows, visible_rows, FavNode, FavRow, Pinned, RowKind};
 
-use super::{draw_fav_icon, fill, known_missing, pal, shell_icon, text};
+use super::{draw_fav_icon, ellipse, fill, indexed_icon, known_missing, pal, shell_icon, text};
 
 fn px(dpi: i32, v: i32) -> i32 {
     v * dpi / 96
@@ -256,6 +256,37 @@ pub(crate) unsafe fn paint_fav_head(dc: HDC, r: RECT, dpi: i32, font: HFONT) {
     fill(dc, RECT { top: r.bottom - 1, ..r }, pal().line);
 }
 
+/// Icon path, whether that path is a file icon, and an optional name colour.
+/// Command, URL, and RDP rows borrow an icon; the stored path stays on the row.
+/// Path used for the shell icon, whether that path is a file, an optional name colour,
+/// and a custom icon index. `-1` means the shell image list, not an extracted image.
+fn row_mark(row: &FavRow) -> (String, bool, Option<u32>, i32) {
+    if row.group {
+        return (String::new(), false, None, -1);
+    }
+    if !row.in_tree() || row.id.is_empty() {
+        return (row.path.clone(), row.file, None, -1);
+    }
+    crate::app_try(|a| {
+        let Some(n) = crate::node_ref(&a.s.tree, &row.id) else {
+            return (row.path.clone(), row.file, None, -1);
+        };
+        let color = n.item.as_ref().and_then(|i| i.color);
+        if let Some(icon) = n.item.as_ref().and_then(|i| i.icon.as_ref()) {
+            if !icon.path.is_empty() {
+                return (icon.path.clone(), true, color, icon.index);
+            }
+        }
+        match n.kind() {
+            crate::ItemKind::Url => ("page.url".into(), true, color, -1),
+            crate::ItemKind::Rdp => (crate::mstsc_exe(), true, color, -1),
+            crate::ItemKind::Command | crate::ItemKind::File => (n.path.clone(), true, color, -1),
+            crate::ItemKind::Special | crate::ItemKind::Folder => (n.path.clone(), false, color, -1),
+        }
+    })
+    .unwrap_or_else(|| (row.path.clone(), row.file, None, -1))
+}
+
 /// `show_chevron` draws an open/closed mark on groups and shifts the icon. Settings passes false.
 /// `actions` keeps the right side clear for the settings rename and delete buttons.
 pub(crate) unsafe fn paint_fav_row(dc: HDC, row: Option<&FavRow>, r: RECT, dpi: i32, font: HFONT, small: HFONT, icon_font: HFONT, empty: bool, show_chevron: bool, actions: bool) {
@@ -273,6 +304,7 @@ pub(crate) unsafe fn paint_fav_row(dc: HDC, row: Option<&FavRow>, r: RECT, dpi: 
         return;
     }
     let Some(row) = row else { return };
+    let (shell_path, shell_file, mark, icon_index) = row_mark(row);
     let name_right = r.left + (r.right - r.left) * 32 / 100;
     let slot = s(16).max(1);
     let icon_w = s(22);
@@ -285,17 +317,37 @@ pub(crate) unsafe fn paint_fav_row(dc: HDC, row: Option<&FavRow>, r: RECT, dpi: 
         icon_left = chev.right;
     }
     let icon = RECT { left: icon_left, right: icon_left + icon_w, ..r };
-    let (shell_path, shell_file) = if row.group { ("", false) } else { (row.path.as_str(), row.file) };
-    if let Some((list, index, dim)) = shell_icon(shell_path, shell_file) {
-        let iy = r.top + (r.bottom - r.top - slot).max(0) / 2;
-        let ix = icon.left + (icon_w - slot).max(0) / 2;
-        draw_fav_icon(dc, list, index, ix, iy, slot, dim);
+    let iy = r.top + (r.bottom - r.top - slot).max(0) / 2;
+    let ix = icon.left + (icon_w - slot).max(0) / 2;
+    let drawn = if icon_index >= 0 {
+        if let Some(hicon) = indexed_icon(&shell_path, icon_index) {
+            let _ = DrawIconEx(dc, ix, iy, hicon, slot, slot, 0, None, DI_NORMAL);
+            true
+        } else {
+            false
+        }
     } else {
-        let glyph = if shell_file { "\u{E8A5}" } else { "\u{E8B7}" };
-        text(dc, icon, glyph, icon_font, pal().sub, DT_CENTER);
+        false
+    };
+    if !drawn {
+        if let Some((list, index, dim)) = shell_icon(&shell_path, shell_file) {
+            draw_fav_icon(dc, list, index, ix, iy, slot, dim);
+        } else {
+            let glyph = if shell_file { "\u{E8A5}" } else { "\u{E8B7}" };
+            text(dc, icon, glyph, icon_font, pal().sub, DT_CENTER);
+        }
     }
-    let name_r = RECT { left: icon.right + s(4), right: name_right.max(icon.right + s(4)), ..r };
-    let name_ink = if !row.group && known_missing(&row.path) { pal().sub } else { pal().text };
+    let mut name_r = RECT { left: icon.right + s(4), right: name_right.max(icon.right + s(4)), ..r };
+    if let Some(color) = mark {
+        let d = s(8);
+        let top = r.top + ((r.bottom - r.top) - d).max(0) / 2;
+        let dot = RECT { left: name_r.left, top, right: (name_r.left + d).min(name_r.right), bottom: top + d };
+        if dot.right > dot.left {
+            ellipse(dc, dot, color, None);
+            name_r.left = dot.right + s(4);
+        }
+    }
+    let name_ink = if !row.group && shell_path == row.path && known_missing(&row.path) { pal().sub } else { pal().text };
     text(dc, name_r, &row.name, font, name_ink, DT_LEFT);
     // Explorer rows have no rename or delete button, so the path can use that space.
     let reserve = if actions && row.in_tree() { s(180) } else { s(12) };

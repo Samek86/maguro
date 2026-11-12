@@ -40,6 +40,8 @@ enum IconJob {
     Ext(String),
     Path(String),
     Exists(String),
+    /// Image `index` inside an ico, exe, or dll. Not the system image list.
+    Indexed(String, i32),
 }
 
 fn job_key(job: &IconJob) -> String {
@@ -49,6 +51,7 @@ fn job_key(job: &IconJob) -> String {
         IconJob::Ext(ext) => format!("e:{ext}"),
         IconJob::Path(path) => format!("p:{}", norm_path(path)),
         IconJob::Exists(path) => format!("x:{}", norm_path(path)),
+        IconJob::Indexed(path, index) => format!("i:{index}:{}", norm_path(path)),
     }
 }
 
@@ -370,7 +373,40 @@ fn run_job(job: IconJob) -> bool {
                 false
             }
         }
+        IconJob::Indexed(path, index) => store_indexed(&path, index, &key),
     }
+}
+
+fn indexed_icons() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, isize>> {
+    static ICONS: std::sync::OnceLock<Mutex<std::collections::HashMap<String, isize>>> = std::sync::OnceLock::new();
+    ICONS.get_or_init(|| Mutex::new(std::collections::HashMap::new())).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn store_indexed(path: &str, index: i32, key: &str) -> bool {
+    let wide = HSTRING::from(path);
+    let mut small = HICON::default();
+    let n = unsafe { windows::Win32::UI::Shell::ExtractIconExW(&wide, index, None, Some(&mut small), 1) };
+    if n == 0 || small.is_invalid() {
+        cache().mem.failed.insert(key.to_string());
+        return false;
+    }
+    indexed_icons().insert(key.to_string(), small.0 as isize);
+    true
+}
+
+/// Small icon extracted from an exe, dll, or ico at `index`. Missing entries are queued.
+pub(crate) fn indexed_icon(path: &str, index: i32) -> Option<HICON> {
+    if path.trim().is_empty() || index < 0 {
+        return None;
+    }
+    let key = format!("i:{index}:{}", norm_path(path));
+    if let Some(bits) = indexed_icons().get(&key).copied() {
+        return Some(HICON(bits as *mut _));
+    }
+    if !cache().mem.failed.contains(&key) {
+        enqueue(IconJob::Indexed(path.to_string(), index));
+    }
+    None
 }
 
 fn store_shell(path: &str, attr: FILE_FLAGS_AND_ATTRIBUTES, real: bool, key: String, apply: impl FnOnce(&mut IconMem, i32) -> bool) -> bool {
