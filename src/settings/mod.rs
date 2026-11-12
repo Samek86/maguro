@@ -95,6 +95,9 @@ pub(crate) fn search_frame_h(dpi: i32) -> i32 {
     sc(dpi, SEARCH_TOP_DIP + SEARCH_FRAME_DIP) - sc(dpi, SEARCH_TOP_DIP)
 }
 
+/// Space between the favourites page title and the restore button on that same row.
+const RESTORE_TITLE_GAP_DIP: i32 = 12;
+
 fn tx(t: crate::Key) -> &'static str {
     tr(t)
 }
@@ -274,7 +277,6 @@ const ADV: &[Spec] = &[
 ];
 
 const KEY_NOTE: crate::Key = crate::Key::DoubleClickRowOrPressChangeThen;
-const LIST_H: crate::Key = crate::Key::ViewList;
 const RESTORE_FAV: crate::Key = crate::Key::RestoreDefaultFolders;
 const SIDE_FAV: crate::Key = crate::Key::FavouritesOnTop;
 const SIDE_TREE: crate::Key = crate::Key::FolderTreeOnTop;
@@ -328,7 +330,7 @@ fn page_match(q: &str, page: usize) -> bool {
     }
     if page == 4 {
         let rows = fav_tree_rows();
-        return !crate::filter_fav_rows(&rows, q).is_empty() || has(tx(LIST_H), q) || has(tx(RESTORE_FAV), q);
+        return !crate::filter_fav_rows(&rows, q).is_empty() || has(tx(RESTORE_FAV), q);
     }
     if page == 5 {
         return (0..crate::keys::len()).any(|i| key_hit_i(i, q)) || has(tx(KEY_NOTE), q);
@@ -540,7 +542,7 @@ enum Item {
     KeyBar { edit: RECT, reset: RECT },
     KeyHead(RECT),
     KeyRow { i: usize, rect: RECT, change: RECT, reset: RECT },
-    /// Favourites page. The button itself is a child control; this is only its slot.
+    /// Favourites page. The button is a child control on the page-title row; this is only its slot.
     FavRestore(RECT),
 }
 
@@ -743,12 +745,16 @@ fn fill_items(g: &mut Geo, sn: &Snap, bar: bool) -> i32 {
 }
 
 /// ASCII is one cell. Hangul and kana are two, same rule as the target chips.
-fn seg_w(label: &str, dpi: i32) -> i32 {
+fn ink_w(label: &str, dpi: i32) -> i32 {
     let mut text_w = 0i32;
     for ch in label.chars() {
         text_w += if ch.is_ascii() { sc(dpi, 7) } else { sc(dpi, 14) };
     }
-    text_w + sc(dpi, 32)
+    text_w
+}
+
+fn seg_w(label: &str, dpi: i32) -> i32 {
+    ink_w(label, dpi) + sc(dpi, 32)
 }
 
 fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str) -> i32 {
@@ -976,33 +982,45 @@ fn fav_node(i: usize) -> Option<crate::FavRow> {
     fav_tree_rows().get(i).cloned()
 }
 
-fn restore_btn_rect(left: i32, right: i32, top: i32, dpi: i32) -> RECT {
+/// Restore button on the title row: right edge, label width, centred on the title.
+/// A long label grows until it would cover the page name, then it stops.
+fn restore_btn_rect(left: i32, right: i32, title: RECT, page_title: &str, dpi: i32) -> RECT {
     let bh = sc(dpi, crate::BTN_H_FOOTER);
-    let max_w = (right - left).max(sc(dpi, crate::BTN_MIN_W));
-    let want = seg_w(tx(RESTORE_FAV), dpi).max(sc(dpi, crate::BTN_MIN_W));
-    let bw = want.min(max_w);
+    let gap = sc(dpi, RESTORE_TITLE_GAP_DIP);
+    let min_w = sc(dpi, crate::BTN_MIN_W);
+    let span = (right - left).max(0);
+    let spare = span.saturating_sub(ink_w(page_title, dpi).saturating_add(gap));
+    let want = seg_w(tx(RESTORE_FAV), dpi).max(min_w);
+    let bw = if spare >= want {
+        want
+    } else if spare >= min_w {
+        spare
+    } else {
+        min_w.min(span)
+    };
+    let top = title.top + ((title.bottom - title.top) - bh).max(0) / 2;
     RECT { left: right - bw, top, right, bottom: top + bh }
 }
 
-fn fav_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str) -> i32 {
+fn fav_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, y: i32, rq: &str) -> i32 {
     let dpi = sn.dpi.max(96);
     let all = fav_tree_rows();
     let rows = crate::filter_fav_rows(&all, rq);
-    let show_list = rq.is_empty() || !rows.is_empty() || has(tx(LIST_H), rq);
+    let show_list = rq.is_empty() || !rows.is_empty();
     let show_restore = rq.is_empty() || has(tx(RESTORE_FAV), rq);
     if !show_list && !show_restore {
         return y;
     }
     if show_restore {
-        let rect = restore_btn_rect(left, right, y, dpi);
+        let rect = restore_btn_rect(left, right, g.title, tx(PAGES[sn.page]), dpi);
+        let gap = sc(dpi, RESTORE_TITLE_GAP_DIP);
+        g.title.right = (rect.left - gap).max(g.title.left);
         g.items.push(Item::FavRestore(rect));
-        y = rect.bottom + sc(dpi, 12);
     }
     if !show_list {
         return y;
     }
-    g.items.push(Item::Head(RECT { left, top: y, right, bottom: y + sc(dpi, 28) }, LIST_H));
-    y += sc(dpi, 28);
+    // The page title is the heading. The table's own name/path row stays in the board.
     let board = crate::layout_fav_board(&rows, left, right, y, dpi);
     g.items.push(Item::Table(board.table));
     g.items.push(Item::FavHead(board.head));
@@ -1672,45 +1690,195 @@ mod tests {
         assert!(has("左のパネルの順番") && has("お気に入りを上") && has("フォルダー ツリーを上"));
     }
 
+    fn fav_btn(g: &Geo) -> RECT {
+        g.items.iter().find_map(|it| match it {
+            Item::FavRestore(r) => Some(*r),
+            _ => None,
+        }).expect("restore button")
+    }
+
+    fn fav_table(g: &Geo) -> RECT {
+        g.items.iter().find_map(|it| match it {
+            Item::Table(r) => Some(*r),
+            _ => None,
+        }).expect("favourites table")
+    }
+
+    /// The old favourites page stacked a 28 DIP button, a 12 DIP gap, and a 28 DIP
+    /// "List" heading under the title. That is 68 DIP at 96 DPI. The table now
+    /// starts one 16 DIP gap under the title row, and the button shares that row.
+    fn assert_restore_on_title(g: &Geo, dpi: i32) {
+        let btn = fav_btn(g);
+        let table = fav_table(g);
+        assert!(g.items.iter().all(|it| !matches!(it, Item::Head(..))), "no list heading");
+        let bh = sc(dpi, crate::BTN_H_FOOTER);
+        let gap = sc(dpi, RESTORE_TITLE_GAP_DIP);
+        assert_eq!(btn.bottom - btn.top, bh);
+        assert_eq!(g.title.bottom - g.title.top, sc(dpi, 32));
+        assert_eq!(btn.top, g.title.top + (sc(dpi, 32) - bh) / 2);
+        assert!(btn.bottom <= g.title.bottom && btn.top >= g.title.top);
+        assert_eq!(btn.right - btn.left, seg_w(tx(RESTORE_FAV), dpi), "button sized to its label");
+        assert!(btn.right - btn.left >= sc(dpi, crate::BTN_MIN_W));
+        assert_eq!(btn.left - g.title.right, gap, "title and button do not overlap");
+        assert!(g.title.right - g.title.left >= ink_w(tx(PAGES[4]), dpi), "title glyphs fit");
+        assert_eq!(btn.right, table.right);
+        assert_eq!(table.top, g.title.bottom + sc(dpi, 16));
+        let rise = sc(dpi, crate::BTN_H_FOOTER) + sc(dpi, 12) + sc(dpi, 28);
+        let old_table = g.title.bottom + sc(dpi, 16) + rise;
+        assert_eq!(old_table - table.top, rise);
+        let head = g.items.iter().find_map(|it| match it {
+            Item::FavHead(r) => Some(*r),
+            _ => None,
+        }).expect("name/path header");
+        assert_eq!(head.top, table.top);
+        assert_eq!(head.bottom - head.top, sc(dpi, 32));
+        let blank = g.items.iter().find_map(|it| match it {
+            Item::FavRow { i, rect, .. } if *i == usize::MAX => Some(*rect),
+            _ => None,
+        }).expect("empty row");
+        assert_eq!(blank.top, head.bottom);
+        assert_eq!(blank.bottom - blank.top, sc(dpi, 40));
+    }
+
+    struct FavHold {
+        favs: Vec<String>,
+        tree: Vec<crate::FavNode>,
+    }
+
+    impl Drop for FavHold {
+        fn drop(&mut self) {
+            let favs = std::mem::take(&mut self.favs);
+            let tree = std::mem::take(&mut self.tree);
+            app(|a| {
+                a.s.favs = favs;
+                a.s.tree = tree;
+            });
+        }
+    }
+
+    fn hold_favs(tree: Vec<crate::FavNode>) -> FavHold {
+        app(|a| FavHold {
+            favs: std::mem::take(&mut a.s.favs),
+            tree: std::mem::replace(&mut a.s.tree, tree),
+        })
+    }
+
     #[test]
-    fn favourites_page_puts_restore_above_the_list() {
+    fn favourites_page_puts_restore_on_the_title_row() {
         let _lock = ui_lock();
         let _keep = lang(0);
+        let tree_hold = hold_favs(Vec::new());
+        // ViewList stays: it is the Explorer "List" view, not only the old heading.
+        assert!(crate::EXPLORER_VIEWS.iter().any(|&(_, _, k)| k == crate::Key::ViewList));
+        assert_eq!(tx(crate::Key::ViewList), "List");
         assert_eq!(tx(RESTORE_FAV), "Restore default folders");
+        assert_eq!(seg_w(tx(RESTORE_FAV), 96), 23 * 7 + 32);
+        assert_eq!(ink_w(tx(PAGES[4]), 96), 10 * 7);
         assert_eq!(tx(crate::Key::RestoreDefaultsAdded), "{n} added");
         assert_eq!(tx(crate::Key::RestoreDefaultsNone), "Nothing to add");
         assert_eq!(
             (0..PAGES.len()).filter(|&p| page_match("Restore default folders", p)).collect::<Vec<_>>(),
             vec![4]
         );
+        assert!(!page_match("List", 4));
+
         let g = geo(client(), &shot(4, ""));
-        let btn = g.items.iter().find_map(|it| match it {
-            Item::FavRestore(r) => Some(*r),
-            _ => None,
-        }).expect("restore button");
-        let list_top = g.items.iter().find_map(|it| match it {
-            Item::Head(r, k) if *k == LIST_H => Some(r.top),
-            _ => None,
-        }).expect("list head");
-        assert_eq!(btn.right, g.title.right);
-        assert!(btn.left < btn.right);
-        assert_eq!(btn.bottom - btn.top, crate::BTN_H_FOOTER);
-        assert!(btn.top >= g.title.bottom);
-        assert!(btn.bottom <= list_top);
+        assert_restore_on_title(&g, 96);
+        assert_eq!(g.title.top, 16);
+        assert_eq!(g.title.bottom, 48);
+        assert_eq!(fav_btn(&g).top, 18);
+        assert_eq!(fav_btn(&g).bottom, 46);
+        assert_eq!(fav_table(&g).top, 64);
+        let old_top = g.title.bottom + 16 + crate::BTN_H_FOOTER + 12 + 28;
+        assert_eq!(old_top, 132);
+        assert_eq!(old_top - fav_table(&g).top, 68);
+
+        // The settings window in the layout shot is 986×633 at 96 DPI.
+        let shot_rc = RECT { left: 0, top: 0, right: 986, bottom: 633 };
+        let wide = geo(shot_rc, &shot(4, ""));
+        assert!(!wide.has_bar);
+        assert_restore_on_title(&wide, 96);
+        let btn = fav_btn(&wide);
+        assert_eq!(btn.right, 986 - 28);
+        assert_eq!(btn.left, 958 - 193);
+        assert_eq!(wide.title.left, 220 + 28);
+        assert_eq!(wide.title.right, btn.left - 12);
+
+        let narrow = geo(RECT { left: 0, top: 0, right: 500, bottom: 700 }, &shot(4, ""));
+        let small = fav_btn(&narrow);
+        assert!(small.right - small.left < seg_w(tx(RESTORE_FAV), 96));
+        assert!(small.right - small.left >= crate::BTN_MIN_W);
+        assert_eq!(small.left - narrow.title.right, 12);
+        assert!(narrow.title.right - narrow.title.left >= ink_w(tx(PAGES[4]), 96));
+        assert!(narrow.title.bottom >= small.bottom && small.top >= narrow.title.top);
+
+        let mut hi = shot(4, "");
+        hi.dpi = 192;
+        let hidpi = geo(RECT { left: 0, top: 0, right: sc(192, 1000), bottom: sc(192, 700) }, &hi);
+        assert_restore_on_title(&hidpi, 192);
+        assert_eq!(hidpi.title.top, 32);
+        assert_eq!(hidpi.title.bottom, 96);
+        assert_eq!(fav_btn(&hidpi).top, 36);
+        assert_eq!(fav_btn(&hidpi).bottom, 92);
+        assert_eq!(fav_table(&hidpi).top, 128);
+        let old_hi = hidpi.title.bottom + sc(192, 16 + 28 + 12 + 28);
+        assert_eq!(old_hi, 264);
+        assert_eq!(old_hi - fav_table(&hidpi).top, sc(192, 68));
 
         let only = geo(client(), &shot(4, "Restore default folders"));
         assert!(only.show[4]);
         assert!(only.items.iter().any(|it| matches!(it, Item::FavRestore(_))));
+        assert!(only.items.iter().all(|it| !matches!(it, Item::Table(_) | Item::Head(..))));
+        let only_btn = fav_btn(&only);
+        assert!(only_btn.top >= only.title.top && only_btn.bottom <= only.title.bottom);
 
         crate::UI.store(1, Ordering::Relaxed);
         assert_eq!(tx(RESTORE_FAV), "기본 폴더 다시 만들기");
+        assert_eq!(seg_w(tx(RESTORE_FAV), 96), 9 * 14 + 3 * 7 + 32);
+        assert_eq!(ink_w(tx(PAGES[4]), 96), 4 * 14);
+        assert_eq!(tx(crate::Key::ViewList), "목록");
         assert_eq!(tx(crate::Key::RestoreDefaultsAdded), "{n}개 추가됨");
         assert_eq!(tx(crate::Key::RestoreDefaultsNone), "추가할 항목이 없습니다");
         assert!(page_match("기본 폴더 다시 만들기", 4));
+        assert!(!page_match("목록", 4));
+        let ko = geo(shot_rc, &shot(4, ""));
+        assert_restore_on_title(&ko, 96);
+        let ko_btn = fav_btn(&ko);
+        assert_eq!(ko_btn.right, 958);
+        assert_eq!(ko_btn.left, 958 - 179);
+        assert!(ko.title.right <= ko_btn.left - 12);
+        assert!(ko.title.right - ko.title.left >= ink_w("즐겨찾기", 96));
+
         crate::UI.store(2, Ordering::Relaxed);
         assert_eq!(tx(RESTORE_FAV), "既定のフォルダを再作成");
+        assert_eq!(seg_w(tx(RESTORE_FAV), 96), 11 * 14 + 32);
+        assert_eq!(ink_w(tx(PAGES[4]), 96), 5 * 14);
+        assert_eq!(tx(crate::Key::ViewList), "一覧");
         assert_eq!(tx(crate::Key::RestoreDefaultsAdded), "{n}件追加しました");
         assert_eq!(tx(crate::Key::RestoreDefaultsNone), "追加する項目はありません");
         assert!(page_match("既定のフォルダを再作成", 4));
+        assert!(!page_match("一覧", 4));
+        let ja = geo(shot_rc, &shot(4, ""));
+        assert_restore_on_title(&ja, 96);
+        let ja_btn = fav_btn(&ja);
+        assert_eq!(ja_btn.right, 958);
+        assert_eq!(ja_btn.left, 958 - 186);
+        assert!(ja.title.right <= ja_btn.left - 12);
+        assert!(ja.title.right - ja.title.left >= ink_w("お気に入り", 96));
+
+        crate::UI.store(0, Ordering::Relaxed);
+        drop(tree_hold);
+        let _rows = hold_favs(vec![crate::FavNode::leaf(r"C:\Work\notes", "notes", true)]);
+        let hit = geo(client(), &shot(4, "notes"));
+        assert!(hit.show[4]);
+        assert!(hit.items.iter().all(|it| !matches!(it, Item::FavRestore(_) | Item::Head(..))));
+        let filtered = fav_table(&hit);
+        assert_eq!(hit.title.right, filtered.right);
+        assert_eq!(filtered.top, hit.title.bottom + 16);
+        assert!(hit.items.iter().any(|it| matches!(it, Item::FavRow { i, .. } if *i != usize::MAX)));
+        let both = geo(client(), &shot(4, "Favourites"));
+        assert!(both.items.iter().any(|it| matches!(it, Item::FavRestore(_))));
+        assert_eq!(fav_table(&both).top, both.title.bottom + 16);
+        assert!(fav_btn(&both).left > both.title.right);
     }
 }
