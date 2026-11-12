@@ -47,6 +47,24 @@ const MIGRATED: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "src/ui/itemdlg.rs",
+        &[
+            "paint_window(",
+            "paint_field(",
+            "paint_segment(",
+            "paint_check(",
+            "paint_button(",
+            "paint_meta(",
+            "paint_label(",
+            "paint_section_header(",
+            "color_field_edit(",
+            "style_popup_chrome(",
+            "body_font(",
+            "bold_ui_font(",
+            "wrap_text(",
+        ],
+    ),
+    (
         "src/basket.rs",
         &[
             "paint_window(",

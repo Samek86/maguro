@@ -5,7 +5,12 @@
 //! a field here: an RDP item keeps only `has_password`, and the secret lives in
 //! Windows Credential Manager under `Maguro:rdp:<host>`.
 
+use std::sync::OnceLock;
+
 use serde_json::{json, Map, Value};
+use windows::core::{HSTRING, PCWSTR, PWSTR};
+use windows::Win32::Storage::FileSystem::SearchPathW;
+use windows::Win32::UI::Shell::{AssocQueryStringW, IShellItem, SHCreateItemFromParsingName, ASSOCF_NONE, ASSOCSTR_EXECUTABLE, SIGDN_NORMALDISPLAY};
 
 use crate::Key;
 
@@ -79,7 +84,6 @@ pub(crate) const KINDS: [ItemKind; 6] = [
 pub(crate) const DEFAULT_CRED_SECS: u32 = 10;
 const MAX_CRED_SECS: u32 = 3600;
 const MAX_MEMO: usize = 2000;
-const MAX_EXTRA: usize = 4000;
 const MAX_TARGET: usize = 1024;
 
 /// Window sizes offered for an RDP session, width then height.
@@ -225,6 +229,168 @@ pub(crate) fn shell_place_label(path: &str) -> Option<Key> {
     shell_places().iter().find(|p| p.path.eq_ignore_ascii_case(key)).map(|p| p.label)
 }
 
+/// A `::{CLSID}` or `shell:` parsing name. These are not disk paths.
+pub(crate) fn shell_parsing_name(path: &str) -> bool {
+    let path = path.trim();
+    path.starts_with("::") || path.get(..6).is_some_and(|h| h.eq_ignore_ascii_case("shell:"))
+}
+
+/// Empty, or the raw parsing name. A special folder with either shows the shell's name.
+fn raw_shell_name(name: &str, path: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return true;
+    }
+    let path = path.trim();
+    (!path.is_empty() && name.eq_ignore_ascii_case(path)) || shell_parsing_name(name)
+}
+
+/// Name drawn for a leaf. Special folders with no real display name resolve here, in the
+/// language that is current now, so a saved favourite does not freeze one language's word.
+pub(crate) fn fav_shown_name(kind: ItemKind, stored: &str, path: &str) -> String {
+    let stored = stored.trim();
+    let path = path.trim();
+    if kind == ItemKind::Special && raw_shell_name(stored, path) {
+        if let Some(key) = shell_place_label(path) {
+            let label = crate::tr(key);
+            if !label.is_empty() {
+                return label.to_string();
+            }
+        }
+        if let Some(label) = shell_namespace_name(path) {
+            if !raw_shell_name(&label, path) {
+                return label;
+            }
+        }
+    }
+    if !stored.is_empty() {
+        return stored.to_string();
+    }
+    if path.is_empty() {
+        String::new()
+    } else {
+        crate::short_name(path)
+    }
+}
+
+/// `SIGDN_NORMALDISPLAY` for a shell parsing name. None when the shell cannot name it.
+pub(crate) fn shell_namespace_name(path: &str) -> Option<String> {
+    let path = path.trim();
+    if !shell_parsing_name(path) {
+        return None;
+    }
+    unsafe {
+        let wide = HSTRING::from(path);
+        let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
+        let pw = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
+        let name = crate::pwstr(pw);
+        let name = name.trim().to_string();
+        (!name.is_empty()).then_some(name)
+    }
+}
+
+/// Icon a leaf should draw, and whether a missing file on disk dims the row.
+/// Command, URL, RDP, and shell places are not files that can be "missing".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FavGlyph {
+    pub(crate) path: String,
+    pub(crate) file: bool,
+    pub(crate) index: i32,
+    pub(crate) track_missing: bool,
+}
+
+pub(crate) fn fav_glyph(kind: ItemKind, path: &str, icon: Option<&ItemIcon>) -> FavGlyph {
+    if let Some(icon) = icon {
+        if !icon.path.trim().is_empty() {
+            return FavGlyph {
+                path: icon.path.clone(),
+                file: true,
+                index: icon.index,
+                track_missing: matches!(kind, ItemKind::Folder | ItemKind::File),
+            };
+        }
+    }
+    let (icon_path, file) = match kind {
+        ItemKind::Command => (command_icon_path(path), true),
+        ItemKind::Url => (url_icon_path(), true),
+        ItemKind::Rdp => (mstsc_exe(), true),
+        ItemKind::File => (path.to_string(), true),
+        ItemKind::Special | ItemKind::Folder => (path.to_string(), false),
+    };
+    FavGlyph {
+        path: icon_path,
+        file,
+        index: -1,
+        track_missing: matches!(kind, ItemKind::Folder | ItemKind::File),
+    }
+}
+
+/// `track_missing` is false for anything that is not a folder or file on disk.
+/// `target_missing` is the favourite path itself, not the icon we borrowed.
+pub(crate) fn glyph_is_missing(g: &FavGlyph, target_missing: bool) -> bool {
+    g.track_missing && target_missing
+}
+
+/// First token of a command line. Quotes keep a path that contains spaces.
+fn command_program(raw: &str) -> String {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix('"') {
+        if let Some(end) = rest.find('"') {
+            return rest[..end].to_string();
+        }
+    }
+    s.split_whitespace().next().unwrap_or("").to_string()
+}
+
+/// Executable whose icon a command row draws. A bare name is resolved on `PATH`.
+pub(crate) fn command_icon_path(raw: &str) -> String {
+    let program = command_program(raw);
+    if program.is_empty() {
+        return String::new();
+    }
+    if program.contains(['\\', '/']) {
+        return program;
+    }
+    search_path_file(&program).unwrap_or(program)
+}
+
+fn search_path_file(name: &str) -> Option<String> {
+    let mut buf = vec![0u16; 32768];
+    let file = HSTRING::from(name);
+    let n = unsafe { SearchPathW(PCWSTR::null(), PCWSTR(file.as_ptr()), PCWSTR::null(), Some(&mut buf), None) };
+    if n == 0 || n as usize >= buf.len() {
+        return None;
+    }
+    let s = String::from_utf16_lossy(&buf[..n as usize]);
+    (!s.is_empty()).then_some(s)
+}
+
+/// Browser (or other handler) registered for web addresses. Not a fake `page.url` file.
+pub(crate) fn url_icon_path() -> String {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        assoc_open_exe("http").or_else(|| assoc_open_exe("https")).or_else(|| {
+            let explorer = command_icon_path("explorer.exe");
+            std::path::Path::new(&explorer).is_file().then_some(explorer)
+        }).unwrap_or_default()
+    })
+    .clone()
+}
+
+fn assoc_open_exe(query: &str) -> Option<String> {
+    let mut buf = vec![0u16; 1024];
+    let mut n = buf.len() as u32;
+    let hr = unsafe {
+        AssocQueryStringW(ASSOCF_NONE, ASSOCSTR_EXECUTABLE, &HSTRING::from(query), &HSTRING::from("open"), Some(PWSTR(buf.as_mut_ptr())), &mut n)
+    };
+    if hr.is_err() {
+        return None;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(n as usize).min(buf.len());
+    let s = String::from_utf16_lossy(&buf[..end]).trim().trim_matches('"').to_string();
+    std::path::Path::new(&s).is_file().then_some(s)
+}
+
 /// What the dialog collected. `password` is memory only and is never written to the favourites file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Draft {
@@ -278,7 +444,6 @@ pub(crate) enum Fault {
     NeedShell,
     BadShell,
     BadCred,
-    BadExtra,
     BadIcon,
 }
 
@@ -294,7 +459,6 @@ impl Fault {
             Fault::NeedShell => Key::NeedShell,
             Fault::BadShell => Key::BadShell,
             Fault::BadCred => Key::BadCredSeconds,
-            Fault::BadExtra => Key::BadRdpExtra,
             Fault::BadIcon => Key::BadIconIndex,
         }
     }
@@ -302,7 +466,7 @@ impl Fault {
 
 pub(crate) fn validate(d: &Draft) -> Result<(), Fault> {
     let target = d.target.trim();
-    if target.chars().count() > MAX_TARGET || d.memo.chars().count() > MAX_MEMO {
+    if target.chars().count() > MAX_TARGET {
         return Err(Fault::NeedPath);
     }
     if d.icon.as_ref().is_some_and(|i| i.path.trim().is_empty() || i.index < 0 || i.index > 1000) {
@@ -344,9 +508,6 @@ pub(crate) fn validate(d: &Draft) -> Result<(), Fault> {
             }
             if d.cred_secs > MAX_CRED_SECS {
                 return Err(Fault::BadCred);
-            }
-            if extra_has_password(&d.rdp_extra) || d.rdp_extra.chars().count() > MAX_EXTRA {
-                return Err(Fault::BadExtra);
             }
         }
     }
@@ -428,17 +589,6 @@ pub(crate) fn split_host(s: &str) -> Option<(&str, Option<u16>)> {
 fn parse_port(s: &str) -> Option<u16> {
     let n: u16 = s.parse().ok()?;
     (n > 0).then_some(n)
-}
-
-fn extra_has_password(extra: &str) -> bool {
-    extra.lines().any(|line| {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            return false;
-        }
-        let key = t.split(':').next().unwrap_or("").trim();
-        key.eq_ignore_ascii_case("password") || key.to_ascii_lowercase().contains("password")
-    })
 }
 
 /// Build the leaf fields the tree stores. The password is not copied onto the item.
@@ -609,7 +759,8 @@ pub(crate) fn explorer_launch(path: &str) -> Launch {
 }
 
 /// `.rdp` body. The password is not a line; mstsc reads TERMSRV from Credential Manager.
-pub(crate) fn rdp_text(host: &str, user: &str, screen: RdpScreen, extra: &str, prompt: bool) -> String {
+/// Clipboard sharing and remote audio on this PC are always written. A stored `rdp_extra` is not applied.
+pub(crate) fn rdp_text(host: &str, user: &str, screen: RdpScreen, prompt: bool) -> String {
     let mut lines = Vec::new();
     lines.push(format!("full address:s:{}", host.trim()));
     let user = user.trim();
@@ -627,13 +778,8 @@ pub(crate) fn rdp_text(host: &str, user: &str, screen: RdpScreen, extra: &str, p
     }
     lines.push(format!("prompt for credentials:i:{}", if prompt { 1 } else { 0 }));
     lines.push("authentication level:i:2".into());
-    for line in extra.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') || extra_has_password(t) {
-            continue;
-        }
-        lines.push(t.to_string());
-    }
+    lines.push("redirectclipboard:i:1".into());
+    lines.push("audiomode:i:0".into());
     let mut text = lines.join("\r\n");
     text.push_str("\r\n");
     text
@@ -856,9 +1002,14 @@ mod tests {
         host.target = "bad host".into();
         assert_eq!(validate(&host), Err(Fault::BadHost));
         host.target = "pc:3389".into();
-        host.rdp_extra = "password 51:b:secret".into();
-        assert_eq!(validate(&host), Err(Fault::BadExtra));
-        host.rdp_extra = "redirectclipboard:i:1".into();
+        host.rdp_extra = "password 51:b:secret\r\naudiomode:i:2".into();
+        assert!(validate(&host).is_ok());
+        let generated = rdp_text(&host.target, &host.user, RdpScreen::Full, false);
+        assert_eq!(generated.matches("redirectclipboard:i:1").count(), 1, "{generated}");
+        assert_eq!(generated.matches("audiomode:i:0").count(), 1, "{generated}");
+        assert!(!generated.contains("password"), "{generated}");
+        assert!(!generated.contains("audiomode:i:2"), "{generated}");
+        assert!(!generated.contains("secret"), "{generated}");
         host.cred_secs = 9_999;
         assert_eq!(validate(&host), Err(Fault::BadCred));
         host.cred_secs = 0;
@@ -866,26 +1017,79 @@ mod tests {
     }
 
     #[test]
+    fn rdp_text_always_shares_the_clipboard_and_plays_remote_audio_here() {
+        let full = rdp_text("pc:3389", "ada", RdpScreen::Full, false);
+        assert_eq!(
+            full,
+            concat!(
+                "full address:s:pc:3389\r\n",
+                "username:s:ada\r\n",
+                "screen mode id:i:2\r\n",
+                "prompt for credentials:i:0\r\n",
+                "authentication level:i:2\r\n",
+                "redirectclipboard:i:1\r\n",
+                "audiomode:i:0\r\n",
+            )
+        );
+        let window = rdp_text("pc", "", RdpScreen::Window { w: 1280, h: 720 }, true);
+        assert_eq!(
+            window,
+            concat!(
+                "full address:s:pc\r\n",
+                "screen mode id:i:1\r\n",
+                "desktopwidth:i:1280\r\n",
+                "desktopheight:i:720\r\n",
+                "prompt for credentials:i:1\r\n",
+                "authentication level:i:2\r\n",
+                "redirectclipboard:i:1\r\n",
+                "audiomode:i:0\r\n",
+            )
+        );
+        let auto = rdp_text("pc", "", RdpScreen::Auto, true);
+        assert_eq!(
+            auto,
+            concat!(
+                "full address:s:pc\r\n",
+                "prompt for credentials:i:1\r\n",
+                "authentication level:i:2\r\n",
+                "redirectclipboard:i:1\r\n",
+                "audiomode:i:0\r\n",
+            )
+        );
+        for text in [&full, &window, &auto] {
+            assert_eq!(text.matches("redirectclipboard:i:1").count(), 1, "{text}");
+            assert_eq!(text.matches("audiomode:i:0").count(), 1, "{text}");
+            assert!(!text.contains("password"), "{text}");
+            assert!(!text.contains("audiomode:i:2"), "{text}");
+        }
+    }
+
+    #[test]
     fn rdp_file_has_no_password_and_launch_uses_v() {
-        let text = rdp_text("pc:3389", "ada", RdpScreen::Full, "redirectclipboard:i:1\r\npassword 51:b:secret\r\n", false);
+        let text = rdp_text("pc:3389", "ada", RdpScreen::Full, false);
         assert!(text.contains("full address:s:pc:3389"));
         assert!(text.contains("username:s:ada"));
         assert!(text.contains("screen mode id:i:2"));
         assert!(text.contains("prompt for credentials:i:0"));
-        assert!(text.contains("redirectclipboard:i:1"));
+        assert_eq!(text.matches("redirectclipboard:i:1").count(), 1);
+        assert_eq!(text.matches("audiomode:i:0").count(), 1);
         assert!(!text.to_ascii_lowercase().contains("password"));
         assert!(!text.contains("secret"));
 
-        let window = rdp_text("pc", "", RdpScreen::Window { w: 1280, h: 720 }, "", true);
+        let window = rdp_text("pc", "", RdpScreen::Window { w: 1280, h: 720 }, true);
         assert!(window.contains("screen mode id:i:1"));
         assert!(window.contains("desktopwidth:i:1280"));
         assert!(window.contains("desktopheight:i:720"));
         assert!(window.contains("prompt for credentials:i:1"));
         assert!(!window.contains("username:"));
+        assert_eq!(window.matches("redirectclipboard:i:1").count(), 1);
+        assert_eq!(window.matches("audiomode:i:0").count(), 1);
 
-        let auto = rdp_text("pc", "", RdpScreen::Auto, "", true);
+        let auto = rdp_text("pc", "", RdpScreen::Auto, true);
         assert!(!auto.contains("screen mode id"));
         assert!(!auto.contains("desktopwidth"));
+        assert_eq!(auto.matches("redirectclipboard:i:1").count(), 1);
+        assert_eq!(auto.matches("audiomode:i:0").count(), 1);
 
         let bytes = rdp_bytes("full address:s:pc\r\n");
         assert_eq!(&bytes[..2], &[0xFF, 0xFE]);
@@ -1022,6 +1226,81 @@ mod tests {
     }
 
     #[test]
+    fn a_new_leaf_stores_no_colour_and_an_edit_keeps_an_old_one() {
+        let mut fresh = Draft::blank(ItemKind::Folder);
+        fresh.target = r"C:\Work".into();
+        fresh.memo = "notes".into();
+        let item = item_from_draft(&fresh, false).unwrap();
+        assert!(item.color.is_none());
+        let mut out = Map::new();
+        push_item(&mut out, &item);
+        assert!(out.get("color").is_none());
+
+        let mut old = Map::new();
+        old.insert("path".into(), json!(r"D:\Photos"));
+        old.insert("color".into(), json!("#3D7EE0"));
+        let (loaded, _) = pull_item(&old, false);
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.color, Some(0x3D7E_E0));
+        let mut edited = Draft::blank(loaded.kind);
+        edited.target = r"D:\Photos".into();
+        edited.memo = "kept".into();
+        edited.color = loaded.color;
+        let saved = item_from_draft(&edited, false).unwrap();
+        assert_eq!(saved.memo, "kept");
+        assert_eq!(saved.color, Some(0x3D7E_E0));
+        let mut round = Map::new();
+        push_item(&mut round, &saved);
+        assert_eq!(round.get("memo").and_then(|v| v.as_str()), Some("kept"));
+        assert_eq!(round.get("color").and_then(|v| v.as_str()), Some("#3D7EE0"));
+    }
+
+    #[test]
+    fn old_memo_and_rdp_extra_round_trip_and_are_not_generated() {
+        let stale = "password 51:b:secret\r\naudiomode:i:2\r\nredirectclipboard:i:0";
+        let raw: Value = serde_json::from_str(
+            "{\"kind\":\"rdp\",\"path\":\"pc\",\"user\":\"ada\",\"memo\":\"vacation\",\"rdp_extra\":\"password 51:b:secret\\r\\naudiomode:i:2\\r\\nredirectclipboard:i:0\"}",
+        )
+        .expect("memo and rdp_extra stay legal");
+        let (item, file) = pull_item(raw.as_object().unwrap(), false);
+        let item = item.unwrap();
+        assert!(!file);
+        assert_eq!(item.kind, ItemKind::Rdp);
+        assert_eq!(item.memo, "vacation");
+        assert_eq!(item.rdp_extra, stale);
+        let mut round = Map::new();
+        push_item(&mut round, &item);
+        assert_eq!(round.get("memo").and_then(|v| v.as_str()), Some("vacation"));
+        assert_eq!(round.get("rdp_extra").and_then(|v| v.as_str()), Some(stale));
+
+        let mut draft = Draft::blank(ItemKind::Rdp);
+        draft.target = "pc:3389".into();
+        draft.user = "ada".into();
+        draft.memo = item.memo.clone();
+        draft.rdp_extra = item.rdp_extra.clone();
+        assert!(validate(&draft).is_ok());
+        let saved = item_from_draft(&draft, false).unwrap();
+        assert_eq!(saved.memo, "vacation");
+        assert_eq!(saved.rdp_extra, stale);
+        let text = rdp_text("pc:3389", "ada", RdpScreen::Full, false);
+        assert_eq!(
+            text,
+            concat!(
+                "full address:s:pc:3389\r\n",
+                "username:s:ada\r\n",
+                "screen mode id:i:2\r\n",
+                "prompt for credentials:i:0\r\n",
+                "authentication level:i:2\r\n",
+                "redirectclipboard:i:1\r\n",
+                "audiomode:i:0\r\n",
+            )
+        );
+        assert!(!text.contains("password 51:b:secret"));
+        assert!(!text.contains("audiomode:i:2"));
+        assert!(!text.contains("redirectclipboard:i:0"));
+    }
+
+    #[test]
     fn screen_tokens_and_shell_catalog() {
         assert_eq!(RdpScreen::parse("auto"), Some(RdpScreen::Auto));
         assert_eq!(RdpScreen::parse("full"), Some(RdpScreen::Full));
@@ -1035,5 +1314,75 @@ mod tests {
         assert!(ItemKind::Special.navigable());
         assert!(!ItemKind::Rdp.navigable());
         assert!(ItemKind::Command.launches());
+    }
+
+    #[test]
+    fn empty_special_name_follows_the_language_and_is_not_saved_as_a_guid() {
+        use std::sync::atomic::Ordering;
+        let bin = "::{645FF040-5081-101B-9F08-00AA002F954E}";
+        let prev = crate::UI.load(Ordering::Relaxed);
+        let shown = |lang: u8, name: &str, path: &str| {
+            crate::UI.store(lang, Ordering::Relaxed);
+            fav_shown_name(ItemKind::Special, name, path)
+        };
+        let en = shown(0, "", bin);
+        let ko = shown(1, "", bin);
+        let ja = shown(2, "", bin);
+        assert_eq!((en.as_str(), ko.as_str(), ja.as_str()), ("Recycle Bin", "휴지통", "ごみ箱"));
+        for label in [&en, &ko, &ja] {
+            assert!(!label.contains("645FF040"), "{label}");
+        }
+        assert_eq!(shown(0, bin, bin), "Recycle Bin");
+        assert_eq!(shown(1, "shell:RecycleBinFolder", bin), "휴지통");
+        assert_eq!(shown(2, "Mine", bin), "Mine");
+        assert_eq!(shown(0, "", "shell:Downloads"), "Downloads");
+        let mut draft = Draft::blank(ItemKind::Special);
+        draft.target = bin.into();
+        let node = crate::node_from_draft(&draft, false);
+        assert!(node.name.is_empty(), "display language is resolved when drawn, not stored");
+        crate::UI.store(0, Ordering::Relaxed);
+        let label = crate::node_label(&node);
+        assert_eq!(label, "Recycle Bin");
+        assert_eq!(crate::visible_rows(std::slice::from_ref(&node))[0].name, label);
+        crate::UI.store(prev, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn command_url_shell_and_rdp_icons_are_not_missing_files() {
+        let bin = "::{645FF040-5081-101B-9F08-00AA002F954E}";
+        let cmd = fav_glyph(ItemKind::Command, "notepad.exe", None);
+        assert!(!cmd.track_missing);
+        assert!(std::path::Path::new(&cmd.path).is_file(), "{}", cmd.path);
+        assert!(cmd.path.to_ascii_lowercase().ends_with("notepad.exe"));
+        let quoted = command_icon_path(r#""notepad.exe""#);
+        assert!(std::path::Path::new(&quoted).is_file(), "{quoted}");
+        assert!(!glyph_is_missing(&cmd, true));
+
+        let url = fav_glyph(ItemKind::Url, "https://example.com", None);
+        assert!(!url.track_missing);
+        assert_ne!(url.path, "page.url");
+        assert!(url.path.is_empty() || std::path::Path::new(&url.path).is_file(), "{}", url.path);
+        assert!(!glyph_is_missing(&url, true));
+
+        let rdp = fav_glyph(ItemKind::Rdp, "desk.local", None);
+        assert!(!rdp.track_missing);
+        assert!(rdp.path.to_ascii_lowercase().ends_with("mstsc.exe"));
+        assert!(!glyph_is_missing(&rdp, true));
+
+        let special = fav_glyph(ItemKind::Special, bin, None);
+        assert!(!special.track_missing);
+        assert!(special.path.starts_with("::"));
+        assert!(!glyph_is_missing(&special, true));
+        let shell = fav_glyph(ItemKind::Special, "shell:Downloads", None);
+        assert!(shell.path.eq_ignore_ascii_case("shell:Downloads"));
+
+        let gone = r"C:\maguro-no-such-folder-31b3bdd";
+        let folder = fav_glyph(ItemKind::Folder, gone, None);
+        assert!(folder.track_missing);
+        assert_eq!(folder.path, gone);
+        assert!(glyph_is_missing(&folder, true));
+        assert!(!glyph_is_missing(&folder, false));
+        assert!(crate::path_is_absent(gone));
+        assert!(!crate::path_is_absent(r"C:\Windows"));
     }
 }

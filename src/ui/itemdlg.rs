@@ -1,6 +1,7 @@
-//! Add or edit a favourite. Kind, name, colour, icon, and memo are shared.
+//! Add or edit a favourite. Kind, name, and icon are shared.
 //! Folder and file keep the path they have always stored. A password stays in the
 //! edit and in Credential Manager; the favourites file only records that one exists.
+//! An older memo or RDP extra block is kept on the leaf and written back. It is not shown.
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 
@@ -11,13 +12,14 @@ use crate::app::{app, text_of};
 use crate::i18n::tr;
 use crate::imports::*;
 use crate::session::{
-    node_from_draft, node_ref, shell_place_label, shell_places, stored_has_password, write_leaf, Draft, ItemIcon, ItemKind, RdpScreen, SecretPlan, KINDS, RDP_WINDOWS,
+    node_from_draft, node_ref, shell_places, stored_has_password, write_leaf, Draft, ItemIcon, ItemKind, RdpScreen, SecretPlan, KINDS, RDP_WINDOWS,
 };
 use crate::shell::{forget_hosts, stage_secret};
 
 use super::{
-    body_font, buffered, color_field_edit, ellipse, field_edit_rect, paint_button, paint_check, paint_field, paint_label, paint_meta, paint_window,
-    style_popup_chrome, visual_from_pointer, wrap_text, ButtonKind, FocusRing, BTN_H_FOOTER, FIELD_H, FIELD_PAD_X, FONT_PX, PAD_BODY_X, SPACE_4, SPACE_8, px,
+    body_font, bold_ui_font, buffered, color_field_edit, field_edit_rect, paint_button, paint_check, paint_field, paint_label, paint_meta, paint_section_header,
+    paint_segment, paint_window, style_popup_chrome, visual_from_pointer, wrap_text, ButtonKind, FocusRing, BTN_GAP, BTN_H_FOOTER, BTN_MIN_W, FIELD_H, FIELD_PAD_X,
+    FONT_PX, PAD_BODY_X, PAD_BODY_Y, SPACE_4, SPACE_8, px,
 };
 
 const SAVE_MSG: u32 = WM_APP + 71;
@@ -29,15 +31,17 @@ const ID_WORK: i32 = 13;
 const ID_USER: i32 = 14;
 const ID_PASS: i32 = 15;
 const ID_CRED: i32 = 16;
-const ID_EXTRA: i32 = 17;
-const ID_MEMO: i32 = 18;
 const ID_ICON: i32 = 19;
 const ID_INDEX: i32 = 20;
+const ID_PLACE: i32 = 21;
+const ID_SCREEN: i32 = 22;
+const CB_RESETCONTENT: u32 = 0x014B;
+const CB_ADDSTRING: u32 = 0x0143;
+const CB_SETCURSEL: u32 = 0x014E;
+const CB_GETCURSEL: u32 = 0x0147;
+const CBN_SELCHANGE: u32 = 1;
+const EN_CHANGE: u32 = 0x0300;
 
-const HIT_SWATCH: i32 = 20;
-const HIT_CLEAR_COLOR: i32 = 21;
-const HIT_PLACE: i32 = 22;
-const HIT_SCREEN: i32 = 23;
 const HIT_ADMIN: i32 = 24;
 const HIT_ICON_AUTO: i32 = 25;
 const HIT_ICON_CUSTOM: i32 = 26;
@@ -61,17 +65,15 @@ pub(crate) enum Slot {
     Pass,
     Screen,
     Cred,
-    Extra,
     IconPath,
-    Memo,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Geom {
-    pub(crate) radios: [RECT; 6],
+    pub(crate) title: RECT,
+    pub(crate) kind_label: RECT,
+    pub(crate) kinds: [RECT; 6],
     pub(crate) name: RECT,
-    pub(crate) swatch: RECT,
-    pub(crate) clear_color: RECT,
     pub(crate) labels: Vec<(Slot, RECT)>,
     pub(crate) slots: Vec<(Slot, RECT)>,
     pub(crate) browse: Vec<(Slot, RECT)>,
@@ -93,7 +95,12 @@ struct Dlg {
     editing: bool,
     edit_id: Vec<usize>,
     parent: Vec<usize>,
+    /// Colour already stored on this leaf. The dialog does not show it or change it.
     color: Option<u32>,
+    /// Memo already stored on this leaf. The dialog does not show it or change it.
+    memo: String,
+    /// Extra `.rdp` lines already stored. The dialog does not show them, and launch does not apply them.
+    rdp_extra: String,
     screen: RdpScreen,
     admin: bool,
     custom_icon: bool,
@@ -101,7 +108,9 @@ struct Dlg {
     clear_password: bool,
     hot: i32,
     down: i32,
-    edits: [HWND; 11],
+    edits: [HWND; 9],
+    place_combo: HWND,
+    screen_combo: HWND,
 }
 
 pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Option<&[usize]>) {
@@ -113,6 +122,8 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
         edit_id: Vec::new(),
         parent: parent.to_vec(),
         color: None,
+        memo: String::new(),
+        rdp_extra: String::new(),
         screen: RdpScreen::Auto,
         admin: false,
         custom_icon: false,
@@ -120,7 +131,9 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
         clear_password: false,
         hot: -1,
         down: -1,
-        edits: [HWND::default(); 11],
+        edits: [HWND::default(); 9],
+        place_combo: HWND::default(),
+        screen_combo: HWND::default(),
     };
     let loaded = edit.and_then(|id| {
         app(|a| node_ref(&a.s.tree, id).filter(|n| !n.is_group() && n.server.is_none()).cloned()).map(|n| (id.to_vec(), n))
@@ -133,6 +146,8 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
         dlg.edit_id = id.clone();
         dlg.kind = node.kind();
         dlg.color = node.item.as_ref().and_then(|i| i.color);
+        dlg.memo = node.item.as_ref().map(|i| i.memo.clone()).unwrap_or_default();
+        dlg.rdp_extra = node.item.as_ref().map(|i| i.rdp_extra.clone()).unwrap_or_default();
         dlg.screen = node.item.as_ref().map(|i| i.screen).unwrap_or(RdpScreen::Auto);
         dlg.admin = node.item.as_ref().is_some_and(|i| i.admin);
         dlg.custom_icon = node.item.as_ref().and_then(|i| i.icon.as_ref()).is_some();
@@ -171,8 +186,6 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
         (ID_USER, 0),
         (ID_PASS, 0x20),
         (ID_CRED, 0x2000),
-        (ID_EXTRA, 0x4 | 0x40 | 0x1000),
-        (ID_MEMO, 0x4 | 0x40 | 0x1000),
         (ID_ICON, 0),
         (ID_INDEX, 0x2000),
     ];
@@ -182,11 +195,20 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
         (*ptr).edits[i] = h;
         subclass_edit(h);
     }
+    let list = |id| {
+        let c = crate::child(hwnd, w!("COMBOBOX"), w!(""), super::combo::LIST | 0x10000, WINDOW_EX_STYLE(0), id, font);
+        super::combo::adopt(c, item_combo_face);
+        c
+    };
+    (*ptr).place_combo = list(ID_PLACE);
+    (*ptr).screen_combo = list(ID_SCREEN);
+    fill_place_list((*ptr).place_combo);
+    fill_screen_list((*ptr).screen_combo);
     if let Some((_, node)) = loaded.as_ref() {
         fill_edits(ptr, node);
     } else {
         _ = SetWindowTextW((*ptr).edits[6], w!("10"));
-        _ = SetWindowTextW((*ptr).edits[10], w!("0"));
+        _ = SetWindowTextW((*ptr).edits[8], w!("0"));
     }
     place_edits(hwnd);
     round_window(hwnd);
@@ -224,14 +246,14 @@ unsafe fn fill_edits(ptr: *mut Dlg, node: &crate::FavNode) {
     set_text((*ptr).edits[4], item.map(|i| i.user.as_str()).unwrap_or(""));
     let secs = item.map(|i| i.cred_secs).unwrap_or(10);
     set_text((*ptr).edits[6], &secs.to_string());
-    set_text((*ptr).edits[7], item.map(|i| i.rdp_extra.as_str()).unwrap_or(""));
-    set_text((*ptr).edits[8], item.map(|i| i.memo.as_str()).unwrap_or(""));
     if let Some(icon) = item.and_then(|i| i.icon.as_ref()) {
-        set_text((*ptr).edits[9], &icon.path);
-        set_text((*ptr).edits[10], &icon.index.to_string());
+        set_text((*ptr).edits[7], &icon.path);
+        set_text((*ptr).edits[8], &icon.index.to_string());
     } else {
-        set_text((*ptr).edits[10], "0");
+        set_text((*ptr).edits[8], "0");
     }
+    sync_place((*ptr).place_combo, &text_of((*ptr).edits[1]));
+    sync_screen((*ptr).screen_combo, (*ptr).screen);
 }
 
 fn set_text(h: HWND, s: &str) {
@@ -245,87 +267,87 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     let gap4 = s(SPACE_4);
     let lab = s(FONT_PX + SPACE_4);
     let edit_h = s(FIELD_H);
+    let seg_h = s(BTN_H_FOOTER);
     let right = (width - pad).max(pad + 1);
     let inner = (right - pad).max(1);
     let mut y = pad;
     let mut labels = Vec::new();
     let mut slots = Vec::new();
     let mut browse = Vec::new();
-    let kind_lab = RECT { left: pad, top: y, right, bottom: y + lab };
-    y = kind_lab.bottom + gap4;
-    let radio_h = s(24);
-    let cols = 3i32;
+    let title = RECT { left: pad, top: y, right, bottom: y + lab };
+    y = title.bottom + gap;
+    let kind_label = RECT { left: pad, top: y, right, bottom: y + lab };
+    y = kind_label.bottom + gap4;
+    // Six kind names. One row when each chip is wide enough, otherwise two rows of three.
+    let min_seg = s(108);
+    let six = (inner - gap * 5) / 6;
+    let cols = if six >= min_seg { 6 } else { 3 };
     let slot_w = (inner - gap * (cols - 1)) / cols;
-    let mut radios = [RECT::default(); 6];
+    let mut kinds = [RECT::default(); 6];
     for i in 0..6 {
         let col = (i as i32) % cols;
         let row = (i as i32) / cols;
         let left = pad + col * (slot_w + gap);
-        let top = y + row * (radio_h + gap4);
-        radios[i] = RECT { left, top, right: left + slot_w, bottom: top + radio_h };
+        let top = y + row * (seg_h + gap);
+        kinds[i] = RECT { left, top, right: left + slot_w, bottom: top + seg_h };
     }
-    y = radios[5].bottom + gap;
+    y = kinds[5].bottom + gap;
 
     let name_lab = RECT { left: pad, top: y, right, bottom: y + lab };
     labels.push((Slot::Name, name_lab));
     y = name_lab.bottom + gap4;
-    let chip = s(28);
-    let name = RECT { left: pad, top: y, right: right - chip - chip - gap * 2, bottom: y + edit_h };
-    let swatch = RECT { left: name.right + gap, top: y, right: name.right + gap + chip, bottom: y + edit_h };
-    let clear_color = RECT { left: swatch.right + gap, top: y, right, bottom: y + edit_h };
+    let name = RECT { left: pad, top: y, right, bottom: y + edit_h };
     slots.push((Slot::Name, name));
     y = name.bottom + gap;
 
-    let browse_w = s(112);
-    // One closure owns the row lists. 0 = field, 1 = field plus browse, 2 = button, 3 = tall field (`extra` is DIP).
+    let browse_w = s(128).max(s(BTN_MIN_W));
+    // One closure owns the row lists. 0 = field, 1 = field plus browse, 2 = button.
     {
-        let mut add = |slot: Slot, y: &mut i32, how: u8, extra: i32| {
+        let mut add = |slot: Slot, y: &mut i32, how: u8| {
             let label = RECT { left: pad, top: *y, right, bottom: *y + lab };
             labels.push((slot, label));
             *y = label.bottom + gap4;
-            let h = if how == 3 { s(extra) } else { edit_h };
             if how == 1 {
-                let b = RECT { left: right - browse_w, top: *y, right, bottom: *y + h };
-                let f = RECT { left: pad, top: *y, right: b.left - gap, bottom: *y + h };
+                let b = RECT { left: right - browse_w, top: *y, right, bottom: *y + edit_h };
+                let f = RECT { left: pad, top: *y, right: b.left - gap, bottom: *y + edit_h };
                 slots.push((slot, f));
                 browse.push((slot, b));
             } else {
-                slots.push((slot, RECT { left: pad, top: *y, right, bottom: *y + h }));
+                slots.push((slot, RECT { left: pad, top: *y, right, bottom: *y + edit_h }));
             }
-            *y += h + gap;
+            *y += edit_h + gap;
         };
         match kind {
-            ItemKind::Folder | ItemKind::File => add(Slot::Target, &mut y, 1, 0),
+            ItemKind::Folder | ItemKind::File => add(Slot::Target, &mut y, 1),
             ItemKind::Special => {
-                add(Slot::Place, &mut y, 2, 0);
-                add(Slot::Target, &mut y, 0, 0);
+                add(Slot::Place, &mut y, 2);
+                add(Slot::Target, &mut y, 0);
             }
             ItemKind::Command => {
-                add(Slot::Target, &mut y, 1, 0);
-                add(Slot::Args, &mut y, 0, 0);
-                add(Slot::Work, &mut y, 1, 0);
+                add(Slot::Target, &mut y, 1);
+                add(Slot::Args, &mut y, 0);
+                add(Slot::Work, &mut y, 1);
             }
-            ItemKind::Url => add(Slot::Target, &mut y, 0, 0),
+            ItemKind::Url => add(Slot::Target, &mut y, 0),
             ItemKind::Rdp => {
-                add(Slot::Target, &mut y, 0, 0);
-                add(Slot::User, &mut y, 0, 0);
-                add(Slot::Pass, &mut y, 0, 0);
-                add(Slot::Screen, &mut y, 2, 0);
-                add(Slot::Cred, &mut y, 0, 0);
-                add(Slot::Extra, &mut y, 3, 52);
+                add(Slot::Target, &mut y, 0);
+                add(Slot::User, &mut y, 0);
+                add(Slot::Pass, &mut y, 0);
+                add(Slot::Screen, &mut y, 2);
+                add(Slot::Cred, &mut y, 0);
             }
         }
     }
     let admin = if kind == ItemKind::Command {
-        let r = RECT { left: pad, top: y, right, bottom: y + s(24) };
+        let r = RECT { left: pad, top: y, right, bottom: y + edit_h };
         y = r.bottom + gap;
         r
     } else {
         RECT::default()
     };
     let note = if kind == ItemKind::Rdp {
-        let r = RECT { left: pad, top: y, right, bottom: y + s(48) };
-        y = r.bottom + gap4;
+        let r = RECT { left: pad, top: y, right, bottom: y + s(64) };
+        y = r.bottom + gap;
         r
     } else {
         RECT::default()
@@ -333,7 +355,7 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     let (saved, clear_pass) = if kind == ItemKind::Rdp && show_clear {
         let saved = RECT { left: pad, top: y, right, bottom: y + lab };
         y = saved.bottom + gap4;
-        let clear_pass = RECT { left: pad, top: y, right, bottom: y + s(24) };
+        let clear_pass = RECT { left: pad, top: y, right, bottom: y + edit_h };
         y = clear_pass.bottom + gap;
         (saved, clear_pass)
     } else {
@@ -343,10 +365,10 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     let icon_lab = RECT { left: pad, top: y, right, bottom: y + lab };
     labels.push((Slot::IconPath, icon_lab));
     y = icon_lab.bottom + gap4;
-    let icon_auto = RECT { left: pad, top: y, right, bottom: y + s(24) };
-    y = icon_auto.bottom + gap4;
-    let icon_custom = RECT { left: pad, top: y, right, bottom: y + s(24) };
-    y = icon_custom.bottom + gap4;
+    let half = (inner - gap) / 2;
+    let icon_auto = RECT { left: pad, top: y, right: pad + half, bottom: y + seg_h };
+    let icon_custom = RECT { left: icon_auto.right + gap, top: y, right, bottom: y + seg_h };
+    y = icon_custom.bottom + gap;
     let index = if custom_icon {
         let b = RECT { left: right - browse_w, top: y, right, bottom: y + edit_h };
         let index = RECT { left: b.left - gap - s(56), top: y, right: b.left - gap, bottom: y + edit_h };
@@ -359,23 +381,16 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
         RECT::default()
     };
 
-    let memo_lab = RECT { left: pad, top: y, right, bottom: y + lab };
-    labels.push((Slot::Memo, memo_lab));
-    y = memo_lab.bottom + gap4;
-    let memo = RECT { left: pad, top: y, right, bottom: y + s(72) };
-    slots.push((Slot::Memo, memo));
-    y = memo.bottom + gap;
-
     let bh = s(BTN_H_FOOTER);
-    let bw = (inner - gap) / 2;
+    let bw = (inner - s(BTN_GAP)) / 2;
     let ok = RECT { left: pad, top: y, right: pad + bw, bottom: y + bh };
-    let cancel = RECT { left: ok.right + gap, top: y, right, bottom: y + bh };
-    y = cancel.bottom + pad;
+    let cancel = RECT { left: ok.right + s(BTN_GAP), top: y, right, bottom: y + bh };
+    y = cancel.bottom + s(PAD_BODY_Y);
     Geom {
-        radios,
+        title,
+        kind_label,
+        kinds,
         name,
-        swatch,
-        clear_color,
         labels,
         slots,
         browse,
@@ -413,9 +428,7 @@ fn label_of(kind: ItemKind, slot: Slot) -> &'static str {
         Slot::Pass => tr(crate::Key::Password),
         Slot::Screen => tr(crate::Key::ItemScreen),
         Slot::Cred => tr(crate::Key::CredentialDeleteSeconds),
-        Slot::Extra => tr(crate::Key::RdpExtra),
         Slot::IconPath => tr(crate::Key::ItemIcon),
-        Slot::Memo => tr(crate::Key::ItemMemo),
     }
 }
 
@@ -428,9 +441,7 @@ fn slot_edit(slot: Slot) -> Option<usize> {
         Slot::User => 4,
         Slot::Pass => 5,
         Slot::Cred => 6,
-        Slot::Extra => 7,
-        Slot::Memo => 8,
-        Slot::IconPath => 9,
+        Slot::IconPath => 7,
         Slot::Place | Slot::Screen => return None,
     })
 }
@@ -467,15 +478,111 @@ unsafe fn place_edits(hwnd: HWND) {
     show(Slot::User);
     show(Slot::Pass);
     show(Slot::Cred);
-    show(Slot::Extra);
-    show(Slot::Memo);
     show(Slot::IconPath);
-    let index = (*v).edits[10];
+    let index = (*v).edits[8];
     if (*v).custom_icon && g.index.right > g.index.left {
         crate::place_edit(index, field_edit_rect(g.index, (*v).dpi), true);
     } else {
         crate::place_edit(index, RECT::default(), false);
     }
+    place_combo((*v).place_combo, slot_rect(&g, Slot::Place));
+    place_combo((*v).screen_combo, slot_rect(&g, Slot::Screen));
+}
+
+unsafe fn place_combo(h: HWND, slot: Option<RECT>) {
+    if h.0.is_null() {
+        return;
+    }
+    let Some(r) = slot.filter(|r| r.right > r.left && r.bottom > r.top) else {
+        let _ = ShowWindow(h, SW_HIDE);
+        return;
+    };
+    let _ = SetWindowPos(h, None, r.left, r.top, (r.right - r.left).max(1), (r.bottom - r.top).max(1), SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+unsafe fn item_combo_face(_hwnd: HWND) -> super::combo::Face {
+    let t = super::ui_tokens();
+    super::combo::Face { fill: t.field_bg, edge: t.line, ink: t.text, ground: t.bg }
+}
+
+unsafe fn fill_place_list(h: HWND) {
+    if h.0.is_null() {
+        return;
+    }
+    let _ = SendMessageW(h, CB_RESETCONTENT, None, None);
+    for place in shell_places() {
+        let hs = HSTRING::from(tr(place.label));
+        let _ = SendMessageW(h, CB_ADDSTRING, None, Some(LPARAM(hs.as_ptr() as isize)));
+    }
+}
+
+unsafe fn fill_screen_list(h: HWND) {
+    if h.0.is_null() {
+        return;
+    }
+    let _ = SendMessageW(h, CB_RESETCONTENT, None, None);
+    for label in screen_choices() {
+        let hs = HSTRING::from(label);
+        let _ = SendMessageW(h, CB_ADDSTRING, None, Some(LPARAM(hs.as_ptr() as isize)));
+    }
+}
+
+fn screen_choices() -> Vec<String> {
+    let mut out = vec![tr(crate::Key::Automatic).to_string(), tr(crate::Key::ScreenFull).to_string()];
+    for (w, h) in RDP_WINDOWS {
+        out.push(format!("{w} × {h}"));
+    }
+    out
+}
+
+unsafe fn sync_place(h: HWND, path: &str) {
+    if h.0.is_null() {
+        return;
+    }
+    let sel = shell_places().iter().position(|p| p.path.eq_ignore_ascii_case(path.trim()));
+    let index = sel.map(|i| i as usize).unwrap_or(usize::MAX);
+    let _ = SendMessageW(h, CB_SETCURSEL, Some(WPARAM(index)), None);
+}
+
+unsafe fn sync_screen(h: HWND, screen: RdpScreen) {
+    if h.0.is_null() {
+        return;
+    }
+    let sel = match screen {
+        RdpScreen::Auto => 0,
+        RdpScreen::Full => 1,
+        RdpScreen::Window { w, h } => RDP_WINDOWS.iter().position(|(ww, hh)| *ww == w && *hh == h).map(|i| i + 2).unwrap_or(0),
+    };
+    let _ = SendMessageW(h, CB_SETCURSEL, Some(WPARAM(sel)), None);
+}
+
+unsafe fn chosen_place(h: HWND) -> Option<&'static str> {
+    if h.0.is_null() {
+        return None;
+    }
+    let sel = SendMessageW(h, CB_GETCURSEL, None, None).0;
+    if sel < 0 {
+        return None;
+    }
+    shell_places().get(sel as usize).map(|p| p.path)
+}
+
+unsafe fn chosen_screen(h: HWND) -> Option<RdpScreen> {
+    if h.0.is_null() {
+        return None;
+    }
+    let sel = SendMessageW(h, CB_GETCURSEL, None, None).0;
+    if sel < 0 {
+        return None;
+    }
+    Some(match sel {
+        0 => RdpScreen::Auto,
+        1 => RdpScreen::Full,
+        n => {
+            let (w, h) = RDP_WINDOWS.get((n as usize) - 2)?;
+            RdpScreen::Window { w: *w, h: *h }
+        }
+    })
 }
 
 unsafe fn fit_window(h: HWND) {
@@ -526,8 +633,18 @@ unsafe extern "system" fn item_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             color_field_edit(HDC(wp.0 as *mut _))
         }
         WM_COMMAND => {
+            let id = (wp.0 & 0xffff) as i32;
             let code = ((wp.0 >> 16) & 0xffff) as u32;
-            if code == 0x0100 || code == 0x0200 {
+            if code == CBN_SELCHANGE {
+                apply_combo(h, id);
+            } else if code == EN_CHANGE && id == ID_TARGET {
+                if let Some(v) = view(h) {
+                    if (*v).kind == ItemKind::Special && GetFocus() != (*v).place_combo {
+                        sync_place((*v).place_combo, &text_of((*v).edits[1]));
+                    }
+                }
+            }
+            if code == 0x0100 || code == 0x0200 || code == EN_CHANGE || code == CBN_SELCHANGE {
                 let _ = InvalidateRect(Some(h), None, false);
             }
             LRESULT(0)
@@ -564,6 +681,16 @@ unsafe extern "system" fn item_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             commit(h);
             LRESULT(0)
         }
+        WM_NCHITTEST => {
+            let hit = DefWindowProcW(h, msg, wp, lp);
+            if hit.0 == HTCLIENT as isize {
+                let (_x, y) = lp_xy(lp);
+                if y < sc(dpi_of(h), PAD_BODY_X + FONT_PX + SPACE_4) {
+                    return LRESULT(HTCAPTION as isize);
+                }
+            }
+            hit
+        }
         _ => DefWindowProcW(h, msg, wp, lp),
     }
 }
@@ -576,43 +703,48 @@ unsafe fn paint(h: HWND) {
     let show_clear = (*v).show_clear;
     let hot = (*v).hot;
     let down = (*v).down;
-    let color = (*v).color;
-    let screen = (*v).screen;
     let admin = (*v).admin;
     let clear_pass = (*v).clear_password;
-    let target = text_of((*v).edits[1]);
+    let edits = (*v).edits;
     buffered(h, |dc, rc| {
         let g = form_geom(dpi, (rc.right - rc.left).max(1), kind, custom, show_clear);
         paint_window(dc, rc);
         let body = body_font();
+        let bold = bold_ui_font();
         let ground = super::ui_tokens().bg;
         let t = super::ui_tokens();
-        paint_meta(dc, RECT { left: g.radios[0].left, top: rc.top + sc(dpi, PAD_BODY_X), right: rc.right - sc(dpi, PAD_BODY_X), bottom: g.radios[0].top }, tr(crate::Key::ItemKind), body);
+        let focus = GetFocus();
+        let hot_id = (hot >= 0).then_some(hot);
+        let down_id = (down >= 0).then_some(down);
+        let editing = view(h).is_some_and(|p| (*p).editing);
+        let title = if editing { tr(crate::Key::EditFavourite) } else { tr(crate::Key::AddItem) };
+        paint_section_header(dc, g.title, title, bold);
+        paint_meta(dc, g.kind_label, tr(crate::Key::ItemKind), body);
         for (i, kind_i) in KINDS.iter().enumerate() {
-            paint_radio(dc, g.radios[i], tr(kind_i.label()), kind == *kind_i, hot == i as i32, dpi, body, ground);
+            let vis = visual_from_pointer(i as i32, hot_id, down_id);
+            paint_segment(dc, g.kinds[i], tr(kind_i.label()), kind == *kind_i, vis, dpi, ground);
         }
         for (slot, r) in &g.labels {
             paint_meta(dc, *r, label_of(kind, *slot), body);
         }
-        let swatch_fill = color.unwrap_or(t.field_bg);
-        ellipse(dc, inset(g.swatch, sc(dpi, 4)), swatch_fill, Some(if hot == HIT_SWATCH { t.text } else { t.line }));
-        paint_button(dc, g.clear_color, ButtonKind::Secondary, visual_from_pointer(HIT_CLEAR_COLOR, (hot >= 0).then_some(hot), (down >= 0).then_some(down)), "×", body, dpi, ground, FocusRing::Outside);
         for (slot, r) in &g.slots {
             if matches!(slot, Slot::Place | Slot::Screen) {
-                let focused = false;
-                paint_field(dc, *r, dpi, focused || hot == if *slot == Slot::Place { HIT_PLACE } else { HIT_SCREEN });
-                let label = if *slot == Slot::Place { place_label(&target) } else { screen_label(screen) };
-                paint_label(dc, inset(*r, sc(dpi, 8)), &label, body);
+                continue;
             }
+            let focused = slot_edit(*slot).is_some_and(|i| focus == edits[i]);
+            paint_field(dc, *r, dpi, focused);
+        }
+        if g.index.right > g.index.left && g.index.bottom > g.index.top {
+            paint_field(dc, g.index, dpi, focus == edits[8]);
         }
         for (_, r) in &g.browse {
-            paint_button(dc, *r, ButtonKind::Secondary, visual_from_pointer(browse_hit(*r, &g), (hot >= 0).then_some(hot), (down >= 0).then_some(down)), tr(crate::Key::Browse), body, dpi, ground, FocusRing::Outside);
+            paint_button(dc, *r, ButtonKind::Secondary, visual_from_pointer(browse_hit(*r, &g), hot_id, down_id), tr(crate::Key::Browse), body, dpi, ground, FocusRing::Outside);
         }
         if g.admin.bottom > g.admin.top {
-            let tick_w = sc(dpi, 18);
-            let tick = RECT { left: g.admin.left, top: g.admin.top + sc(dpi, 2), right: g.admin.left + tick_w, bottom: g.admin.top + tick_w + sc(dpi, 2) };
+            let tick_w = sc(dpi, 16);
+            let tick = RECT { left: g.admin.left, top: g.admin.top + sc(dpi, 4), right: g.admin.left + tick_w, bottom: g.admin.top + tick_w + sc(dpi, 4) };
             paint_check(dc, tick, admin, hot == HIT_ADMIN, dpi, ground);
-            paint_label(dc, RECT { left: tick.right + sc(dpi, 8), ..g.admin }, tr(crate::Key::RunAsAdministrator), body);
+            paint_label(dc, RECT { left: tick.right + sc(dpi, SPACE_8), ..g.admin }, tr(crate::Key::RunAsAdministrator), body);
         }
         if g.note.bottom > g.note.top {
             wrap_text(dc, g.note, tr(crate::Key::PasswordInCredentialManager), body, t.sub, false);
@@ -621,17 +753,16 @@ unsafe fn paint(h: HWND) {
             paint_meta(dc, g.saved, tr(crate::Key::SavedPassword), body);
         }
         if g.clear_pass.bottom > g.clear_pass.top {
-            let tick_w = sc(dpi, 18);
-            let tick = RECT { left: g.clear_pass.left, top: g.clear_pass.top + sc(dpi, 2), right: g.clear_pass.left + tick_w, bottom: g.clear_pass.top + tick_w + sc(dpi, 2) };
+            let tick_w = sc(dpi, 16);
+            let tick = RECT { left: g.clear_pass.left, top: g.clear_pass.top + sc(dpi, 4), right: g.clear_pass.left + tick_w, bottom: g.clear_pass.top + tick_w + sc(dpi, 4) };
             paint_check(dc, tick, clear_pass, hot == HIT_CLEAR_PASS, dpi, ground);
-            paint_label(dc, RECT { left: tick.right + sc(dpi, 8), ..g.clear_pass }, tr(crate::Key::ClearSavedPassword), body);
+            paint_label(dc, RECT { left: tick.right + sc(dpi, SPACE_8), ..g.clear_pass }, tr(crate::Key::ClearSavedPassword), body);
         }
-        paint_radio(dc, g.icon_auto, tr(crate::Key::Automatic), !custom, hot == HIT_ICON_AUTO, dpi, body, ground);
-        paint_radio(dc, g.icon_custom, tr(crate::Key::IconCustom), custom, hot == HIT_ICON_CUSTOM, dpi, body, ground);
-        let editing = view(h).is_some_and(|p| (*p).editing);
+        paint_segment(dc, g.icon_auto, tr(crate::Key::Automatic), !custom, visual_from_pointer(HIT_ICON_AUTO, hot_id, down_id), dpi, ground);
+        paint_segment(dc, g.icon_custom, tr(crate::Key::IconCustom), custom, visual_from_pointer(HIT_ICON_CUSTOM, hot_id, down_id), dpi, ground);
         let ok = if editing { tr(crate::Key::Save) } else { tr(crate::Key::ItemAdd) };
-        paint_button(dc, g.ok, ButtonKind::Primary, visual_from_pointer(HIT_OK, (hot >= 0).then_some(hot), (down >= 0).then_some(down)), ok, body, dpi, ground, FocusRing::Outside);
-        paint_button(dc, g.cancel, ButtonKind::Secondary, visual_from_pointer(HIT_CANCEL, (hot >= 0).then_some(hot), (down >= 0).then_some(down)), tr(crate::Key::Cancel), body, dpi, ground, FocusRing::Outside);
+        paint_button(dc, g.ok, ButtonKind::Primary, visual_from_pointer(HIT_OK, hot_id, down_id), ok, bold, dpi, ground, FocusRing::Outside);
+        paint_button(dc, g.cancel, ButtonKind::Secondary, visual_from_pointer(HIT_CANCEL, hot_id, down_id), tr(crate::Key::Cancel), body, dpi, ground, FocusRing::Outside);
     });
 }
 
@@ -643,47 +774,6 @@ fn browse_hit(r: RECT, g: &Geom) -> i32 {
     }).unwrap_or(HIT_BROWSE_TARGET)
 }
 
-fn place_label(path: &str) -> String {
-    if let Some(key) = shell_place_label(path) {
-        tr(key).to_string()
-    } else if path.trim().is_empty() {
-        tr(crate::Key::ShellPlace).to_string()
-    } else {
-        path.to_string()
-    }
-}
-
-fn screen_label(screen: RdpScreen) -> String {
-    match screen {
-        RdpScreen::Auto => tr(crate::Key::Automatic).to_string(),
-        RdpScreen::Full => tr(crate::Key::ScreenFull).to_string(),
-        RdpScreen::Window { w, h } => format!("{w} × {h}"),
-    }
-}
-
-unsafe fn paint_radio(dc: HDC, r: RECT, label: &str, on: bool, hot: bool, dpi: i32, font: HFONT, ground: u32) {
-    if r.right <= r.left {
-        return;
-    }
-    let t = super::ui_tokens();
-    let d = sc(dpi, 14);
-    let top = r.top + ((r.bottom - r.top) - d).max(0) / 2;
-    let circle = RECT { left: r.left, top, right: r.left + d, bottom: top + d };
-    let edge = if on || hot { crate::live_accent() } else { t.line };
-    ellipse(dc, circle, t.field_bg, Some(edge));
-    if on {
-        ellipse(dc, inset(circle, sc(dpi, 3)), crate::live_accent(), None);
-    }
-    let _ = ground;
-    if !label.is_empty() {
-        paint_label(dc, RECT { left: circle.right + sc(dpi, 6), ..r }, label, font);
-    }
-}
-
-fn inset(r: RECT, d: i32) -> RECT {
-    RECT { left: r.left + d, top: r.top + d, right: (r.right - d).max(r.left + d), bottom: (r.bottom - d).max(r.top + d) }
-}
-
 unsafe fn hit(h: HWND, lp: LPARAM, down: bool, up: bool) {
     let Some(v) = view(h) else { return };
     let (x, y) = lp_xy(lp);
@@ -691,16 +781,12 @@ unsafe fn hit(h: HWND, lp: LPARAM, down: bool, up: bool) {
     let _ = GetClientRect(h, &mut rc);
     let g = form_geom((*v).dpi, (rc.right - rc.left).max(1), (*v).kind, (*v).custom_icon, (*v).show_clear);
     let mut id = -1i32;
-    for (i, r) in g.radios.iter().enumerate() {
+    for (i, r) in g.kinds.iter().enumerate() {
         if inside(*r, x, y) {
             id = i as i32;
         }
     }
     let pairs = [
-        (g.swatch, HIT_SWATCH),
-        (g.clear_color, HIT_CLEAR_COLOR),
-        (slot_rect(&g, Slot::Place).unwrap_or_default(), HIT_PLACE),
-        (slot_rect(&g, Slot::Screen).unwrap_or_default(), HIT_SCREEN),
         (g.admin, HIT_ADMIN),
         (g.icon_auto, HIT_ICON_AUTO),
         (g.icon_custom, HIT_ICON_CUSTOM),
@@ -756,22 +842,12 @@ unsafe fn activate(h: HWND, id: i32) {
             (*v).clear_password = false;
         }
         fit_window(h);
+        sync_place((*v).place_combo, &text_of((*v).edits[1]));
+        sync_screen((*v).screen_combo, (*v).screen);
         let _ = InvalidateRect(Some(h), None, true);
         return;
     }
     match id {
-        HIT_SWATCH => {
-            if let Some(c) = pick_color(h, (*v).color) {
-                (*v).color = Some(c);
-                let _ = InvalidateRect(Some(h), None, false);
-            }
-        }
-        HIT_CLEAR_COLOR => {
-            (*v).color = None;
-            let _ = InvalidateRect(Some(h), None, false);
-        }
-        HIT_PLACE => pick_place(h),
-        HIT_SCREEN => pick_screen(h),
         HIT_ADMIN => {
             (*v).admin = !(*v).admin;
             let _ = InvalidateRect(Some(h), None, false);
@@ -798,7 +874,7 @@ unsafe fn activate(h: HWND, id: i32) {
         }
         HIT_BROWSE_ICON => {
             if let Some(path) = pick_icon(h) {
-                set_text((*view(h).unwrap()).edits[9], &path);
+                set_text((*view(h).unwrap()).edits[7], &path);
             }
         }
         HIT_OK => commit(h),
@@ -816,70 +892,24 @@ unsafe fn browse_target(h: HWND) {
     };
     if let Some(path) = path {
         set_text((*v).edits[1], &path);
+        if (*v).kind == ItemKind::Special {
+            sync_place((*v).place_combo, &path);
+        }
         let _ = InvalidateRect(Some(h), None, false);
     }
 }
 
-unsafe fn pick_place(h: HWND) {
-    let Ok(menu) = CreatePopupMenu() else { return };
-    for (i, place) in shell_places().iter().enumerate() {
-        _ = AppendMenuW(menu, MF_STRING, i + 1, &HSTRING::from(tr(place.label)));
-    }
-    let cmd = track_at(h, menu, HIT_PLACE);
-    _ = DestroyMenu(menu);
-    if let Some(place) = cmd.checked_sub(1).and_then(|i| shell_places().get(i as usize)) {
-        if let Some(v) = view(h) {
-            set_text((*v).edits[1], place.path);
-            let _ = InvalidateRect(Some(h), None, false);
-        }
-    }
-}
-
-unsafe fn pick_screen(h: HWND) {
-    let Ok(menu) = CreatePopupMenu() else { return };
-    _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from(tr(crate::Key::Automatic)));
-    _ = AppendMenuW(menu, MF_STRING, 2, &HSTRING::from(tr(crate::Key::ScreenFull)));
-    for (i, (w, ht)) in RDP_WINDOWS.iter().enumerate() {
-        _ = AppendMenuW(menu, MF_STRING, (i + 3) as usize, &HSTRING::from(format!("{w} × {ht}")));
-    }
-    let cmd = track_at(h, menu, HIT_SCREEN);
-    _ = DestroyMenu(menu);
+unsafe fn apply_combo(h: HWND, id: i32) {
     let Some(v) = view(h) else { return };
-    (*v).screen = match cmd {
-        1 => RdpScreen::Auto,
-        2 => RdpScreen::Full,
-        n if n >= 3 => {
-            let (w, h) = RDP_WINDOWS[(n as usize) - 3];
-            RdpScreen::Window { w, h }
+    if id == ID_PLACE {
+        if let Some(path) = chosen_place((*v).place_combo) {
+            set_text((*v).edits[1], path);
         }
-        _ => return,
-    };
-    let _ = InvalidateRect(Some(h), None, false);
-}
-
-unsafe fn track_at(h: HWND, menu: HMENU, hit: i32) -> usize {
-    let Some(v) = view(h) else { return 0 };
-    let mut rc = RECT::default();
-    let _ = GetClientRect(h, &mut rc);
-    let g = form_geom((*v).dpi, (rc.right - rc.left).max(1), (*v).kind, (*v).custom_icon, (*v).show_clear);
-    let slot = if hit == HIT_PLACE { Slot::Place } else { Slot::Screen };
-    let r = slot_rect(&g, slot).unwrap_or(g.ok);
-    let mut pt = POINT { x: r.left, y: r.bottom };
-    let _ = ClientToScreen(h, &mut pt);
-    TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, None, h, None).0 as usize
-}
-
-unsafe fn pick_color(owner: HWND, current: Option<u32>) -> Option<u32> {
-    let mut custom = [COLORREF(0xFFFFFF); 16];
-    let mut cc = CHOOSECOLORW {
-        lStructSize: size_of::<CHOOSECOLORW>() as u32,
-        hwndOwner: owner,
-        rgbResult: crate::cref(current.unwrap_or(0x3D7EE0)),
-        lpCustColors: custom.as_mut_ptr(),
-        Flags: CC_RGBINIT | CC_FULLOPEN,
-        ..Default::default()
-    };
-    ChooseColorW(&mut cc).as_bool().then(|| crate::cref(cc.rgbResult.0).0)
+    } else if id == ID_SCREEN {
+        if let Some(screen) = chosen_screen((*v).screen_combo) {
+            (*v).screen = screen;
+        }
+    }
 }
 
 unsafe fn pick_any(owner: HWND) -> Option<String> {
@@ -949,6 +979,11 @@ unsafe fn commit(h: HWND) {
 
 fn read_draft(v: *mut Dlg) -> Draft {
     unsafe {
+        if (*v).kind == ItemKind::Rdp {
+            if let Some(screen) = chosen_screen((*v).screen_combo) {
+                (*v).screen = screen;
+            }
+        }
         let mut d = Draft::blank((*v).kind);
         d.name = text_of((*v).edits[0]);
         d.target = text_of((*v).edits[1]);
@@ -958,15 +993,17 @@ fn read_draft(v: *mut Dlg) -> Draft {
         d.password = text_of((*v).edits[5]);
         let cred = text_of((*v).edits[6]);
         d.cred_secs = cred.trim().parse().unwrap_or(10);
-        d.rdp_extra = text_of((*v).edits[7]);
-        d.memo = text_of((*v).edits[8]);
         d.admin = (*v).admin;
         d.clear_password = (*v).clear_password;
+        // An older file may already have a colour, a memo, or RDP extra lines.
+        // Editing another field writes them back. The dialog does not show them.
         d.color = (*v).color;
+        d.memo = (*v).memo.clone();
+        d.rdp_extra = (*v).rdp_extra.clone();
         d.screen = (*v).screen;
         if (*v).custom_icon {
-            let path = text_of((*v).edits[9]);
-            let index = text_of((*v).edits[10]).trim().parse().unwrap_or(0);
+            let path = text_of((*v).edits[7]);
+            let index = text_of((*v).edits[8]).trim().parse().unwrap_or(0);
             d.icon = Some(ItemIcon { path, index });
         }
         d
@@ -1096,9 +1133,9 @@ mod tests {
 
     fn boxes(g: &Geom) -> Vec<RECT> {
         let mut v = Vec::new();
-        v.extend(g.radios);
-        v.push(g.swatch);
-        v.push(g.clear_color);
+        v.push(g.title);
+        v.push(g.kind_label);
+        v.extend(g.kinds);
         v.extend(g.labels.iter().map(|(_, r)| *r));
         v.extend(g.slots.iter().map(|(_, r)| *r));
         v.extend(g.browse.iter().map(|(_, r)| *r));
@@ -1132,11 +1169,22 @@ mod tests {
                         assert!(g.ok.left >= 16 * dpi / 96);
                         assert!(g.ok.right - g.ok.left >= 72 * dpi / 96, "ok button");
                         assert!(g.cancel.right - g.cancel.left >= 72 * dpi / 96, "cancel");
-                        let radio_w = g.radios[2].right - g.radios[2].left;
-                        assert!(radio_w >= 140 * dpi / 96, "radio {radio_w} at {dpi}");
-                        assert!(g.radios[2].right <= width - 16 * dpi / 96);
-                        assert_eq!(g.radios[0].top, g.radios[2].top);
-                        assert!(g.radios[3].top >= g.radios[0].bottom);
+                        assert_eq!(g.ok.bottom - g.ok.top, 28 * dpi / 96);
+                        assert_eq!(g.cancel.left - g.ok.right, 8 * dpi / 96);
+                        assert_eq!(g.kinds[0].bottom - g.kinds[0].top, 28 * dpi / 96);
+                        let seg_w = g.kinds[2].right - g.kinds[2].left;
+                        assert!(seg_w >= 140 * dpi / 96, "segment {seg_w} at {dpi}");
+                        assert!(g.kinds[2].right <= width - 16 * dpi / 96);
+                        assert_eq!(g.kinds[0].top, g.kinds[2].top);
+                        assert!(g.kinds[3].top >= g.kinds[0].bottom);
+                        assert_eq!(g.icon_auto.top, g.icon_custom.top);
+                        assert!(g.icon_auto.right <= g.icon_custom.left);
+                        assert!(g.name.right >= width - 16 * dpi / 96);
+                        for (_, r) in &g.slots {
+                            assert_eq!(r.bottom - r.top, px(dpi, FIELD_H), "{kind:?} {dpi} tall memo or extra");
+                        }
+                        let next = g.labels.iter().map(|(_, r)| r.top).filter(|top| *top >= g.name.bottom).min().unwrap();
+                        assert_eq!(next, g.name.bottom + px(dpi, SPACE_8), "colour row is gone");
                         if custom {
                             assert!(has(&g, Slot::IconPath));
                             let path = g.slots.iter().find(|(s, _)| *s == Slot::IconPath).unwrap().1;
@@ -1161,6 +1209,19 @@ mod tests {
     }
 
     #[test]
+    fn form_geom_has_no_colour_row() {
+        for dpi in [96, 144, 192] {
+            for kind in KINDS {
+                for custom in [false, true] {
+                    let g = form_geom(dpi, 520 * dpi / 96, kind, custom, true);
+                    let next = g.labels.iter().map(|(_, r)| r.top).filter(|top| *top >= g.name.bottom).min().unwrap();
+                    assert_eq!(next, g.name.bottom + px(dpi, SPACE_8), "{kind:?} {dpi} custom {custom}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rdp_shows_host_password_and_screen_folder_does_not() {
         let rdp = form_geom(96, 520, ItemKind::Rdp, false, true);
         assert!(has(&rdp, Slot::Target));
@@ -1168,7 +1229,11 @@ mod tests {
         assert!(has(&rdp, Slot::Pass));
         assert!(has(&rdp, Slot::Screen));
         assert!(has(&rdp, Slot::Cred));
-        assert!(has(&rdp, Slot::Extra));
+        assert_eq!(
+            rdp.slots.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec![Slot::Name, Slot::Target, Slot::User, Slot::Pass, Slot::Screen, Slot::Cred],
+            "memo and RDP extra are not slots"
+        );
         assert!(rdp.note.bottom > rdp.note.top);
         assert!(rdp.clear_pass.bottom > rdp.clear_pass.top);
         assert!(rdp.admin.bottom == 0);
@@ -1186,5 +1251,23 @@ mod tests {
         assert!(has(&cmd, Slot::Work));
         assert!(cmd.admin.bottom > cmd.admin.top);
         assert!(cmd.height < rdp.height);
+    }
+
+    #[test]
+    fn field_face_follows_light_and_dark_tokens() {
+        let light = crate::tokens_for(false);
+        let dark = crate::tokens_for(true);
+        assert_ne!(light.bg, dark.bg);
+        assert_ne!(light.field_bg, dark.field_bg);
+        assert_ne!(light.text, dark.text);
+        assert_ne!(light.line, dark.line);
+        assert_eq!(light.field_bg, crate::FIELD_LIGHT);
+        assert_eq!(dark.field_bg, crate::FIELD_DARK);
+        for dpi in [96, 144, 192] {
+            let light_g = form_geom(dpi, 520 * dpi / 96, ItemKind::Folder, false, false);
+            let dark_g = form_geom(dpi, 520 * dpi / 96, ItemKind::Folder, false, false);
+            assert_eq!(light_g.height, dark_g.height);
+            assert_eq!(light_g.kinds, dark_g.kinds);
+        }
     }
 }

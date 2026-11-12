@@ -358,7 +358,7 @@ pub(crate) fn fav_tip_text(path: &str, name: &str, group: bool, missing: bool) -
 }
 
 fn fav_row_tip(row: &FavRow) -> String {
-    fav_tip_text(&row.path, &row.name, row.group, !row.group && known_missing(&row.path))
+    fav_tip_text(&row.path, &row.name, row.group, fav_row_missing(row))
 }
 
 fn fav_tip_info(owner: HWND, id: usize, label: &HSTRING) -> TTTOOLINFOW {
@@ -693,15 +693,18 @@ pub(crate) unsafe fn paint_side(h: HWND) {
             } else {
                 let slot = (16 * dpi / 96).max(1);
                 let iy = y + (rh - slot).max(0) / 2;
-                if let Some((list, index, dim)) = shell_icon(&f.path, f.file) {
-                    draw_fav_icon(dc, list, index, x, iy, slot, dim);
+                let glyph = fav_row_mark(f);
+                if !paint_leaf_icon(dc, x, iy, slot, &glyph) {
+                    let mark = if glyph.file { "\u{E8A5}" } else { "\u{E8B7}" };
+                    text(dc, RECT { left: x, top: y, right: x + slot, bottom: y + rh }, mark, icon, pal().sub, DT_CENTER);
                 }
                 label_left = x + slot + s(4);
             }
             let label = if f.name.is_empty() { short_name(&f.path) } else { f.name.clone() };
             let label_font = if f.group { bold } else { font };
-            // A path the background check (or a click) has found gone is drawn in the secondary colour.
-            let ink = if !f.group && known_missing(&f.path) { pal().sub } else { pal().text };
+            // A folder or file the background check has found gone is drawn in the secondary colour.
+            // Commands, links, remote desktops, and shell places are not missing files.
+            let ink = fav_name_ink(fav_row_missing(f), DARK_ON.load(Ordering::Relaxed));
             text(dc, RECT { left: label_left, right: rc.right - s(6), ..r }, &label, label_font, ink, DT_LEFT);
         }
         if !list.iter().any(|f| f.in_tree()) {
