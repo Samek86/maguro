@@ -1,4 +1,4 @@
-//! Add or edit a favourite. Kind, name, colour, icon, and memo are shared.
+//! Add or edit a favourite. Kind, name, icon, and memo are shared.
 //! Folder and file keep the path they have always stored. A password stays in the
 //! edit and in Credential Manager; the favourites file only records that one exists.
 
@@ -16,8 +16,8 @@ use crate::session::{
 use crate::shell::{forget_hosts, stage_secret};
 
 use super::{
-    body_font, bold_ui_font, buffered, color_field_edit, field_edit_rect, paint_button, paint_check, paint_chip, paint_field, paint_label, paint_meta, paint_section_header,
-    paint_segment, paint_wash, paint_window, style_popup_chrome, visual_from_pointer, wrap_text, ButtonKind, FocusRing, BTN_GAP, BTN_H_FOOTER, BTN_MIN_W, FIELD_H, FIELD_PAD_X,
+    body_font, bold_ui_font, buffered, color_field_edit, field_edit_rect, paint_button, paint_check, paint_field, paint_label, paint_meta, paint_section_header,
+    paint_segment, paint_window, style_popup_chrome, visual_from_pointer, wrap_text, ButtonKind, FocusRing, BTN_GAP, BTN_H_FOOTER, BTN_MIN_W, FIELD_H, FIELD_PAD_X,
     FONT_PX, PAD_BODY_X, PAD_BODY_Y, SPACE_4, SPACE_8, px,
 };
 
@@ -43,8 +43,6 @@ const CB_GETCURSEL: u32 = 0x0147;
 const CBN_SELCHANGE: u32 = 1;
 const EN_CHANGE: u32 = 0x0300;
 
-const HIT_SWATCH: i32 = 20;
-const HIT_CLEAR_COLOR: i32 = 21;
 const HIT_ADMIN: i32 = 24;
 const HIT_ICON_AUTO: i32 = 25;
 const HIT_ICON_CUSTOM: i32 = 26;
@@ -71,7 +69,6 @@ pub(crate) enum Slot {
     Extra,
     IconPath,
     Memo,
-    Color,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,8 +77,6 @@ pub(crate) struct Geom {
     pub(crate) kind_label: RECT,
     pub(crate) kinds: [RECT; 6],
     pub(crate) name: RECT,
-    pub(crate) swatch: RECT,
-    pub(crate) clear_color: RECT,
     pub(crate) labels: Vec<(Slot, RECT)>,
     pub(crate) slots: Vec<(Slot, RECT)>,
     pub(crate) browse: Vec<(Slot, RECT)>,
@@ -103,6 +98,7 @@ struct Dlg {
     editing: bool,
     edit_id: Vec<usize>,
     parent: Vec<usize>,
+    /// Colour already stored on this leaf. The dialog does not show it or change it.
     color: Option<u32>,
     screen: RdpScreen,
     admin: bool,
@@ -303,16 +299,6 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     slots.push((Slot::Name, name));
     y = name.bottom + gap;
 
-    let color_lab = RECT { left: pad, top: y, right, bottom: y + lab };
-    labels.push((Slot::Color, color_lab));
-    y = color_lab.bottom + gap4;
-    let chip = edit_h;
-    let clear_w = s(BTN_MIN_W).max(s(88));
-    let swatch = RECT { left: pad, top: y, right: (pad + chip).min(right), bottom: y + edit_h };
-    let clear_left = swatch.right + gap;
-    let clear_color = RECT { left: clear_left, top: y, right: (clear_left + clear_w).min(right), bottom: y + edit_h };
-    y = swatch.bottom + gap;
-
     let browse_w = s(128).max(s(BTN_MIN_W));
     // One closure owns the row lists. 0 = field, 1 = field plus browse, 2 = button, 3 = tall field (`extra` is DIP).
     {
@@ -413,8 +399,6 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
         kind_label,
         kinds,
         name,
-        swatch,
-        clear_color,
         labels,
         slots,
         browse,
@@ -455,7 +439,6 @@ fn label_of(kind: ItemKind, slot: Slot) -> &'static str {
         Slot::Extra => tr(crate::Key::RdpExtra),
         Slot::IconPath => tr(crate::Key::ItemIcon),
         Slot::Memo => tr(crate::Key::ItemMemo),
-        Slot::Color => tr(crate::Key::ItemColour),
     }
 }
 
@@ -471,7 +454,7 @@ fn slot_edit(slot: Slot) -> Option<usize> {
         Slot::Extra => 7,
         Slot::Memo => 8,
         Slot::IconPath => 9,
-        Slot::Place | Slot::Screen | Slot::Color => return None,
+        Slot::Place | Slot::Screen => return None,
     })
 }
 
@@ -734,7 +717,6 @@ unsafe fn paint(h: HWND) {
     let show_clear = (*v).show_clear;
     let hot = (*v).hot;
     let down = (*v).down;
-    let color = (*v).color;
     let admin = (*v).admin;
     let clear_pass = (*v).clear_password;
     let edits = (*v).edits;
@@ -759,11 +741,6 @@ unsafe fn paint(h: HWND) {
         for (slot, r) in &g.labels {
             paint_meta(dc, *r, label_of(kind, *slot), body);
         }
-        paint_chip(dc, g.swatch, dpi, ground);
-        if let Some(color) = color {
-            paint_wash(dc, inset(g.swatch, sc(dpi, 3)), dpi, color, t.card);
-        }
-        paint_button(dc, g.clear_color, ButtonKind::Secondary, visual_from_pointer(HIT_CLEAR_COLOR, hot_id, down_id), tr(crate::Key::ClearBasket), body, dpi, ground, FocusRing::Outside);
         for (slot, r) in &g.slots {
             if matches!(slot, Slot::Place | Slot::Screen) {
                 continue;
@@ -811,10 +788,6 @@ fn browse_hit(r: RECT, g: &Geom) -> i32 {
     }).unwrap_or(HIT_BROWSE_TARGET)
 }
 
-fn inset(r: RECT, d: i32) -> RECT {
-    RECT { left: r.left + d, top: r.top + d, right: (r.right - d).max(r.left + d), bottom: (r.bottom - d).max(r.top + d) }
-}
-
 unsafe fn hit(h: HWND, lp: LPARAM, down: bool, up: bool) {
     let Some(v) = view(h) else { return };
     let (x, y) = lp_xy(lp);
@@ -828,8 +801,6 @@ unsafe fn hit(h: HWND, lp: LPARAM, down: bool, up: bool) {
         }
     }
     let pairs = [
-        (g.swatch, HIT_SWATCH),
-        (g.clear_color, HIT_CLEAR_COLOR),
         (g.admin, HIT_ADMIN),
         (g.icon_auto, HIT_ICON_AUTO),
         (g.icon_custom, HIT_ICON_CUSTOM),
@@ -891,16 +862,6 @@ unsafe fn activate(h: HWND, id: i32) {
         return;
     }
     match id {
-        HIT_SWATCH => {
-            if let Some(c) = pick_color(h, (*v).color) {
-                (*v).color = Some(c);
-                let _ = InvalidateRect(Some(h), None, false);
-            }
-        }
-        HIT_CLEAR_COLOR => {
-            (*v).color = None;
-            let _ = InvalidateRect(Some(h), None, false);
-        }
         HIT_ADMIN => {
             (*v).admin = !(*v).admin;
             let _ = InvalidateRect(Some(h), None, false);
@@ -963,19 +924,6 @@ unsafe fn apply_combo(h: HWND, id: i32) {
             (*v).screen = screen;
         }
     }
-}
-
-unsafe fn pick_color(owner: HWND, current: Option<u32>) -> Option<u32> {
-    let mut custom = [COLORREF(0xFFFFFF); 16];
-    let mut cc = CHOOSECOLORW {
-        lStructSize: size_of::<CHOOSECOLORW>() as u32,
-        hwndOwner: owner,
-        rgbResult: crate::cref(current.unwrap_or(0x3D7EE0)),
-        lpCustColors: custom.as_mut_ptr(),
-        Flags: CC_RGBINIT | CC_FULLOPEN,
-        ..Default::default()
-    };
-    ChooseColorW(&mut cc).as_bool().then(|| crate::cref(cc.rgbResult.0).0)
 }
 
 unsafe fn pick_any(owner: HWND) -> Option<String> {
@@ -1063,6 +1011,7 @@ fn read_draft(v: *mut Dlg) -> Draft {
         d.memo = text_of((*v).edits[8]);
         d.admin = (*v).admin;
         d.clear_password = (*v).clear_password;
+        // An older file may already have a colour. Editing another field must write it back.
         d.color = (*v).color;
         d.screen = (*v).screen;
         if (*v).custom_icon {
@@ -1200,8 +1149,6 @@ mod tests {
         v.push(g.title);
         v.push(g.kind_label);
         v.extend(g.kinds);
-        v.push(g.swatch);
-        v.push(g.clear_color);
         v.extend(g.labels.iter().map(|(_, r)| *r));
         v.extend(g.slots.iter().map(|(_, r)| *r));
         v.extend(g.browse.iter().map(|(_, r)| *r));
@@ -1246,9 +1193,8 @@ mod tests {
                         assert_eq!(g.icon_auto.top, g.icon_custom.top);
                         assert!(g.icon_auto.right <= g.icon_custom.left);
                         assert!(g.name.right >= width - 16 * dpi / 96);
-                        assert!(g.swatch.top >= g.name.bottom);
-                        assert!(g.clear_color.left >= g.swatch.right);
-                        assert!(g.clear_color.right - g.clear_color.left >= 72 * dpi / 96);
+                        let next = g.labels.iter().map(|(_, r)| r.top).filter(|top| *top >= g.name.bottom).min().unwrap();
+                        assert_eq!(next, g.name.bottom + px(dpi, SPACE_8), "colour row is gone");
                         if custom {
                             assert!(has(&g, Slot::IconPath));
                             let path = g.slots.iter().find(|(s, _)| *s == Slot::IconPath).unwrap().1;
@@ -1267,6 +1213,19 @@ mod tests {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn form_geom_has_no_colour_row() {
+        for dpi in [96, 144, 192] {
+            for kind in KINDS {
+                for custom in [false, true] {
+                    let g = form_geom(dpi, 520 * dpi / 96, kind, custom, true);
+                    let next = g.labels.iter().map(|(_, r)| r.top).filter(|top| *top >= g.name.bottom).min().unwrap();
+                    assert_eq!(next, g.name.bottom + px(dpi, SPACE_8), "{kind:?} {dpi} custom {custom}");
                 }
             }
         }

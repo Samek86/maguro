@@ -8,7 +8,7 @@ use crate::imports::*;
 use crate::i18n::tr;
 use crate::session::{fav_glyph, glyph_is_missing, home_rows, short_name, tree_rows, visible_rows, FavGlyph, FavNode, FavRow, Pinned, RowKind};
 
-use super::{draw_fav_icon, ellipse, fill, indexed_icon, known_missing, on_color, pal, shell_icon, text};
+use super::{draw_fav_icon, fill, indexed_icon, known_missing, on_color, pal, shell_icon, text};
 
 fn px(dpi: i32, v: i32) -> i32 {
     v * dpi / 96
@@ -351,20 +351,26 @@ pub(crate) unsafe fn paint_fav_head(dc: HDC, r: RECT, dpi: i32, font: HFONT) {
 /// one list and a folder in another.
 pub(crate) fn fav_row_mark(row: &FavRow) -> FavGlyph {
     if row.group {
-        return FavGlyph { path: String::new(), file: false, index: -1, track_missing: false, color: None };
+        return FavGlyph { path: String::new(), file: false, index: -1, track_missing: false };
     }
     if row.in_tree() && !row.id.is_empty() {
         if let Some(Some(mark)) = crate::app_try(|a| {
             crate::node_ref(&a.s.tree, &row.id).map(|n| {
                 let icon = n.item.as_ref().and_then(|i| i.icon.as_ref());
-                let color = n.item.as_ref().and_then(|i| i.color);
-                fav_glyph(n.kind(), &n.path, color, icon)
+                fav_glyph(n.kind(), &n.path, icon)
             })
         }) {
             return mark;
         }
     }
-    FavGlyph { path: row.path.clone(), file: row.file, index: -1, track_missing: true, color: None }
+    FavGlyph { path: row.path.clone(), file: row.file, index: -1, track_missing: true }
+}
+
+/// Theme body colour for a favourite name. A missing folder or file uses the secondary colour.
+/// A colour stored on the item is not ink.
+pub(crate) fn fav_name_ink(missing: bool, dark: bool) -> u32 {
+    let tokens = super::tokens_for(dark);
+    if missing { tokens.sub } else { tokens.text }
 }
 
 /// Grey name and "not found" only for a folder or file the disk check has lost.
@@ -437,17 +443,9 @@ pub(crate) unsafe fn paint_fav_row(dc: HDC, row: Option<&FavRow>, r: RECT, dpi: 
             text(dc, icon, glyph, icon_font, pal().sub, DT_CENTER);
         }
     }
-    let mut name_r = RECT { left: icon.right + s(4), right: name_right.max(icon.right + s(4)), ..r };
-    if let Some(color) = mark.color {
-        let d = s(8);
-        let top = r.top + ((r.bottom - r.top) - d).max(0) / 2;
-        let dot = RECT { left: name_r.left, top, right: (name_r.left + d).min(name_r.right), bottom: top + d };
-        if dot.right > dot.left {
-            ellipse(dc, dot, color, None);
-            name_r.left = dot.right + s(4);
-        }
-    }
-    let name_ink = if glyph_is_missing(&mark, known_missing(&row.path)) { pal().sub } else { pal().text };
+    let name_r = RECT { left: icon.right + s(4), right: name_right.max(icon.right + s(4)), ..r };
+    let missing = glyph_is_missing(&mark, known_missing(&row.path));
+    let name_ink = fav_name_ink(missing, crate::DARK_ON.load(std::sync::atomic::Ordering::Relaxed));
     text(dc, name_r, &row.name, font, name_ink, DT_LEFT);
     // Explorer rows have no rename or delete button, so the path can use that space.
     let reserve = if actions && row.in_tree() { s(180) } else { s(12) };
@@ -742,6 +740,16 @@ mod tests {
         assert_eq!(expand_toggle(&scope(&tree, &pins, &files, true, true, "photo")), ExpandToggle::Expand);
         assert_eq!(expand_toggle(&scope(&tree, &pins, &files, true, true, "")), ExpandToggle::Expand);
         assert_eq!(expand_toggle(&scope(&tree, &pins, &files, true, true, "없는")), ExpandToggle::Expand);
+    }
+
+    #[test]
+    fn favourite_name_ink_follows_the_theme_and_missing_rows_use_sub() {
+        assert_eq!(fav_name_ink(false, false), crate::TEXT_LIGHT);
+        assert_eq!(fav_name_ink(false, true), crate::TEXT_DARK);
+        assert_eq!(fav_name_ink(true, false), crate::SUB_LIGHT);
+        assert_eq!(fav_name_ink(true, true), crate::SUB_DARK);
+        assert_ne!(fav_name_ink(false, false), 0x000000);
+        assert_ne!(fav_name_ink(false, true), 0xFFFFFF);
     }
 
     #[test]

@@ -1695,7 +1695,7 @@ pub(crate) unsafe fn paint_favs(h: HWND) {
                 let glyph = if f.file { "\u{E8A5}" } else { "\u{E8B7}" };
                 text(dc, icon, glyph, icon_font, t.sub, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 let name = if f.name.is_empty() { short_name(&f.path) } else { f.name.clone() };
-                let ink = if fav_row_missing(f) { t.sub } else { t.text };
+                let ink = fav_name_ink(fav_row_missing(f), t.dark);
                 let label = RECT { left: icon.right + s(4), right: label_right, ..*row };
                 text(dc, label, &name, font, ink, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }

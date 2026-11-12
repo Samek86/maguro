@@ -704,7 +704,7 @@ pub(crate) unsafe fn paint_side(h: HWND) {
             let label_font = if f.group { bold } else { font };
             // A folder or file the background check has found gone is drawn in the secondary colour.
             // Commands, links, remote desktops, and shell places are not missing files.
-            let ink = if fav_row_missing(f) { pal().sub } else { pal().text };
+            let ink = fav_name_ink(fav_row_missing(f), DARK_ON.load(Ordering::Relaxed));
             text(dc, RECT { left: label_left, right: rc.right - s(6), ..r }, &label, label_font, ink, DT_LEFT);
         }
         if !list.iter().any(|f| f.in_tree()) {

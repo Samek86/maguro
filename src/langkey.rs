@@ -881,7 +881,6 @@ pub(crate) enum Key {
     BadShell,
     BadCredSeconds,
     CouldNotStartItem,
-    ItemColour,
     SavedPassword,
     IconIndex,
     ItemAdd,
@@ -891,7 +890,7 @@ pub(crate) enum Key {
     UpdateFailReason,
 }
 
-pub(crate) const KEY_COUNT: usize = 884;
+pub(crate) const KEY_COUNT: usize = 883;
 
 const _: () = assert!((Key::UpdateFailReason as usize) + 1 == KEY_COUNT);
 
@@ -1772,7 +1771,6 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Enter a shell: name or a ::{CLSID} path.",
     "Enter a number of seconds from 0 to 3600.",
     "Could not start that item.",
-    "Colour",
     "A password is saved for this host.",
     "Index",
     "Add",
@@ -2660,7 +2658,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "bad_shell",
     "bad_cred_seconds",
     "could_not_start_item",
-    "item_colour",
     "saved_password",
     "icon_index",
     "item_add",

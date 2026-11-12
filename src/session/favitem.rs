@@ -298,10 +298,9 @@ pub(crate) struct FavGlyph {
     pub(crate) file: bool,
     pub(crate) index: i32,
     pub(crate) track_missing: bool,
-    pub(crate) color: Option<u32>,
 }
 
-pub(crate) fn fav_glyph(kind: ItemKind, path: &str, color: Option<u32>, icon: Option<&ItemIcon>) -> FavGlyph {
+pub(crate) fn fav_glyph(kind: ItemKind, path: &str, icon: Option<&ItemIcon>) -> FavGlyph {
     if let Some(icon) = icon {
         if !icon.path.trim().is_empty() {
             return FavGlyph {
@@ -309,7 +308,6 @@ pub(crate) fn fav_glyph(kind: ItemKind, path: &str, color: Option<u32>, icon: Op
                 file: true,
                 index: icon.index,
                 track_missing: matches!(kind, ItemKind::Folder | ItemKind::File),
-                color,
             };
         }
     }
@@ -325,7 +323,6 @@ pub(crate) fn fav_glyph(kind: ItemKind, path: &str, color: Option<u32>, icon: Op
         file,
         index: -1,
         track_missing: matches!(kind, ItemKind::Folder | ItemKind::File),
-        color,
     }
 }
 
@@ -1192,6 +1189,36 @@ mod tests {
     }
 
     #[test]
+    fn a_new_leaf_stores_no_colour_and_an_edit_keeps_an_old_one() {
+        let mut fresh = Draft::blank(ItemKind::Folder);
+        fresh.target = r"C:\Work".into();
+        fresh.memo = "notes".into();
+        let item = item_from_draft(&fresh, false).unwrap();
+        assert!(item.color.is_none());
+        let mut out = Map::new();
+        push_item(&mut out, &item);
+        assert!(out.get("color").is_none());
+
+        let mut old = Map::new();
+        old.insert("path".into(), json!(r"D:\Photos"));
+        old.insert("color".into(), json!("#3D7EE0"));
+        let (loaded, _) = pull_item(&old, false);
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.color, Some(0x3D7E_E0));
+        let mut edited = Draft::blank(loaded.kind);
+        edited.target = r"D:\Photos".into();
+        edited.memo = "kept".into();
+        edited.color = loaded.color;
+        let saved = item_from_draft(&edited, false).unwrap();
+        assert_eq!(saved.memo, "kept");
+        assert_eq!(saved.color, Some(0x3D7E_E0));
+        let mut round = Map::new();
+        push_item(&mut round, &saved);
+        assert_eq!(round.get("memo").and_then(|v| v.as_str()), Some("kept"));
+        assert_eq!(round.get("color").and_then(|v| v.as_str()), Some("#3D7EE0"));
+    }
+
+    #[test]
     fn screen_tokens_and_shell_catalog() {
         assert_eq!(RdpScreen::parse("auto"), Some(RdpScreen::Auto));
         assert_eq!(RdpScreen::parse("full"), Some(RdpScreen::Full));
@@ -1241,7 +1268,7 @@ mod tests {
     #[test]
     fn command_url_shell_and_rdp_icons_are_not_missing_files() {
         let bin = "::{645FF040-5081-101B-9F08-00AA002F954E}";
-        let cmd = fav_glyph(ItemKind::Command, "notepad.exe", None, None);
+        let cmd = fav_glyph(ItemKind::Command, "notepad.exe", None);
         assert!(!cmd.track_missing);
         assert!(std::path::Path::new(&cmd.path).is_file(), "{}", cmd.path);
         assert!(cmd.path.to_ascii_lowercase().ends_with("notepad.exe"));
@@ -1249,26 +1276,26 @@ mod tests {
         assert!(std::path::Path::new(&quoted).is_file(), "{quoted}");
         assert!(!glyph_is_missing(&cmd, true));
 
-        let url = fav_glyph(ItemKind::Url, "https://example.com", None, None);
+        let url = fav_glyph(ItemKind::Url, "https://example.com", None);
         assert!(!url.track_missing);
         assert_ne!(url.path, "page.url");
         assert!(url.path.is_empty() || std::path::Path::new(&url.path).is_file(), "{}", url.path);
         assert!(!glyph_is_missing(&url, true));
 
-        let rdp = fav_glyph(ItemKind::Rdp, "desk.local", None, None);
+        let rdp = fav_glyph(ItemKind::Rdp, "desk.local", None);
         assert!(!rdp.track_missing);
         assert!(rdp.path.to_ascii_lowercase().ends_with("mstsc.exe"));
         assert!(!glyph_is_missing(&rdp, true));
 
-        let special = fav_glyph(ItemKind::Special, bin, None, None);
+        let special = fav_glyph(ItemKind::Special, bin, None);
         assert!(!special.track_missing);
         assert!(special.path.starts_with("::"));
         assert!(!glyph_is_missing(&special, true));
-        let shell = fav_glyph(ItemKind::Special, "shell:Downloads", None, None);
+        let shell = fav_glyph(ItemKind::Special, "shell:Downloads", None);
         assert!(shell.path.eq_ignore_ascii_case("shell:Downloads"));
 
         let gone = r"C:\maguro-no-such-folder-31b3bdd";
-        let folder = fav_glyph(ItemKind::Folder, gone, None, None);
+        let folder = fav_glyph(ItemKind::Folder, gone, None);
         assert!(folder.track_missing);
         assert_eq!(folder.path, gone);
         assert!(glyph_is_missing(&folder, true));
