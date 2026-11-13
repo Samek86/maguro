@@ -280,6 +280,32 @@ pub(crate) unsafe fn style_dialog_caption(h: HWND) {
     let _ = DwmSetWindowAttribute(h, DWMWINDOWATTRIBUTE(34), &def as *const _ as _, 4);
 }
 
+/// [`style_dialog_caption`] for a window that may already be on screen.
+/// Windows 10 reads the immersive dark-mode bit when the window is shown, and a
+/// later write leaves the old caption. A visible window is hidden around the write
+/// when that bit changes, then shown again without taking focus.
+pub(crate) unsafe fn restyle_dialog_caption(h: HWND) {
+    if h.0.is_null() {
+        return;
+    }
+    let want = i32::from(ui_tokens().dark);
+    let mut have = want;
+    let readable = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+        h,
+        DWMWINDOWATTRIBUTE(20),
+        &mut have as *mut _ as _,
+        4,
+    )
+    .is_ok();
+    if IsWindowVisible(h).as_bool() && readable && have != want {
+        let _ = ShowWindow(h, SW_HIDE);
+        style_dialog_caption(h);
+        let _ = ShowWindow(h, SW_SHOWNA);
+        return;
+    }
+    style_dialog_caption(h);
+}
+
 /// Preview-handler colours. The handler paints its own window on the token card with token text.
 pub(crate) unsafe fn style_preview_visuals(vis: &IPreviewHandlerVisuals) {
     let t = ui_tokens();
@@ -361,5 +387,101 @@ mod tests {
         assert_eq!(horizontal(DT_CENTER).0, DT_CENTER.0);
         assert_eq!(horizontal(DT_RIGHT).0, DT_RIGHT.0);
         assert_eq!(horizontal(DT_CENTER | DT_VCENTER | DT_SINGLELINE).0, DT_CENTER.0);
+    }
+
+    /// Windows 10 composes the caption when the window is shown. The attribute has to
+    /// be set first, and a later theme change has to show the window again.
+    #[test]
+    fn dialog_caption_follows_dark_then_light_while_the_window_stays_open() {
+        use super::restyle_dialog_caption;
+        use crate::imports::*;
+        use windows::Win32::Graphics::Dwm::DwmFlush;
+
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe { crate::prime_theme(self.0) }
+            }
+        }
+
+        unsafe extern "system" fn proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+            DefWindowProcW(h, msg, wp, lp)
+        }
+        fn lum(c: u32) -> f32 {
+            let b = (c & 0xFF) as f32;
+            let g = (c >> 8 & 0xFF) as f32;
+            let r = (c >> 16 & 0xFF) as f32;
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        }
+        unsafe fn pump() {
+            let mut msg = MSG::default();
+            let start = std::time::Instant::now();
+            while start.elapsed() < std::time::Duration::from_millis(200) {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+        }
+        unsafe fn caption_lum(h: HWND) -> f32 {
+            let mut wr = RECT::default();
+            let _ = GetWindowRect(h, &mut wr);
+            let _ = DwmFlush();
+            let sdc = GetDC(None);
+            let px = GetPixel(sdc, wr.left + 120, wr.top + 10);
+            let _ = ReleaseDC(None, sdc);
+            assert_ne!(px.0, 0xFFFF_FFFF, "caption pixel was not readable");
+            lum(px.0)
+        }
+
+        unsafe {
+            let prev = crate::DARK_ON.load(Ordering::Relaxed);
+            let _restore = Restore(prev);
+            let class = w!("MaguroCaptionTheme");
+            let Ok(module) = GetModuleHandleW(None) else { return };
+            let _ = RegisterClassW(&WNDCLASSW {
+                lpfnWndProc: Some(proc),
+                hInstance: module.into(),
+                hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                lpszClassName: class,
+                ..Default::default()
+            });
+            // Hidden at creation, same as a tool window that styles its caption before ShowWindow.
+            let h = CreateWindowExW(
+                WS_EX_TOPMOST,
+                class,
+                w!("caption"),
+                WS_OVERLAPPEDWINDOW,
+                80,
+                80,
+                480,
+                240,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_or_default();
+            assert!(!h.0.is_null(), "caption window");
+            assert!(!IsWindowVisible(h).as_bool());
+            crate::prime_theme(true);
+            restyle_dialog_caption(h);
+            let _ = ShowWindow(h, SW_SHOWNA);
+            pump();
+            let born = caption_lum(h);
+            assert!(born < 100.0, "dark caption at show, luminance {born}");
+            crate::prime_theme(false);
+            restyle_dialog_caption(h);
+            pump();
+            let light = caption_lum(h);
+            assert!(light > 200.0, "light caption after the theme change, luminance {light}");
+            crate::prime_theme(true);
+            restyle_dialog_caption(h);
+            pump();
+            let dark = caption_lum(h);
+            assert!(dark < 100.0, "dark caption after switching back, luminance {dark}");
+            let _ = DestroyWindow(h);
+        }
     }
 }

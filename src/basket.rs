@@ -358,7 +358,7 @@ pub(crate) unsafe fn refresh() {
     if !h.0.is_null() && IsWindow(Some(h)).as_bool() {
         let title = HSTRING::from(tr(Key::FileBasket));
         _ = SetWindowTextW(h, &title);
-        style_dialog_caption(h);
+        restyle_dialog_caption(h);
         layout(h);
         _ = InvalidateRect(Some(h), None, false);
     }
@@ -422,12 +422,13 @@ unsafe fn open() {
     let title = HSTRING::from(tr(Key::FileBasket));
     // Same caption as Folder Watch and Settings: app icon, standard min/max/close.
     // Still unowned and topmost, so a click does not activate one main window and switch desks.
+    // Hidden until the caption is styled. WS_VISIBLE here leaves a light title bar.
     let ex = WS_EX_TOPMOST;
-    let style = WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN | WS_VISIBLE | WS_CLIPSIBLINGS;
+    let style = create_style();
     let Ok(hwnd) = CreateWindowExW(ex, w!("MaguroBasket"), &title, style, x, y, w, h, None, None, None, None) else {
         return;
     };
-    style_dialog_caption(hwnd);
+    restyle_dialog_caption(hwnd);
     note_side(hwnd);
     with_st(|s| {
         *s = State::new();
@@ -441,6 +442,11 @@ unsafe fn open() {
     _ = SetTimer(Some(hwnd), TIMER_POLL, 1000, None);
     _ = ShowWindow(hwnd, SW_SHOW);
     _ = SetForegroundWindow(hwnd);
+}
+
+/// Overlapped tool window, created hidden. The caption is styled before `ShowWindow`.
+fn create_style() -> WINDOW_STYLE {
+    WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN | WS_CLIPSIBLINGS
 }
 
 fn actions() -> [(u8, Key); 5] {
@@ -1517,6 +1523,13 @@ unsafe fn paint(h: HWND, dc: HDC, rc: RECT) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_basket_is_created_hidden_so_the_caption_takes_the_theme() {
+        let style = create_style();
+        assert_eq!(style.0 & WS_VISIBLE.0, 0);
+        assert_eq!(style.0 & WS_OVERLAPPEDWINDOW.0, WS_OVERLAPPEDWINDOW.0);
+    }
 
     #[test]
     fn duplicates_and_slashes_collapse() {
