@@ -1079,6 +1079,44 @@ unsafe fn insert_term_admin(menu: HMENU, cm: &IContextMenu) {
     });
 }
 
+/// `CMINVOKECOMMANDINFOEX.lpDirectoryW`. The windows crate does not export the flag.
+const CMIC_MASK_UNICODE: u32 = 0x0000_4000;
+
+/// Folder a background shell command starts in. There is no selected item, so
+/// other apps take the working directory (and `%V`). A file click already
+/// carries its path. Shell places and paths that are not a real directory stay unset.
+fn shell_work_dir(background: bool, shown: &str) -> Option<String> {
+    if !background {
+        return None;
+    }
+    let dir = super::termadmin::terminal_folder(true, shown, &[])?;
+    Path::new(&dir).is_dir().then_some(dir)
+}
+
+/// One shell invoke runs in `dir`. The process directory goes back afterwards.
+struct WorkDir {
+    prev: Option<std::path::PathBuf>,
+}
+
+impl WorkDir {
+    fn enter(dir: &str) -> Self {
+        let prev = std::env::current_dir().ok();
+        if std::env::set_current_dir(dir).is_ok() {
+            Self { prev }
+        } else {
+            Self { prev: None }
+        }
+    }
+}
+
+impl Drop for WorkDir {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+}
+
 unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(String, bool)], background: bool, pane_selection: bool, props_folder: &str, pt: POINT, pane: usize, t_pre: std::time::Instant) -> bool {
     super::excelro::arm(background, items);
     let _clear_excel = ClearExcel;
@@ -1238,13 +1276,21 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
             Some(CtxRename::ShellView) => start_rename = true,
             Some(CtxRename::SearchHit) => search_rename = Some(items[0].0.clone()),
             None if !claim_folder_open(pane, &verb, items, default_item) => {
-            let mut ici = CMINVOKECOMMANDINFO {
-                cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
+            let work = shell_work_dir(background, props_folder);
+            let work_wide = work.as_ref().map(|dir| dir.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>());
+            let _restore = work.as_deref().map(WorkDir::enter);
+            let mut ici = CMINVOKECOMMANDINFOEX {
+                cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
                 hwnd: owner,
-                lpVerb: PCSTR((cmd as u32 - 1) as usize as *const u8),
+                lpVerb: PCSTR(offset as *const u8),
+                lpVerbW: PCWSTR(offset as *const u16),
+                lpDirectoryW: work_wide.as_ref().map(|w| PCWSTR(w.as_ptr())).unwrap_or(PCWSTR::null()),
                 nShow: SW_SHOWNORMAL.0 as i32,
                 ..Default::default()
             };
+            if work_wide.is_some() {
+                ici.fMask |= CMIC_MASK_UNICODE;
+            }
             if GetKeyState(VK_SHIFT.0 as i32) < 0 {
                 ici.fMask |= CMIC_MASK_SHIFT_DOWN;
             }
@@ -1263,7 +1309,8 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
                 crate::shell::openlog::trace("input", || format!("source=menu verb={verb}"));
                 crate::shell::openlog::trace("launch-before", || format!("source=menu mode=invoke verb={verb} mask={:#x}", ici.fMask));
             }
-            let hr = cm.InvokeCommand(&ici);
+            let hr = cm.InvokeCommand(&ici as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO);
+            let _ = &work_wide;
             if extra != 0 {
                 crate::shell::openlog::trace("launch-after", || {
                     let err = hr.as_ref().err().map(|e| e.code().0).unwrap_or(0);
@@ -1992,9 +2039,42 @@ mod geo_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{ctx_rename_target, fav_action_label, is_rename_verb, parent_of, CtxRename};
+    use super::{ctx_rename_target, fav_action_label, is_rename_verb, parent_of, shell_work_dir, CtxRename};
     use crate::i18n::UI;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn background_shell_verb_uses_the_open_folder() {
+        let root = std::env::temp_dir().join(format!("maguro-ctx-{}", std::process::id()));
+        let nested = root.join("サンプル");
+        std::fs::create_dir_all(&nested).unwrap();
+        let shown = nested.to_str().unwrap();
+        assert_eq!(shell_work_dir(true, &format!("{shown}\\")).as_deref(), Some(shown));
+        assert_eq!(shell_work_dir(false, shown), None);
+        assert!(shell_work_dir(true, "").is_none());
+        assert!(shell_work_dir(true, "This PC").is_none());
+        assert!(shell_work_dir(true, r"C:\no-such-maguro-ctx\inner").is_none());
+        let file = root.join("note.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(shell_work_dir(true, file.to_str().unwrap()).is_none());
+        if std::path::Path::new(r"C:\").is_dir() {
+            assert_eq!(shell_work_dir(true, r"C:\").as_deref(), Some(r"C:\"));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shell_invoke_puts_the_process_back() {
+        let root = std::env::temp_dir().join(format!("maguro-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let before = std::env::current_dir().unwrap();
+        {
+            let _hold = super::WorkDir::enter(root.to_str().unwrap());
+            assert_eq!(std::env::current_dir().unwrap(), root);
+        }
+        assert_eq!(std::env::current_dir().unwrap(), before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn parent_of_a_file_keeps_the_drive_root() {
