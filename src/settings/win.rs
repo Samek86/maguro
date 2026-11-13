@@ -484,7 +484,88 @@ fn ctl(parent: HWND, id: i32) -> HWND {
     unsafe { GetDlgItem(Some(parent), id).unwrap_or_default() }
 }
 
+/// Settings lines. 16 is the favourites manager, 61 is preview.
+const SETTINGS_TIP: usize = 17;
+
+fn settings_tip_key(anchor: RECT, text: &str) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h ^ (anchor.left as u32 as u64)
+        ^ ((anchor.top as u32 as u64) << 16)
+        ^ ((anchor.right as u32 as u64) << 32)
+        ^ ((anchor.bottom as u32 as u64) << 48)
+}
+
+/// Hide the bubble. The tool stays installed for the next truncated line.
+unsafe fn hide_settings_tip(h: HWND) {
+    if h.0.is_null() || crate::ui::tip_pumping() {
+        return;
+    }
+    let installed = ST.with(|s| s.borrow().tip_on);
+    if !installed {
+        return;
+    }
+    let (now, _) = crate::ui::tip_leave(h, SETTINGS_TIP, installed);
+    ST.with(|s| s.borrow_mut().tip_on = now);
+}
+
+/// The settings window is going away. Take the tool off the shared tooltip.
+unsafe fn drop_settings_tip(h: HWND) {
+    let on = ST.with(|s| {
+        let on = s.borrow().tip_on;
+        s.borrow_mut().tip_on = false;
+        on
+    });
+    if on {
+        crate::ui::tip_drop(h, SETTINGS_TIP);
+    }
+}
+
+/// Pointer is over a settings line. The full string shows only when that line's ellipsis is drawn.
+unsafe fn settings_tip_at(h: HWND, x: i32, y: i32) {
+    if h.0.is_null() || crate::ui::tip_pumping() {
+        return;
+    }
+    let sn = snap();
+    let mut rc = RECT::default();
+    let _ = GetClientRect(h, &mut rc);
+    let g = geo(rc, &sn);
+    let lines = settings_tip_lines(&g, sn.page, sn.dpi, card_text);
+    let Some(hit) = tip_hit(&lines, x, y, g.content) else {
+        hide_settings_tip(h);
+        return;
+    };
+    let font = match hit.line.face {
+        TipFace::Body => sn.font,
+        TipFace::Small => sn.small,
+        TipFace::Title => sn.title_font,
+    };
+    if font.0.is_null() || font.is_invalid() {
+        hide_settings_tip(h);
+        return;
+    }
+    let dc = GetDC(Some(h));
+    let px = if dc.is_invalid() { 0 } else { text_w(dc, font, &hit.line.text) };
+    if !dc.is_invalid() {
+        let _ = ReleaseDC(Some(h), dc);
+    }
+    let Some(text) = line_tip(hit.line, px) else {
+        hide_settings_tip(h);
+        return;
+    };
+    let item = crate::ui::tip_screen_rect(h, hit.anchor);
+    let key = settings_tip_key(hit.anchor, text);
+    let installed = ST.with(|s| s.borrow().tip_on);
+    let (now, _) = crate::ui::tip_enter(h, SETTINGS_TIP, key, text, item, crate::ui::TipSide::Below, installed);
+    ST.with(|s| s.borrow_mut().tip_on = now);
+}
+
 fn layout(h: HWND) {
+    // A scroll, a page change, or a DPI change moves the lines. The next hover measures them again.
+    unsafe { hide_settings_tip(h); }
     let mut sn = snap();
     let mut rc = RECT::default();
     unsafe { let _ = GetClientRect(h, &mut rc); }
@@ -1010,109 +1091,83 @@ pub(crate) unsafe fn key_row_heights(labels: &[String], row: RECT, dpi: i32, fon
     heights
 }
 
+/// Strings `draw_card` paints. Live status replaces the description; the card box does not grow.
+fn card_text(c: &CardItem) -> CardText {
+    let title = tx(c.spec.title).to_string();
+    let desc = tx(c.spec.desc).to_string();
+    match c.spec.ctl {
+        Ctl::About => {
+            let copy = live_about();
+            CardText {
+                title: format!("{} v{}", copy.title, copy.version),
+                desc: String::new(),
+                more: String::new(),
+                stack: vec![copy.desc, copy.license, copy.repo],
+            }
+        }
+        Ctl::WmStatus => {
+            let found = crate::winmerge::status_now(&app(|a| a.s.winmerge_path.clone()));
+            let (head, detail) = crate::winmerge::status_text(&found);
+            CardText { title, desc: head, more: detail, stack: Vec::new() }
+        }
+        Ctl::EvStatus => CardText { title, desc: ev_status_line(), more: String::new(), stack: Vec::new() },
+        Ctl::EvAct => {
+            let act = ev_activity_line();
+            let text = if !act.is_empty() {
+                act
+            } else if matches!(crate::everything::shown(), crate::everything::Shown::Ready(crate::everything::Presence::Running { .. })) {
+                tx(crate::Key::EverythingIsAlreadyRunning).to_string()
+            } else {
+                desc
+            };
+            CardText { title, desc: text, more: String::new(), stack: Vec::new() }
+        }
+        Ctl::Adv => CardText {
+            title,
+            desc,
+            more: crate::store::settings_path().to_string_lossy().into_owned(),
+            stack: Vec::new(),
+        },
+        Ctl::Toggle(TG_CLIP) => CardText {
+            title,
+            desc,
+            more: crate::cliphot::registration_notice().unwrap_or_default(),
+            stack: Vec::new(),
+        },
+        Ctl::Toggle(TG_FOLDER) => CardText {
+            title,
+            desc,
+            more: tx(crate::Key::TurnOffBeforeUninstall).to_string(),
+            stack: Vec::new(),
+        },
+        _ => CardText { title, desc, more: String::new(), stack: Vec::new() },
+    }
+}
+
+unsafe fn paint_tip_line(dc: HDC, line: &TipLine, sn: &Snap) {
+    let font = match line.face {
+        TipFace::Body => sn.font,
+        TipFace::Small => sn.small,
+        TipFace::Title => sn.title_font,
+    };
+    match line.ink {
+        TipInk::Text => crate::paint_label(dc, line.rect, &line.text, font),
+        TipInk::Sub => crate::paint_meta(dc, line.rect, &line.text, font),
+    }
+}
+
 unsafe fn draw_card(dc: HDC, c: &CardItem, sn: &Snap, accent: u32, h: HWND) {
     let dpi = sn.dpi.max(96);
     let t = crate::ui_tokens();
     // Disabled rows stay on the card; only the label grays.
     crate::ui::paint_card(dc, c.rect, dpi);
+    // Same boxes the hover tip hit-tests. Painting from that list keeps the ellipsis and the tip on one rect.
+    for line in card_tip_lines(c, dpi, &card_text(c)) {
+        paint_tip_line(dc, &line, sn);
+    }
     if c.spec.ctl == Ctl::WmPath {
-        let title_r = RECT {
-            left: c.rect.left + sc(dpi, 16),
-            top: c.rect.top + sc(dpi, 12),
-            right: c.adv[0].left - sc(dpi, 12),
-            bottom: c.adv[0].bottom,
-        };
-        crate::paint_label(dc, title_r, tx(c.spec.title), sn.font);
-        let desc_r = RECT {
-            left: c.rect.left + sc(dpi, 16),
-            top: c.adv[0].bottom + sc(dpi, 2),
-            right: c.rect.right - sc(dpi, 16),
-            bottom: c.ctl.top - sc(dpi, 4),
-        };
-        crate::paint_meta(dc, desc_r, tx(c.spec.desc), sn.small);
         crate::paint_field_on(dc, c.ctl, dpi, edit_focus(h, S_WM), t.card);
         return;
-    }
-    if c.spec.ctl == Ctl::About {
-        let copy = live_about();
-        let text_r = RECT {
-            left: c.rect.left + sc(dpi, 16),
-            top: c.rect.top + sc(dpi, 12),
-            right: c.ctl.left - sc(dpi, 12),
-            bottom: c.rect.bottom - sc(dpi, 12),
-        };
-        let line = sc(dpi, 18);
-        let title_line = RECT { bottom: text_r.top + sc(dpi, 20), ..text_r };
-        crate::paint_label(dc, title_line, &format!("{} v{}", copy.title, copy.version), sn.font);
-        let mut y = title_line.bottom;
-        for s in [copy.desc.as_str(), copy.license.as_str(), copy.repo.as_str()] {
-            let r = RECT { top: y, bottom: (y + line).min(text_r.bottom), ..text_r };
-            if r.bottom > r.top {
-                crate::paint_meta(dc, r, s, sn.small);
-            }
-            y = r.bottom;
-        }
-        return;
-    }
-    let title = tx(c.spec.title);
-    let text_r = RECT { left: c.rect.left + sc(dpi, 16), top: c.rect.top + sc(dpi, 12), right: c.ctl.left.min(c.sw.first().map(|s| s.left).unwrap_or(i32::MAX)) - sc(dpi, 12), bottom: c.rect.bottom - sc(dpi, 12) };
-    let title_line = if tx(c.spec.desc).is_empty() { text_r } else { RECT { bottom: text_r.top + sc(dpi, 20), ..text_r } };
-    if c.spec.live {
-        crate::paint_label(dc, title_line, title, sn.font);
-    } else {
-        crate::paint_meta(dc, title_line, title, sn.font);
-    }
-    if c.spec.ctl == Ctl::EvStatus || c.spec.ctl == Ctl::WmStatus {
-        let line = sc(dpi, 18);
-        let desc_r = RECT { top: title_line.bottom, bottom: title_line.bottom + line, ..text_r };
-        if c.spec.ctl == Ctl::WmStatus {
-            let found = crate::winmerge::status_now(&app(|a| a.s.winmerge_path.clone()));
-            let (head, detail) = crate::winmerge::status_text(&found);
-            crate::paint_label(dc, desc_r, &head, sn.small);
-            let more = RECT { top: desc_r.bottom, bottom: (desc_r.bottom + line).min(text_r.bottom), ..text_r };
-            crate::paint_meta(dc, more, &detail, sn.small);
-        } else {
-            crate::paint_label(dc, desc_r, &ev_status_line(), sn.small);
-        }
-    } else if c.spec.ctl == Ctl::EvAct {
-        let line = sc(dpi, 18);
-        let desc_r = RECT { top: title_line.bottom, bottom: (title_line.bottom + line).min(text_r.bottom), ..text_r };
-        let act = ev_activity_line();
-        let text = if !act.is_empty() {
-            act
-        } else if matches!(crate::everything::shown(), crate::everything::Shown::Ready(crate::everything::Presence::Running { .. })) {
-            tx(crate::Key::EverythingIsAlreadyRunning).to_string()
-        } else {
-            tx(c.spec.desc).to_string()
-        };
-        crate::paint_meta(dc, desc_r, &text, sn.small);
-    } else if c.spec.ctl == Ctl::Adv {
-        let line = sc(dpi, 18);
-        let desc_r = RECT { top: title_line.bottom, bottom: title_line.bottom + line, ..text_r };
-        crate::paint_meta(dc, desc_r, tx(c.spec.desc), sn.small);
-        let path = crate::store::settings_path().to_string_lossy().into_owned();
-        let path_r = RECT { left: c.rect.left + sc(dpi, 16), top: desc_r.bottom, right: c.rect.right - sc(dpi, 16), bottom: c.rect.bottom - sc(dpi, 6) };
-        crate::paint_label(dc, path_r, &path, sn.small);
-    } else if c.spec.ctl == Ctl::Toggle(TG_CLIP) {
-        let line = sc(dpi, 16);
-        let desc_r = RECT { top: title_line.bottom, bottom: (title_line.bottom + line).min(text_r.bottom), ..text_r };
-        crate::paint_meta(dc, desc_r, tx(c.spec.desc), sn.small);
-        if let Some(note) = crate::cliphot::registration_notice() {
-            let more = RECT { top: desc_r.bottom, bottom: text_r.bottom, ..text_r };
-            if more.bottom > more.top {
-                crate::paint_label(dc, more, &note, sn.small);
-            }
-        }
-    } else if c.spec.ctl == Ctl::Toggle(TG_FOLDER) {
-        let line = sc(dpi, 16);
-        let desc_r = RECT { top: title_line.bottom, bottom: (title_line.bottom + line).min(text_r.bottom), ..text_r };
-        crate::paint_meta(dc, desc_r, tx(c.spec.desc), sn.small);
-        let more = RECT { top: desc_r.bottom, bottom: text_r.bottom, ..text_r };
-        if more.bottom > more.top {
-            crate::paint_label(dc, more, tx(crate::Key::TurnOffBeforeUninstall), sn.small);
-        }
-    } else if !tx(c.spec.desc).is_empty() {
-        crate::paint_meta(dc, RECT { top: title_line.bottom, ..text_r }, tx(c.spec.desc), sn.small);
     }
     match c.spec.ctl {
         Ctl::Toggle(id) => crate::draw_toggle(dc, c.ctl, toggle_on(id), c.spec.live, accent, dpi),
@@ -1278,7 +1333,7 @@ unsafe fn draw_key_row(dc: HDC, i: usize, r: RECT, change: RECT, reset: RECT, sn
     crate::fill(dc, RECT { top: r.bottom - 1, ..r }, t.line);
 }
 
-unsafe fn text_w(dc: HDC, font: HFONT, s: &str) -> i32 {
+pub(super) unsafe fn text_w(dc: HDC, font: HFONT, s: &str) -> i32 {
     if s.is_empty() {
         return 0;
     }
@@ -2305,6 +2360,7 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_COMMAND => on_command(h, (wp.0 & 0xffff) as i32, ((wp.0 >> 16) & 0xffff) as u32),
             WM_CONTEXTMENU => fav_page_menu(h, lp),
             WM_LBUTTONDOWN => {
+                hide_settings_tip(h);
                 let x = (lp.0 & 0xffff) as i16 as i32;
                 let y = ((lp.0 >> 16) & 0xffff) as i16 as i32;
                 on_click(h, x, y);
@@ -2431,6 +2487,7 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     }
                     let mut t = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
                     let _ = TrackMouseEvent(&mut t);
+                    settings_tip_at(h, x, y);
                 }
             }
             WM_LBUTTONUP => {
@@ -2478,6 +2535,7 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
             WM_MOUSELEAVE => {
+                hide_settings_tip(h);
                 ST.with(|s| {
                     let mut st = s.borrow_mut();
                     st.hot = None;
@@ -2500,6 +2558,7 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let _ = DestroyWindow(h);
             }
             WM_DESTROY => {
+                drop_settings_tip(h);
                 crate::drop_side(h);
                 crate::everything::bind_settings(0);
                 crate::keys::cancel();
