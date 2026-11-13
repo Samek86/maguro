@@ -111,18 +111,18 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 
 | 파일 | 한국어 설명 | 창/대상 | 테마/언어 | 데모 데이터 | 크기(실측) | 방법/스크립트 | 크롭 | 주의 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| address_toolbar.ja.png | 주소 표시줄·툴바 | MaguroMain 주소줄 | light/ja | address cfg | 12501 B (1212×160) | 메인 캡처 | DWM |  |
-| address_toolbar.ko.png | 주소 표시줄·툴바 | MaguroMain 주소줄 | light/ko | address cfg | 12189 B (1212×160) | 메인 캡처 | DWM |  |
-| address_toolbar.png | 주소 표시줄·툴바 | MaguroMain 주소줄 | light/en | address cfg | 12283 B (1212×160) | 메인 캡처 | DWM |  |
+| address_toolbar.ja.png | 주소 표시줄·툴바 | MaguroMain 주소줄 | light/ja | address cfg | 18921 B (1212×160) | 메인 캡처 | DWM |  |
+| address_toolbar.ko.png | 주소 표시줄·툴바 | MaguroMain 주소줄 | light/ko | address cfg | 17502 B (1212×160) | 메인 캡처 | DWM |  |
+| address_toolbar.png | 주소 표시줄·툴바 | MaguroMain 주소줄 | light/en | address cfg | 17613 B (1212×160) | 메인 캡처 | DWM |  |
 | copy_progress.ja.png | 복사 진행 | MaguroFastCopy | light/ja | help-demo FastCopy | 3420 B (480×152) | capture-help-dialogs.ps1 / MaguroFastCopy | DWM | Fast copy 진행 창 |
 | copy_progress.ko.png | 복사 진행 | MaguroFastCopy | light/ko | help-demo FastCopy | 2527 B (480×152) | capture-help-dialogs.ps1 / MaguroFastCopy | DWM | Fast copy 진행 창 |
 | copy_progress.png | 복사 진행 | MaguroFastCopy | light/en | help-demo FastCopy | 2650 B (480×152) | capture-help-dialogs.ps1 / MaguroFastCopy | DWM | Fast copy 진행 창 |
 | dialog_jump.ja.png | 대화상자 점프 | MaguroDlgJump 오버레이 | light/ja | help-demo 점프 | 7702 B (420×138) | capture-help-dialogs.ps1 | DWM | 경로만 표시 — KO/JA 동일 가능 |
 | dialog_jump.ko.png | 대화상자 점프 | MaguroDlgJump 오버레이 | light/ko | help-demo 점프 | 7702 B (420×138) | capture-help-dialogs.ps1 | DWM | 경로만 표시 — KO/JA 동일 가능 |
 | dialog_jump.png | 대화상자 점프 | MaguroDlgJump 오버레이 | light/en | help-demo 점프 | 7848 B (420×138) | capture-help-dialogs.ps1 | DWM | 경로만 표시 — KO/JA 동일 가능 |
-| favorites.ja.png | 즐겨찾기 | MaguroMain 사이드바 | light/ja | favorites 시드 | 305322 B (1226×823) | capture-main.ps1 | DWM |  |
-| favorites.ko.png | 즐겨찾기 | MaguroMain 사이드바 | light/ko | favorites 시드 | 303594 B (1226×823) | capture-main.ps1 | DWM |  |
-| favorites.png | 즐겨찾기 | MaguroMain 사이드바 | light/en | favorites 시드 | 301707 B (1226×823) | capture-main.ps1 | DWM |  |
+| favorites.ja.png | 즐겨찾기 | MaguroMain 사이드바 | light/ja | favorites 시드 | 227452 B (1206×813) | capture-main.ps1 | DWM |  |
+| favorites.ko.png | 즐겨찾기 | MaguroMain 사이드바 | light/ko | favorites 시드 | 224586 B (1206×813) | capture-main.ps1 | DWM |  |
+| favorites.png | 즐겨찾기 | MaguroMain 사이드바 | light/en | favorites 시드 | 224434 B (1206×813) | capture-main.ps1 | DWM |  |
 | feature_basket.ja.png | 파일 바구니 | MaguroBasket | light/ja | G:\Mixed 데모 5개 파일 | 18486 B (574×511) | capture-features.ps1 (WM_COMMAND 1125) | DWM | **2026-11-13 재촬영.** 이전 v8은 v7 복사(546×513, 경로 C:\WORK\pgtest\demo-253, クリア가 둘째 줄). 현재 창은 590 DIP이라 버튼 5개가 한 줄 |
 | feature_basket.ko.png | 파일 바구니 | MaguroBasket | light/ko | G:\Mixed 데모 5개 파일 | 15382 B (574×511) | capture-features.ps1 (WM_COMMAND 1125) | DWM | **2026-11-13 재촬영.** 이전 v8은 v7 복사(546×513, 경로 C:\WORK\pgtest\demo-253) |
 | feature_basket.png | 파일 바구니 | MaguroBasket | light/en | G:\Mixed demo files (5) | 14799 B (574×511) | capture-features.ps1 (WM_COMMAND 1125) | DWM | **Retaken 2026-11-13.** Previous v8 was a v7 copy (546×513, path C:\WORK\pgtest\demo-253, Clear wrapped to a second row). Current window is 590 DIP so all five footer buttons fit on one row |
@@ -132,53 +132,53 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 | feature_folder_watch.ja.png | 폴더 감시 | MaguroWatch | light/ja | 데모 | 20342 B (746×433) | capture-features.ps1 | DWM |  |
 | feature_folder_watch.ko.png | 폴더 감시 | MaguroWatch | light/ko | 데모 | 16051 B (746×433) | capture-features.ps1 | DWM |  |
 | feature_folder_watch.png | 폴더 감시 | MaguroWatch | light/en | 데모 | 15631 B (746×433) | capture-features.ps1 | DWM |  |
-| feature_win_shift_v.ja.png | Win+Alt+V | MaguroMain 새 탭 | light/ja | 클립보드=Photos 2026 경로 | 26231 B (1226×833) | WM_HOTKEY CLIP_HOTKEY_ID=3 (sidebar off) | DWM | Photos 2026 새 탭 · 사이드바/실경로 없음 |
-| feature_win_shift_v.ko.png | Win+Alt+V | MaguroMain 새 탭 | light/ko | 클립보드=Photos 2026 경로 | 25784 B (1226×833) | WM_HOTKEY CLIP_HOTKEY_ID=3 (sidebar off) | DWM | Photos 2026 새 탭 · 사이드바/실경로 없음 |
-| feature_win_shift_v.png | Win+Alt+V | MaguroMain 새 탭 | light/en | 클립보드=Photos 2026 경로 | 25455 B (1226×833) | WM_HOTKEY CLIP_HOTKEY_ID=3 (sidebar off) | DWM | Photos 2026 새 탭 · 사이드바/실경로 없음 |
+| feature_win_shift_v.ja.png | Win+Alt+V | MaguroMain 새 탭 | light/ja | 클립보드=Photos 2026 경로 | 77961 B (1204×811) | WM_HOTKEY CLIP_HOTKEY_ID=3 | DWM | Photos 2026 새 탭. fav_panel+tree_panel 시드. 기본 핫키는 Alt+Z라 스크립트의 Win+Alt+V 대신 WM_HOTKEY id=3을 씀 |
+| feature_win_shift_v.ko.png | Win+Alt+V | MaguroMain 새 탭 | light/ko | 클립보드=Photos 2026 경로 | 74832 B (1204×811) | WM_HOTKEY CLIP_HOTKEY_ID=3 | DWM | Photos 2026 새 탭. fav_panel+tree_panel 시드. 기본 핫키는 Alt+Z라 스크립트의 Win+Alt+V 대신 WM_HOTKEY id=3을 씀 |
+| feature_win_shift_v.png | Win+Alt+V | MaguroMain 새 탭 | light/en | 클립보드=Photos 2026 경로 | 74787 B (1204×811) | WM_HOTKEY CLIP_HOTKEY_ID=3 | DWM | Photos 2026 새 탭. fav_panel+tree_panel 시드. 기본 핫키는 Alt+Z라 스크립트의 Win+Alt+V 대신 WM_HOTKEY id=3을 씀 |
 | help.ja.png | 도움말 창 | MaguroHelp/브라우저 | light/ja | — | 29368 B (760×672) | F1 | DWM |  |
 | help.ko.png | 도움말 창 | MaguroHelp/브라우저 | light/ko | — | 22566 B (760×672) | F1 | DWM |  |
 | help.png | 도움말 창 | MaguroHelp/브라우저 | light/en | — | 24725 B (760×672) | F1 | DWM |  |
-| hero_dark.ja.png | 히어로 다크 | MaguroMain | dark/ja | hero_dark 시드 | 301033 B (1226×823) | capture-main.ps1 | DWM |  |
-| hero_dark.ko.png | 히어로 다크 | MaguroMain | dark/ko | hero_dark 시드 | 299260 B (1226×823) | capture-main.ps1 | DWM |  |
-| hero_dark.png | 히어로 다크 | MaguroMain | dark/en | hero_dark 시드 | 297403 B (1226×823) | capture-main.ps1 | DWM |  |
-| hero_light.ja.png | 히어로 라이트 | MaguroMain | light/ja | hero_light 시드 | 305322 B (1226×823) | capture-main.ps1 | DWM |  |
-| hero_light.ko.png | 히어로 라이트 | MaguroMain | light/ko | hero_light 시드 | 303594 B (1226×823) | capture-main.ps1 | DWM |  |
-| hero_light.png | 히어로 라이트 | MaguroMain | light/en | hero_light 시드 | 301707 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout.ja.png | 레이아웃 개요 | MaguroMain | light/ja | layout 시드 | 283018 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout.ko.png | 레이아웃 개요 | MaguroMain | light/ko | layout 시드 | 281590 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout.png | 레이아웃 개요 | MaguroMain | light/en | layout 시드 | 279800 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_1.png | 레이아웃 1 | MaguroMain | light/en | layout_1 | 291102 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_2h.png | 레이아웃 2H | MaguroMain | light/en | layout_2h | 301707 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_2v.png | 레이아웃 2V | MaguroMain | light/en | layout_2v | 300781 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_3.png | 레이아웃 3 | MaguroMain | light/en | layout_3 | 307085 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_3_stack.png | 레이아웃 3 스택 | MaguroMain | light/en | layout_3_stack | 272125 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_3col.png | 레이아웃 3열 | MaguroMain | light/en | layout_3col | 312616 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_4.png | 레이아웃 4 | MaguroMain | light/en | layout_4 | 279800 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_4_tall.png | 레이아웃 4 세로 | MaguroMain | light/en | layout_4_tall | 320086 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_5.png | 레이아웃 5 | MaguroMain | light/en | layout_5 | 297474 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_preset_112.png | 프리셋 1-1-2 | MaguroMain | light/en | preset | 320600 B (1226×823) | capture-main.ps1 | DWM |  |
-| layout_preset_31.png | 프리셋 3-1 | MaguroMain | light/en | preset | 214283 B (1226×823) | capture-main.ps1 | DWM |  |
-| pane_colors.ja.png | 패널 색 | MaguroMain | light/ja | tint 시드 | 305322 B (1226×823) | capture-main.ps1 | DWM |  |
-| pane_colors.ko.png | 패널 색 | MaguroMain | light/ko | tint 시드 | 303594 B (1226×823) | capture-main.ps1 | DWM |  |
-| pane_colors.png | 패널 색 | MaguroMain | light/en | tint 시드 | 301707 B (1226×823) | capture-main.ps1 | DWM |  |
-| pane_tabs.ja.png | 패널 탭 | MaguroMain | light/ja | tabs 시드 | 32181 B (1212×420) | capture-features / main | DWM |  |
-| pane_tabs.ko.png | 패널 탭 | MaguroMain | light/ko | tabs 시드 | 31779 B (1212×420) | capture-features / main | DWM |  |
-| pane_tabs.png | 패널 탭 | MaguroMain | light/en | tabs 시드 | 32205 B (1212×420) | capture-features / main | DWM |  |
-| panedrag_after.png | 패널 드래그 후 | MaguroMain | light/en | panedrag | 300889 B (1226×823) | capture-main.ps1 | DWM |  |
-| panedrag_before.png | 패널 드래그 전 | MaguroMain | light/en | panedrag | 301707 B (1226×823) | capture-main.ps1 | DWM |  |
-| panedrag_dup.png | 패널 드래그 복제 | MaguroMain | light/en | panedrag | 518088 B (1226×823) | capture-main.ps1 | DWM |  |
-| preview.ja.png | 미리보기 | MaguroMain | light/ja | Photos 2026 | 304453 B (1226×823) | capture-main.ps1 | DWM | **재촬영 필요.** 속성 머리글(아이콘·이름·크기·종류·날짜·특성)과 처리기 없을 때의 본문(텍스트/코드/CSV/폴더)이 바뀜 |
-| preview.ko.png | 미리보기 | MaguroMain | light/ko | Photos 2026 | 302690 B (1226×823) | capture-main.ps1 | DWM | **재촬영 필요.** 속성 머리글과 폴백 본문이 바뀜 |
-| preview.png | 미리보기 | MaguroMain | light/en | Photos 2026 | 301707 B (1226×823) | capture-main.ps1 | DWM | **재촬영 필요.** 속성 머리글과 폴백 본문이 바뀜 |
+| hero_dark.ja.png | 히어로 다크 | MaguroMain | dark/ja | hero_dark 시드 | 224634 B (1206×813) | capture-main.ps1 | DWM |  |
+| hero_dark.ko.png | 히어로 다크 | MaguroMain | dark/ko | hero_dark 시드 | 221984 B (1206×813) | capture-main.ps1 | DWM |  |
+| hero_dark.png | 히어로 다크 | MaguroMain | dark/en | hero_dark 시드 | 221905 B (1206×813) | capture-main.ps1 | DWM |  |
+| hero_light.ja.png | 히어로 라이트 | MaguroMain | light/ja | hero_light 시드 | 227452 B (1206×813) | capture-main.ps1 | DWM |  |
+| hero_light.ko.png | 히어로 라이트 | MaguroMain | light/ko | hero_light 시드 | 224478 B (1206×813) | capture-main.ps1 | DWM |  |
+| hero_light.png | 히어로 라이트 | MaguroMain | light/en | hero_light 시드 | 224434 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout.ja.png | 레이아웃 개요 | MaguroMain | light/ja | layout 시드 | 243825 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout.ko.png | 레이아웃 개요 | MaguroMain | light/ko | layout 시드 | 240459 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout.png | 레이아웃 개요 | MaguroMain | light/en | layout 시드 | 240415 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_1.png | 레이아웃 1 | MaguroMain | light/en | layout_1 | 206181 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_2h.png | 레이아웃 2H | MaguroMain | light/en | layout_2h | 224338 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_2v.png | 레이아웃 2V | MaguroMain | light/en | layout_2v | 224771 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_3.png | 레이아웃 3 | MaguroMain | light/en | layout_3 | 235571 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_3_stack.png | 레이아웃 3 스택 | MaguroMain | light/en | layout_3_stack | 222107 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_3col.png | 레이아웃 3열 | MaguroMain | light/en | layout_3col | 237078 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_4.png | 레이아웃 4 | MaguroMain | light/en | layout_4 | 240415 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_4_tall.png | 레이아웃 4 세로 | MaguroMain | light/en | layout_4_tall | 204852 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_5.png | 레이아웃 5 | MaguroMain | light/en | layout_5 | 256960 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_preset_112.png | 프리셋 1-1-2 | MaguroMain | light/en | preset | 244091 B (1206×813) | capture-main.ps1 | DWM |  |
+| layout_preset_31.png | 프리셋 3-1 | MaguroMain | light/en | preset | 213021 B (1206×813) | capture-main.ps1 | DWM |  |
+| pane_colors.ja.png | 패널 색 | MaguroMain | light/ja | tint 시드 | 245294 B (1206×813) | capture-main.ps1 | DWM |  |
+| pane_colors.ko.png | 패널 색 | MaguroMain | light/ko | tint 시드 | 241951 B (1206×813) | capture-main.ps1 | DWM |  |
+| pane_colors.png | 패널 색 | MaguroMain | light/en | tint 시드 | 241876 B (1206×813) | capture-main.ps1 | DWM |  |
+| pane_tabs.ja.png | 패널 탭 | MaguroMain | light/ja | tabs 시드 | 29347 B (1212×420) | capture-features / main | DWM |  |
+| pane_tabs.ko.png | 패널 탭 | MaguroMain | light/ko | tabs 시드 | 27690 B (1212×420) | capture-features / main | DWM |  |
+| pane_tabs.png | 패널 탭 | MaguroMain | light/en | tabs 시드 | 27747 B (1212×420) | capture-features / main | DWM |  |
+| panedrag_after.png | 패널 드래그 후 | MaguroMain | light/en | panedrag | 224196 B (1206×813) | capture-main.ps1 | DWM |  |
+| panedrag_before.png | 패널 드래그 전 | MaguroMain | light/en | panedrag | 224436 B (1206×813) | capture-main.ps1 | DWM |  |
+| panedrag_dup.png | 패널 드래그 복제 | MaguroMain | light/en | panedrag | 216848 B (1206×813) | capture-main.ps1 | DWM |  |
+| preview.ja.png | 미리보기 | MaguroMain | light/ja | Photos 2026 | 227342 B (1204×811) | capture-main.ps1 | DWM | **재촬영 필요.** 속성 머리글(아이콘·이름·크기·종류·날짜·특성)과 처리기 없을 때의 본문(텍스트/코드/CSV/폴더)이 바뀜 |
+| preview.ko.png | 미리보기 | MaguroMain | light/ko | Photos 2026 | 224441 B (1204×811) | capture-main.ps1 | DWM | **재촬영 필요.** 속성 머리글과 폴백 본문이 바뀜 |
+| preview.png | 미리보기 | MaguroMain | light/en | Photos 2026 | 224434 B (1206×813) | capture-main.ps1 | DWM | **재촬영 필요.** 속성 머리글과 폴백 본문이 바뀜 |
 | preview_peek.ja.png | 피크 미리보기 | MaguroPeek | light/ja | photo-01.jpg 시드 | 1162153 B (918×678) | F3 MaguroPeek + TOPMOST | DWM | **재촬영 필요.** F3 머리글이 이름 + 속성/EXIF 두 줄. 실 JPG 시드 |
 | preview_peek.ko.png | 피크 미리보기 | MaguroPeek | light/ko | photo-01.jpg 시드 | 1162134 B (918×678) | F3 MaguroPeek + TOPMOST | DWM | **재촬영 필요.** F3 머리글이 이름 + 속성/EXIF 두 줄. 실 JPG 시드 |
 | preview_peek.png | 피크 미리보기 | MaguroPeek | light/en | photo-01.jpg 시드 | 1161933 B (918×678) | F3 MaguroPeek + TOPMOST | DWM | **재촬영 필요.** F3 머리글이 이름 + 속성/EXIF 두 줄. 실 JPG 시드 |
 | rename.ja.png | 일괄 이름 바꾸기 | MaguroRename | light/ja | rename_camera 시드 | 41082 B (1346×693) | capture-features.ps1 | DWM |  |
 | rename.ko.png | 일괄 이름 바꾸기 | MaguroRename | light/ko | rename_camera 시드 | 35251 B (1346×693) | capture-features.ps1 | DWM |  |
 | rename.png | 일괄 이름 바꾸기 | MaguroRename | light/en | rename_camera 시드 | 35660 B (1346×693) | capture-features.ps1 | DWM |  |
-| search.ja.png | 하위폴더 검색 | MaguroSearch | light/ja | 데모 트리 | 56167 B (1226×823) | 검색 캡처 | DWM |  |
-| search.ko.png | 하위폴더 검색 | MaguroSearch | light/ko | 데모 트리 | 54110 B (1226×823) | 검색 캡처 | DWM |  |
-| search.png | 하위폴더 검색 | MaguroSearch | light/en | 데모 트리 | 52222 B (1226×823) | 검색 캡처 | DWM |  |
+| search.ja.png | 하위폴더 검색 | MaguroSearch | light/ja | 데모 트리 | 62935 B (1204×811) | 검색 캡처 | DWM |  |
+| search.ko.png | 하위폴더 검색 | MaguroSearch | light/ko | 데모 트리 | 59682 B (1204×811) | 검색 캡처 | DWM |  |
+| search.png | 하위폴더 검색 | MaguroSearch | light/en | 데모 트리 | 59155 B (1204×811) | 검색 캡처 | DWM |  |
 | servers.ja.png | 서버 연결 추가 | MaguroServer | light/ja | **가짜** Demo Server / sftp.example.com | 11356 B (406×526) | capture-servers-fake.ps1 | DWM | 실호스트·실비번 금지 |
 | servers.ko.png | 서버 연결 추가 | MaguroServer | light/ko | **가짜** Demo Server / sftp.example.com | 8925 B (406×526) | capture-servers-fake.ps1 | DWM | 실호스트·실비번 금지 |
 | servers.png | 서버 연결 추가 | MaguroServer | light/en | **가짜** Demo Server / sftp.example.com | 9883 B (406×526) | capture-servers-fake.ps1 | DWM | 실호스트·실비번 금지 |
@@ -195,9 +195,9 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 | settings_panes.ko.png | 설정 패널·보기 | MaguroSettings page2 | light/ko | dialogs/fav 시드 | 31688 B (986×633) | capture-settings-panes.ps1 | DWM |  |
 | settings_panes.png | 설정 패널·보기 | MaguroSettings page2 | light/en | dialogs/fav 시드 | 34309 B (986×633) | capture-settings-panes.ps1 | DWM |  |
 | tab_list.png | 탭 목록 | MaguroTabList | light/en | tabs.json | 17406 B (562×532) | WM_COMMAND 탭목록 | DWM |  |
-| tabs.ja.png | 창 탭·패널 탭 | MaguroMain | light/ja | tabs.json | 61956 B (1226×823) | tabs cfg | DWM |  |
-| tabs.ko.png | 창 탭·패널 탭 | MaguroMain | light/ko | tabs.json | 60849 B (1226×823) | tabs cfg | DWM |  |
-| tabs.png | 창 탭·패널 탭 | MaguroMain | light/en | tabs.json | 58828 B (1226×823) | tabs cfg | DWM |  |
+| tabs.ja.png | 창 탭·패널 탭 | MaguroMain | light/ja | tabs.json | 228878 B (1206×813) | tabs cfg | DWM |  |
+| tabs.ko.png | 창 탭·패널 탭 | MaguroMain | light/ko | tabs.json | 226168 B (1206×813) | tabs cfg | DWM |  |
+| tabs.png | 창 탭·패널 탭 | MaguroMain | light/en | tabs.json | 225801 B (1206×813) | tabs cfg | DWM |  |
 | images-v5/workspaces.ja.png | 워크스페이스 메뉴 | 톱니 메뉴 → 작업 공간 하위 메뉴 | light/ja | workspaces 시드 Photos/Docs/Work | 20925 B (618×491) | WM_COMMAND 207 → 메뉴 HWND에 VK_DOWN×3, VK_RIGHT PostMessage | 화면 복사(흰 배경) | 슬롯 1–3 이름, 4–9 빈 슬롯 |
 | images-v5/workspaces.ko.png | 워크스페이스 메뉴 | 톱니 메뉴 → 작업 공간 하위 메뉴 | light/ko | workspaces 시드 Photos/Docs/Work | 18119 B (525×491) | WM_COMMAND 207 → 메뉴 HWND에 VK_DOWN×3, VK_RIGHT PostMessage | 화면 복사(흰 배경) | 슬롯 1–3 이름, 4–9 빈 슬롯 |
 | images-v5/workspaces.png | 워크스페이스 메뉴 | 톱니 메뉴 → 작업 공간 하위 메뉴 | light/en | workspaces 시드 Photos/Docs/Work | 21624 B (622×491) | WM_COMMAND 207 → 메뉴 HWND에 VK_DOWN×3, VK_RIGHT PostMessage | 화면 복사(흰 배경) | 슬롯 1–3 이름, 4–9 빈 슬롯 |
@@ -248,6 +248,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 시스템 대화상자(IFileOperation 진행, 탐색기 메뉴, 공통 파일 대화상자)는 그대로다. 이름 묻기, 즐겨찾기 관리, 정보, Excel, 확인 창, 그리고 팝업·알림(폴더 감시 토스트, 즐겨찾기 없음, 네트워크 실패, 빠른 복사 진행·이름 충돌, 세션 목록, 단축키, 레이아웃 고르기, 선택 칸, 서버 연결의 저장/취소)은 공유 토큰으로 옮겼다. 설정 창의 토글은 모양과 동작이 이전과 같다.
 
 ## 변경 이력 (관련)
+
+- **2026-11-13 (pane badge):** MaguroMain 계열 47장(`hero_*`, `layout*`, `favorites*`, `tabs*`, `pane_tabs*`, `pane_colors*`, `preview` (not peek), `panedrag_*`, `search*`, `address_toolbar*`, `feature_win_shift_v*`)을 현재 main(3424272, PR #411 패널 번호 배지)에서 다시 찍어 `docs/images-v8/{common,en,ko,ja}/` 같은 경로에 넣음. 즐겨찾기·트리 둘 다 켠 시드(`fav_panel`+`tree_panel`, `side_split=0.5`). 대화상자·설정·`preview_peek*`·`workspaces*`·README 데모 GIF/mp4는 그대로. 메인 창은 대체로 1206×813, 주소 줄 1212×160, 패널 탭 크롭 1212×420. `search*`·`feature_win_shift_v*`와 `preview.ko`/`preview.ja`는 가장자리 1px inset으로 1204×811.
 
 - **2026-11-13 (basket):** `feature_basket.png` / `.ko` / `.ja` 를 현재 main(7356696)에서 다시 찍어 `docs/images-v8/{en,ko,ja}/` 에 넣음. 이전 v8 파일은 v7과 바이트가 같았고, 창이 546×513이라 영어·일본어에서 Clear/クリア가 둘째 줄로 접혔으며 경로는 테스트용 `C:\WORK\pgtest\demo-253\basket-src` 였다. 새 샷은 574×511, 데모 경로는 `G:\Mixed` (notes.docx, plan.xlsx, budget-2026.csv, samples.zip, todo.txt), 버튼 5개가 한 줄.
 - **2026-11-13:** 세그먼트 컨트롤 반영 재촬영 → `docs/images-v8/` (84장, common/en/ja/ko). servers.png(en/ko/ja, 406×526)와 settings_ctxmenu.png(en/ko/ja, 984×631)만 새로 찍고 나머지는 v7을 복사. 우클릭 시간 기록을 Advanced로 옮기고(#393) 페이지 안내문을 뺀 화면. README·도움말 경로 images-v7 → images-v8. `docs/images-v7/`는 트리에 남김(옛 URL을 덮어쓰지 않음). 시드 `readme2-cfgs-v6`.
