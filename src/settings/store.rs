@@ -331,7 +331,7 @@ struct SettingsFile {
     /// Clipboard path hotkey. A folder opens in a new tab; a file opens with the shell. Missing means on.
     #[serde(default = "yes", skip_serializing_if = "is_on")]
     clip_hotkey: bool,
-    /// UI language. Missing means `"auto"`: the Windows display language (Korean, Japanese, otherwise English).
+    /// UI language. Missing means `"auto"`: the Windows display language (Korean, Japanese, German, French, otherwise English).
     #[serde(default = "lang_auto")]
     lang: String,
     #[serde(default = "yes")]
