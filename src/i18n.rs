@@ -875,4 +875,20 @@ mod tests {
             assert!(v.contains(needle), "{code} {v}");
         }
     }
+
+    #[test]
+    fn korean_rename_commands_use_one_wording() {
+        let (_, ko) = parse_ini(KO_INI);
+        assert_eq!(ko["rename"], "이름 바꾸기");
+        assert_eq!(ko["rename_2"], "이름 바꾸기");
+        for (key, value) in &ko {
+            // Folder-watch event beside 추가됨 / 삭제됨 / 수정됨, and in "{name} — {kind}".
+            // 이름 바꾸기 is the command form. It stays off this label.
+            if key == "change_renamed" {
+                assert_eq!(value, "이름 변경");
+                continue;
+            }
+            assert!(!value.contains("이름 변경"), "{key} still says 이름 변경");
+        }
+    }
 }
