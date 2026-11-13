@@ -13,8 +13,8 @@ use crate::imports::*;
 use crate::remote::{self, cred_target, cred_used, fields_from_link, fields_from_parsed, mount_key, normalize, still_used, Fail, Fields, Parsed, KINDS, KIND_LABELS};
 use crate::session::{append_node, node_ref, path_clash, write_server, FavNode, ServerLink};
 use super::{
-    body_font, bold_ui_font, buffered, color_field_edit, field_edit_rect, paint_button, paint_check, paint_field, paint_label, paint_meta, paint_section_header, paint_segment,
-    paint_window, style_popup_chrome, visual_from_pointer, ButtonKind, FocusRing, BTN_GAP, BTN_H_FOOTER, FIELD_H, FIELD_PAD_X, FONT_PX, PAD_BODY_X, PAD_BODY_Y, SPACE_4, SPACE_8,
+    body_font, bold_ui_font, buffered, color_field_edit, field_edit_rect, paint_button, paint_check, paint_field, paint_label, paint_meta, paint_section_header, paint_segment_group,
+    paint_window, segment_row, segment_widths, style_popup_chrome, visual_from_pointer, ButtonKind, FocusRing, SegmentCell, BTN_GAP, BTN_H_FOOTER, FIELD_H, FIELD_PAD_X, FONT_PX, PAD_BODY_X, PAD_BODY_Y, SPACE_4, SPACE_8,
     px,
 };
 
@@ -193,11 +193,10 @@ fn geom(dpi: i32, width: i32) -> Geom {
     let chip_h = sc(dpi, BTN_H_FOOTER);
     let mut y = pad + lab + gap + lab + gap4;
     let inner = (width - pad * 2).max(1);
-    let slot = (inner - gap * 3) / 4;
+    let kind_w = segment_widths(&KIND_LABELS, inner, dpi);
     let mut kind_r = [RECT::default(); 4];
-    for i in 0..4 {
-        let left = pad + i as i32 * (slot + gap);
-        kind_r[i] = RECT { left, top: y, right: left + slot, bottom: y + chip_h };
+    for (i, r) in segment_row(pad, y, chip_h, &kind_w).into_iter().enumerate() {
+        kind_r[i] = r;
     }
     y += chip_h + gap;
     let mut edits = [RECT::default(); 6];
@@ -373,10 +372,10 @@ unsafe fn paint(h: HWND) {
         let hot = (v.hot >= 0).then_some(v.hot);
         let down = (v.down >= 0).then_some(v.down);
         let focus = GetFocus();
-        for i in 0..4 {
-            let vis = visual_from_pointer(i as i32, hot, down);
-            paint_segment(dc, g.kind_r[i], KIND_LABELS[i], v.kind == i, vis, dpi, ground);
-        }
+        let kind_cells: Vec<SegmentCell> = (0..4).map(|i| SegmentCell { rect: g.kind_r[i], label: KIND_LABELS[i], disabled: false }).collect();
+        let kind_hot = (0..4).contains(&v.hot).then_some(v.hot as usize);
+        let kind_down = (0..4).contains(&v.down).then_some(v.down as usize);
+        paint_segment_group(dc, &kind_cells, Some(v.kind), kind_hot, kind_down, None, dpi, ground, FocusRing::Outside);
         let names = [tr(crate::Key::DisplayName), tr(crate::Key::Address), tr(crate::Key::Port), tr(crate::Key::RemotePath), tr(crate::Key::UserName), tr(crate::Key::Password)];
         for (i, name) in names.iter().enumerate() {
             let r = g.edits[i];
@@ -675,7 +674,9 @@ mod tests {
     fn server_dialog_uses_shared_field_chip_and_footer_metrics() {
         let g = super::geom(96, 400);
         assert_eq!(g.kind_r[0].bottom - g.kind_r[0].top, crate::BTN_H_FOOTER);
-        assert_eq!(g.kind_r[1].left - g.kind_r[0].right, crate::SPACE_8);
+        assert_eq!(g.kind_r[1].left, g.kind_r[0].right);
+        assert!(g.kind_r[1].right - g.kind_r[1].left > g.kind_r[3].right - g.kind_r[3].left, "WebDAV is wider than FTP");
+        assert_eq!(g.kind_r[3].right - g.kind_r[0].left, 400 - crate::PAD_BODY_X * 2);
         assert_eq!(g.edits[0].bottom - g.edits[0].top, crate::FIELD_H);
         assert_eq!(g.edits[0].top - g.kind_r[0].bottom, crate::SPACE_8 + (crate::FONT_PX + crate::SPACE_4) + crate::SPACE_4);
         assert_eq!(g.save_r.bottom - g.save_r.top, crate::BTN_H_FOOTER);
@@ -692,7 +693,8 @@ mod tests {
         let g = super::geom(dpi, width);
         assert_eq!(g.edits[0].bottom - g.edits[0].top, super::sc(dpi, crate::FIELD_H));
         assert_eq!(g.kind_r[0].bottom - g.kind_r[0].top, super::sc(dpi, crate::BTN_H_FOOTER));
-        assert_eq!(g.kind_r[1].left - g.kind_r[0].right, super::sc(dpi, crate::SPACE_8));
+        assert_eq!(g.kind_r[1].left, g.kind_r[0].right);
+        assert_eq!(g.kind_r[3].right - g.kind_r[0].left, width - super::sc(dpi, crate::PAD_BODY_X) * 2);
         assert_eq!(g.save_r.bottom - g.save_r.top, super::sc(dpi, crate::BTN_H_FOOTER));
         assert_eq!(g.cancel_r.left - g.save_r.right, super::sc(dpi, crate::BTN_GAP));
     }

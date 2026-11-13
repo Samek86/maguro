@@ -15,7 +15,7 @@ use crate::i18n::tr;
 use crate::imports::*;
 
 use super::{
-    body_font, bold_ui_font, buffered, paint_button, paint_section_header, paint_segment, paint_window, style_popup_chrome, visual_from_pointer, ButtonKind,
+    body_font, bold_ui_font, buffered, paint_button, paint_section_header, paint_segment_group, paint_window, segment_row, segment_widths, style_popup_chrome, visual_from_pointer, ButtonKind, SegmentCell,
     FocusRing, BTN_GAP, BTN_H_FOOTER, FONT_PX, PAD_BODY_X, PAD_BODY_Y, SPACE_4, SPACE_8, px,
 };
 
@@ -207,11 +207,9 @@ fn pick_layout(dpi: i32, w: i32, h: i32) -> PickLay {
     y = caption.bottom + gap;
     let seg_h = s(BTN_H_FOOTER);
     let inner = (right - pad).max(1);
-    let seg_w = (inner - gap) / 2;
-    let sources = [
-        RECT { left: pad, top: y, right: pad + seg_w, bottom: y + seg_h },
-        RECT { left: pad + seg_w + gap, top: y, right, bottom: y + seg_h },
-    ];
+    let seg_w = segment_widths(&SOURCE_LABEL, inner, dpi);
+    let placed = segment_row(pad, y, seg_h, &seg_w);
+    let sources = [placed[0], placed[1]];
     y = sources[0].bottom + gap;
     let btn_h = s(BTN_H_FOOTER);
     let footer_top = (h - s(PAD_BODY_Y) - btn_h).max(y + s(32));
@@ -598,10 +596,16 @@ unsafe fn paint(h: HWND) {
         let hot_id = (hot >= 0).then_some(hot);
         let down_id = (down >= 0).then_some(down);
         paint_section_header(dc, lay.caption, tr(crate::Key::ItemIcon), bold);
-        for i in 0..2 {
-            let id = if i == 0 { HIT_SRC0 } else { HIT_SRC1 };
-            paint_segment(dc, lay.sources[i], SOURCE_LABEL[i], source == i, visual_from_pointer(id, hot_id, down_id), dpi, ground);
-        }
+        let source_cells = [
+            SegmentCell { rect: lay.sources[0], label: SOURCE_LABEL[0], disabled: false },
+            SegmentCell { rect: lay.sources[1], label: SOURCE_LABEL[1], disabled: false },
+        ];
+        let source_index = |id: i32| match id {
+            HIT_SRC0 => Some(0usize),
+            HIT_SRC1 => Some(1),
+            _ => None,
+        };
+        paint_segment_group(dc, &source_cells, Some(source), source_index(hot), source_index(down), None, dpi, ground, FocusRing::Outside);
         let saved = SaveDC(dc);
         if lay.body.bottom > lay.body.top && lay.body.right > lay.body.left {
             let _ = IntersectClipRect(dc, lay.body.left, lay.body.top, lay.body.right, lay.body.bottom);
@@ -910,7 +914,8 @@ mod tests {
             assert!(lay.body.bottom <= lay.ok.top, "{dpi}");
             assert!(lay.ok.right < lay.cancel.left, "{dpi}");
             assert!(lay.cancel.right <= w, "{dpi}");
-            assert!(lay.sources[0].right <= lay.sources[1].left, "{dpi}");
+            assert_eq!(lay.sources[0].right, lay.sources[1].left, "{dpi}");
+            assert_eq!(lay.sources[1].right, w - px(dpi, PAD_BODY_X), "{dpi}");
             assert_eq!(lay.ok.bottom - lay.ok.top, px(dpi, BTN_H_FOOTER), "{dpi}");
             assert_eq!(lay.sources[0].bottom - lay.sources[0].top, px(dpi, BTN_H_FOOTER), "{dpi}");
             let (cols, cell, gap) = grid_metrics(bw, dpi);

@@ -767,7 +767,7 @@ fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str
     let sh = sc(dpi, 32);
     let gap = sc(dpi, 8);
     let classic = RECT { left, top: y, right: left + seg_w(tx(CTX_CLASSIC), dpi), bottom: y + sh };
-    let win11 = RECT { left: classic.right + gap, top: y, right: classic.right + gap + seg_w(tx(CTX_WIN11), dpi), bottom: y + sh };
+    let win11 = RECT { left: classic.right, top: y, right: classic.right + seg_w(tx(CTX_WIN11), dpi), bottom: y + sh };
     g.items.push(Item::CtxSeg { classic, win11 });
     y += sh + gap;
     let (win11_view, pack_on, off, on, seen, quiet) = app(|a| {
@@ -1579,7 +1579,7 @@ mod tests {
         assert_eq!(classic.bottom - classic.top, 32);
         assert_eq!(win11.bottom - win11.top, 32);
         assert_eq!(classic.top, win11.top);
-        assert_eq!(win11.left - classic.right, 8);
+        assert_eq!(win11.left, classic.right);
         assert_eq!(classic.left, note.left);
         assert_eq!(classic.right - classic.left, 116);
         assert_eq!(win11.right - win11.left, 137);

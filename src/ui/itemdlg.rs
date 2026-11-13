@@ -18,7 +18,7 @@ use crate::shell::{forget_hosts, stage_secret};
 
 use super::{
     body_font, bold_ui_font, buffered, color_field_edit, field_edit_rect, paint_button, paint_check, paint_field, paint_label, paint_meta, paint_section_header,
-    paint_segment, paint_window, style_popup_chrome, visual_from_pointer, wrap_text, ButtonKind, FocusRing, BTN_GAP, BTN_H_FOOTER, BTN_MIN_W, FIELD_H, FIELD_PAD_X,
+    paint_segment_group, paint_window, segment_row, segment_widths, style_popup_chrome, visual_from_pointer, wrap_text, ButtonKind, FocusRing, SegmentCell, BTN_GAP, BTN_H_FOOTER, BTN_MIN_W, FIELD_H, FIELD_PAD_X,
     FONT_PX, PAD_BODY_X, PAD_BODY_Y, SPACE_4, SPACE_8, px,
 };
 
@@ -290,20 +290,15 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     y = title.bottom + gap;
     let kind_label = RECT { left: pad, top: y, right, bottom: y + lab };
     y = kind_label.bottom + gap4;
-    // Six kind names. One row when each chip is wide enough, otherwise two rows of three.
-    let min_seg = s(108);
-    let six = (inner - gap * 5) / 6;
-    let cols = if six >= min_seg { 6 } else { 3 };
-    let slot_w = (inner - gap * (cols - 1)) / cols;
+    // Six kind names on one row. A long label takes a wider cell; the row still fills the content width.
+    let kind_labels: Vec<&str> = KINDS.iter().map(|k| tr(k.label())).collect();
+    let kind_w = segment_widths(&kind_labels, inner, dpi);
+    let kind_row = segment_row(pad, y, seg_h, &kind_w);
     let mut kinds = [RECT::default(); 6];
-    for i in 0..6 {
-        let col = (i as i32) % cols;
-        let row = (i as i32) / cols;
-        let left = pad + col * (slot_w + gap);
-        let top = y + row * (seg_h + gap);
-        kinds[i] = RECT { left, top, right: left + slot_w, bottom: top + seg_h };
+    for (i, r) in kind_row.iter().copied().enumerate() {
+        kinds[i] = r;
     }
-    y = kinds[5].bottom + gap;
+    y = kinds[0].bottom + gap;
 
     let name_lab = RECT { left: pad, top: y, right, bottom: y + lab };
     labels.push((Slot::Name, name_lab));
@@ -377,9 +372,12 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     let icon_lab = RECT { left: pad, top: y, right, bottom: y + lab };
     labels.push((Slot::IconPath, icon_lab));
     y = icon_lab.bottom + gap4;
-    let half = (inner - gap) / 2;
-    let icon_auto = RECT { left: pad, top: y, right: pad + half, bottom: y + seg_h };
-    let icon_custom = RECT { left: icon_auto.right + gap, top: y, right, bottom: y + seg_h };
+    let auto_label = tr(crate::Key::Automatic);
+    let custom_label = tr(crate::Key::IconCustom);
+    let icon_w = segment_widths(&[auto_label, custom_label], inner, dpi);
+    let icon_row = segment_row(pad, y, seg_h, &icon_w);
+    let icon_auto = icon_row[0];
+    let icon_custom = icon_row[1];
     y = icon_custom.bottom + gap;
     let (index, icon_list) = if custom_icon {
         let list_w = s(BTN_MIN_W);
@@ -863,10 +861,15 @@ unsafe fn paint(h: HWND) {
         let title = if editing { tr(crate::Key::EditFavourite) } else { tr(crate::Key::AddItem) };
         paint_section_header(dc, g.title, title, bold);
         paint_meta(dc, g.kind_label, tr(crate::Key::ItemKind), body);
-        for (i, kind_i) in KINDS.iter().enumerate() {
-            let vis = visual_from_pointer(i as i32, hot_id, down_id);
-            paint_segment(dc, g.kinds[i], tr(kind_i.label()), kind == *kind_i, vis, dpi, ground);
-        }
+        let kind_cells: Vec<SegmentCell> = KINDS.iter().enumerate().map(|(i, kind_i)| SegmentCell {
+            rect: g.kinds[i],
+            label: tr(kind_i.label()),
+            disabled: false,
+        }).collect();
+        let kind_hot = (0..6).contains(&hot).then_some(hot as usize);
+        let kind_down = (0..6).contains(&down).then_some(down as usize);
+        let kind_sel = KINDS.iter().position(|k| *k == kind);
+        paint_segment_group(dc, &kind_cells, kind_sel, kind_hot, kind_down, None, dpi, ground, FocusRing::Outside);
         for (slot, r) in &g.labels {
             paint_meta(dc, *r, label_of(kind, *slot), body);
         }
@@ -914,8 +917,16 @@ unsafe fn paint(h: HWND) {
             paint_check(dc, tick, clear_pass, hot == HIT_CLEAR_PASS, dpi, ground);
             paint_label(dc, RECT { left: tick.right + sc(dpi, SPACE_8), ..g.clear_pass }, tr(crate::Key::ClearSavedPassword), body);
         }
-        paint_segment(dc, g.icon_auto, tr(crate::Key::Automatic), !custom, visual_from_pointer(HIT_ICON_AUTO, hot_id, down_id), dpi, ground);
-        paint_segment(dc, g.icon_custom, tr(crate::Key::IconCustom), custom, visual_from_pointer(HIT_ICON_CUSTOM, hot_id, down_id), dpi, ground);
+        let icon_cells = [
+            SegmentCell { rect: g.icon_auto, label: tr(crate::Key::Automatic), disabled: false },
+            SegmentCell { rect: g.icon_custom, label: tr(crate::Key::IconCustom), disabled: false },
+        ];
+        let icon_index = |id: i32| match id {
+            HIT_ICON_AUTO => Some(0usize),
+            HIT_ICON_CUSTOM => Some(1),
+            _ => None,
+        };
+        paint_segment_group(dc, &icon_cells, Some(if custom { 1 } else { 0 }), icon_index(hot), icon_index(down), None, dpi, ground, FocusRing::Outside);
         let ok = if editing { tr(crate::Key::Save) } else { tr(crate::Key::ItemAdd) };
         paint_button(dc, g.ok, ButtonKind::Primary, visual_from_pointer(HIT_OK, hot_id, down_id), ok, bold, dpi, ground, FocusRing::Outside);
         paint_button(dc, g.cancel, ButtonKind::Secondary, visual_from_pointer(HIT_CANCEL, hot_id, down_id), tr(crate::Key::Cancel), body, dpi, ground, FocusRing::Outside);
@@ -1343,13 +1354,20 @@ mod tests {
                         assert_eq!(g.ok.bottom - g.ok.top, 28 * dpi / 96);
                         assert_eq!(g.cancel.left - g.ok.right, 8 * dpi / 96);
                         assert_eq!(g.kinds[0].bottom - g.kinds[0].top, 28 * dpi / 96);
-                        let seg_w = g.kinds[2].right - g.kinds[2].left;
-                        assert!(seg_w >= 140 * dpi / 96, "segment {seg_w} at {dpi}");
-                        assert!(g.kinds[2].right <= width - 16 * dpi / 96);
-                        assert_eq!(g.kinds[0].top, g.kinds[2].top);
-                        assert!(g.kinds[3].top >= g.kinds[0].bottom);
+                        assert_eq!(g.kinds[0].top, g.kinds[5].top, "kinds are one row");
+                        assert_eq!(g.kinds[0].bottom, g.kinds[5].bottom);
+                        assert_eq!(g.kinds[0].left, 16 * dpi / 96);
+                        for i in 0..5 {
+                            assert_eq!(g.kinds[i].right, g.kinds[i + 1].left, "kind cells touch");
+                        }
+                        assert_eq!(g.kinds[5].right, width - 16 * dpi / 96);
+                        assert!(g.kinds[2].right - g.kinds[2].left > g.kinds[4].right - g.kinds[4].left, "special folder is wider than URL");
+                        let name_lab = g.labels.iter().find(|(s, _)| *s == Slot::Name).unwrap().1;
+                        assert_eq!(name_lab.top, g.kinds[0].bottom + px(dpi, SPACE_8), "the second kind row is gone");
                         assert_eq!(g.icon_auto.top, g.icon_custom.top);
-                        assert!(g.icon_auto.right <= g.icon_custom.left);
+                        assert_eq!(g.icon_auto.right, g.icon_custom.left);
+                        assert_eq!(g.icon_auto.left, g.kinds[0].left);
+                        assert_eq!(g.icon_custom.right, g.kinds[5].right);
                         assert!(g.name.right >= width - 16 * dpi / 96);
                         for (_, r) in &g.slots {
                             assert_eq!(r.bottom - r.top, px(dpi, FIELD_H), "{kind:?} {dpi} tall memo or extra");
@@ -1413,6 +1431,33 @@ mod tests {
         assert_eq!(kept_or_first(&folder, Some(TabStop::Pass)), Some(TabStop::Name));
         assert_eq!(kept_or_first(&folder, Some(TabStop::IconIndex)), Some(TabStop::Name));
         assert_eq!(kept_or_first(&rdp, Some(TabStop::IconIndex)), Some(TabStop::IconIndex));
+    }
+
+    #[test]
+    fn kind_row_is_one_line_and_the_dialog_is_shorter() {
+        // The retired layout stacked the six kinds as two rows of three. Dropping that
+        // row removes one segment height and the gap under it.
+        let saved = |dpi| px(dpi, BTN_H_FOOTER + SPACE_8);
+        let folder_h = [(96, 307), (144, 458), (192, 614)];
+        for (dpi, h) in folder_h {
+            let g = form_geom(dpi, 520 * dpi / 96, ItemKind::Folder, false, false);
+            assert_eq!(g.kinds[0].top, g.kinds[5].top, "{dpi}");
+            assert_eq!(g.height, h, "{dpi}");
+            assert_eq!(
+                h + saved(dpi),
+                if dpi == 96 { 343 } else if dpi == 144 { 512 } else { 686 },
+                "{dpi}"
+            );
+        }
+        for dpi in [96, 144, 192] {
+            for kind in KINDS {
+                let g = form_geom(dpi, 520 * dpi / 96, kind, false, false);
+                assert_eq!(g.kinds[0].top, g.kinds[5].top, "{kind:?} {dpi}");
+                assert_eq!(g.kinds[5].right - g.kinds[0].left, 520 * dpi / 96 - 16 * dpi / 96 * 2, "{kind:?} {dpi}");
+                let name_lab = g.labels.iter().find(|(s, _)| *s == Slot::Name).unwrap().1;
+                assert_eq!(name_lab.top - g.kinds[0].bottom, px(dpi, SPACE_8), "{kind:?} {dpi}");
+            }
+        }
     }
 
     #[test]

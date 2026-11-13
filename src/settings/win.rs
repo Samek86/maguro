@@ -799,8 +799,12 @@ unsafe fn draw(dc: HDC, rc: RECT, g: &Geo, sn: &Snap, h: HWND) {
             }
             Item::CtxSeg { classic, win11 } => {
                 let on_win = app(|a| a.s.ctx_win11_view);
-                draw_seg(dc, *classic, tx(CTX_CLASSIC), !on_win, sn);
-                draw_seg(dc, *win11, tx(CTX_WIN11), on_win, sn);
+                let cells = [
+                    crate::SegmentCell { rect: *classic, label: tx(CTX_CLASSIC), disabled: false },
+                    crate::SegmentCell { rect: *win11, label: tx(CTX_WIN11), disabled: false },
+                ];
+                let hot = if over(sn, *classic) { Some(0) } else if over(sn, *win11) { Some(1) } else { None };
+                crate::paint_segment_group(dc, &cells, Some(if on_win { 1 } else { 0 }), hot, None, None, dpi, t.bg, crate::FocusRing::Outside);
             }
             Item::CtxBar { .. } => {}
             Item::CtxRow { id, rect, mark, chev, name, detail, raw, tick, chips, packaged, .. } => {
@@ -1060,14 +1064,6 @@ unsafe fn draw_tick(dc: HDC, r: RECT, tick: crate::shell::ctxmenu::Tick, dpi: i3
         crate::shell::ctxmenu::Tick::Off => crate::paint_check(dc, r, false, hot, dpi, ground),
         crate::shell::ctxmenu::Tick::Mixed => crate::draw_tick(dc, r, tick, crate::live_accent(), dpi, crate::icon_font(), ground, hot),
     }
-}
-
-unsafe fn draw_seg(dc: HDC, r: RECT, label: &str, on: bool, sn: &Snap) {
-    let dpi = sn.dpi.max(96);
-    let id: u8 = if on { 1 } else { 0 };
-    let hot = if over(sn, r) { Some(id) } else { None };
-    let visual = crate::visual_from_pointer(id, hot, None);
-    crate::paint_segment(dc, r, label, on, visual, dpi, crate::ui_tokens().bg);
 }
 
 unsafe fn draw_ctx_row(dc: HDC, rect: RECT, mark: RECT, chev: RECT, name: &str, detail: &str, raw: &str, tick: crate::shell::ctxmenu::Tick, chips: &[(u8, RECT)], open: bool, packaged: bool, sn: &Snap) {
