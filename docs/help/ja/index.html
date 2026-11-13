@@ -257,7 +257,7 @@ body.lb-open { overflow: hidden; }
   </div>
   <nav class="toc" id="toc" aria-label="目次">
     <div class="toc-title">目次</div>
-    <a href="#overview">概要</a><a href="#address-toolbar">アドレス バーとツールバー</a><a href="#layouts">レイアウトとペイン</a><a href="#panedrag">ペインの移動と複製</a><a href="#tabs">ウィンドウ タブとセッション</a><a href="#tab-list">タブ一覧</a><a href="#pane-tabs">ペイン タブ</a><a href="#pane-colors">ペインの色</a><a href="#favorites">お気に入りとフォルダー ツリー</a><a href="#search">検索</a><a href="#preview">プレビューとクイックルック</a><a href="#files">ファイル操作</a><a href="#batch-rename">一括リネーム</a><a href="#basket">ファイルバスケット</a><a href="#watch">フォルダー監視</a><a href="#clipboard">クリップボードのパス</a><a href="#workspaces">ワークスペース</a><a href="#servers">サーバー接続</a><a href="#office">Office ファイル</a><a href="#ctxmenu">右クリックメニュー</a><a href="#theme">テーマとスタイル付きコントロール</a><a href="#settings">設定</a><a href="#window-actions">Win+Shift+E とその他の操作</a><a href="#shortcuts">ショートカット</a><a href="#languages">言語</a><a href="#troubleshoot">トラブルシューティング</a>
+    <a href="#overview">概要</a><a href="#default-folder-app">既定のフォルダーアプリとして使う（おすすめ）</a><a href="#address-toolbar">アドレス バーとツールバー</a><a href="#layouts">レイアウトとペイン</a><a href="#panedrag">ペインの移動と複製</a><a href="#tabs">ウィンドウ タブとセッション</a><a href="#tab-list">タブ一覧</a><a href="#pane-tabs">ペイン タブ</a><a href="#pane-colors">ペインの色</a><a href="#favorites">お気に入りとフォルダー ツリー</a><a href="#search">検索</a><a href="#preview">プレビューとクイックルック</a><a href="#files">ファイル操作</a><a href="#batch-rename">一括リネーム</a><a href="#basket">ファイルバスケット</a><a href="#watch">フォルダー監視</a><a href="#clipboard">クリップボードのパス</a><a href="#workspaces">ワークスペース</a><a href="#servers">サーバー接続</a><a href="#office">Office ファイル</a><a href="#ctxmenu">右クリックメニュー</a><a href="#theme">テーマとスタイル付きコントロール</a><a href="#settings">設定</a><a href="#window-actions">Win+Shift+E とその他の操作</a><a href="#shortcuts">ショートカット</a><a href="#languages">言語</a><a href="#troubleshoot">トラブルシューティング</a>
   </nav>
 </aside>
 <main class="main">
@@ -275,6 +275,19 @@ body.lb-open { overflow: hidden; }
     <p>スタート メニューかコマンド ラインから起動します。<code>maguro.exe C:\Work D:\Archive</code> のようにフォルダーを指定すると、そのフォルダーが開きます。<code>.maguro</code> ファイルを指定すると、保存したセッションが開きます。<code>.grids</code>、<code>.qdr</code>、<code>grids.ini</code> はセッション ファイルではないため、インポートされません。</p>
     <p>F1 を押すと、このヘルプがブラウザーで開きます。Ctrl+/ でアプリ内の簡易ショートカット一覧、Ctrl+, で設定が開きます。</p>
     <div class="shot-grid"><figure class="shot"><img src="../../images-v8/ja/hero_light.png" alt="メイン ウィンドウ、ライトテーマ" loading="lazy"><figcaption>メイン ウィンドウ、ライト</figcaption></figure><figure class="shot"><img src="../../images-v8/ja/hero_dark.png" alt="メイン ウィンドウ、ダークテーマ" loading="lazy"><figcaption>メイン ウィンドウ、ダーク</figcaption></figure></div>
+  </section>
+
+  <section class="section-block" id="default-folder-app" data-search="既定のフォルダーアプリ おすすめ エクスプローラー ダブルクリック ドライブ 削除 スイッチ 既定ではオフ default folder app">
+    <h2>既定のフォルダーアプリとして使う（おすすめ）</h2>
+    <p>このオプションをオンにすると、フォルダーやドライブをダブルクリックしたときに Maguro が開きます。先に Maguro を起動しておく必要はありません。Win+E、タスク バー、<code>shell:</code> のような仮想フォルダーは、これまでどおりエクスプローラーで開きます。</p>
+    <p>このオプションは <strong>既定ではオフ</strong> です。自分で <strong>設定 → 一般 → 既定のフォルダーアプリとして使用</strong> からオンにします。</p>
+    <p><strong>Maguroを完全に削除したいときは、このスイッチをオフにしてから削除してください。</strong></p>
+    <ol>
+      <li><strong>設定 → 一般</strong>で <strong>既定のフォルダーアプリとして使用</strong> をオフにします。</li>
+      <li>フォルダーがエクスプローラーで開くことを確認します。</li>
+      <li>Maguro を削除します。</li>
+    </ol>
+    <p>すでに Maguro を削除してしまい、フォルダーが開かないときは、Maguro を再ダウンロードして実行し、スイッチをオフにしてから削除してください。</p>
   </section>
 
   <section class="section-block" id="address-toolbar" data-search="address toolbar status swap drive buttons gear menu アドレス ツールバー ステータス 歯車 表示 外観 動作">
@@ -470,7 +483,7 @@ body.lb-open { overflow: hidden; }
     <h2>設定</h2>
     <p>Ctrl+, で設定を開きます。検索ボックスに入力すると、タイトルや説明が一致するページ、カード、ショートカットへ移動します。変更はすぐに反映されます。設定ファイルは <code>%APPDATA%\Maguro\maguro.json</code> です。exe と同じ場所に <code>portable.txt</code> がある場合は、exe と同じ場所の <code>maguro.json</code> を使います。ファイルがない場合は既定値で起動します。書き込みに失敗した場合は、5 秒後に再試行します。読み込めないファイルには手を加えず、未知のキーもそのまま残します。各キーの説明は <a href="https://github.com/Samek86/maguro/blob/main/docs/settings.md">docs/settings.md</a> にあります。</p>
     <p><strong>一般。</strong> 表示言語（「自動」の場合、対応する言語ファイルがあれば Windows に合わせ、なければ英語）。フォントはウィンドウ全体に適用されます。フォント サイズの設定はありません。起動時の動作は、前回の状態を復元、保存したセッションを 1 つ開く、既定のレイアウトから選びます。「既定のフォルダーアプリとして使用」は、ファイル システム上のフォルダーとドライブにだけ Maguro を登録します。Win+E、タスク バー、<code>shell:</code> などの仮想フォルダーは引き続きエクスプローラーで開きます。このほか、既定のレイアウト、二重起動を防ぐ、単一ウィンドウ、開く/保存ダイアログのフォルダー、クリップボードのパスのホットキー、空白のダブルクリックで上のフォルダー、Everything、WinMerge のパスがあります。</p>
-    <p><strong>設定 → 一般 → 既定のフォルダーアプリとして使用</strong>をオンにすると、現在の Windows ユーザーでファイル システムのフォルダーとドライブを開くプログラムが Maguro になります。ほかのプログラムからフォルダーを開いたり、フォルダーをダブルクリックしたりすると Maguro が開きます。Win+E、タスク バー、<code>shell:</code> のような仮想フォルダーは、これまでどおりエクスプローラーで開きます。このオプションは <code>maguro.json</code> には保存されません。オンにすると <code>HKCU\Software\Classes\Directory\shell</code> と <code>HKCU\Software\Classes\Drive\shell</code> にだけ書き込みます。<code>Maguro</code> という動詞を追加し、そのコマンドがこの <code>maguro.exe</code> を実行するようにしたうえで、その動詞を既定にします。コンピューター全体（HKLM）の設定と <code>Folder</code> クラスは変更しません。同じオプションをオフにすると、保存しておいた以前の既定値を戻し、自分の動詞を削除します。<strong>Maguro を完全に削除したり、実行ファイルを消したりする前に、先にオフにしてください。</strong> オンのまま exe を消すと、フォルダーを開くときに無いプログラムを実行し続けようとします。</p>
+    <p>スイッチは設定 → 一般にあります。<strong>既定ではオフ</strong>で、自動ではオンになりません。使う理由、オンにする方法、削除前の手順は <a href="#default-folder-app">既定のフォルダーアプリとして使う（おすすめ）</a> にあります。このオプションは <code>maguro.json</code> には保存されません。オンにすると <code>HKCU\Software\Classes\Directory\shell</code> と <code>HKCU\Software\Classes\Drive\shell</code> にだけ書き込みます。<code>Maguro</code> という動詞を追加し、そのコマンドがこの <code>maguro.exe</code> を実行するようにしたうえで、その動詞を既定にします。コンピューター全体（HKLM）の設定と <code>Folder</code> クラスは変更しません。同じオプションをオフにすると、保存しておいた以前の既定値を戻し、自分の動詞を削除します。</p>
     <p><strong>外観。</strong> テーマ、アクセント カラー、ツールバー、ドライブ ボタン。</p>
     <p><strong>ペインと表示。</strong> 新しいペインの既定の表示。フォルダーごとの表示の記憶をオンにすると、並べ替え、列、表示モード、アイコン サイズ、グループ化が、設定ファイルと同じ場所の <code>folder-views.json</code> に保存されます。すべてのフォルダーの既定の表示はアクティブなペインから取り込みます。「このフォルダーの表示を消す」と「すべて消す」もあります。新しいペインの開始フォルダーは、PC、デスクトップ、指定したフォルダーから選びます。隠しファイル。ファイルの拡張子（Windows 自体の設定なので、エクスプローラーにも同じように反映されます）。フォルダー サイズと、既定でオフのネットワーク フォルダー向けオプション。左のパネル、お気に入りとツリーのどちらを上にするか、お気に入りパネルを表示とツリービューパネルを表示。アクティブなペインの枠を強調。プレビュー ウィンドウ。スペースでプレビュー。ホイールで次/前のファイルへ。</p>
     <p><strong>ファイル操作。</strong> 通常の貼り付けには、常に Windows のコピー ウィンドウを使います。ネットワーク フォルダーの高速コピー。削除の確認。既定の削除方法。新しいファイル名。ドラッグ アンド ドロップの既定の動作は、Windows の規則、常にコピー、常に確認から選びます。</p>
@@ -593,7 +606,7 @@ body.lb-open { overflow: hidden; }
     <p>Maguro を管理者として実行しないでください。PowerToys のマウス十字線のようなツールは、昇格したウィンドウの上ではカーソルを追跡できません（UIPI）。Maguro を通常の権限で実行するか、両方を管理者として実行してください。</p>
     <p>exe にコード署名がないため、初回起動時に SmartScreen の警告が表示されます。「詳細情報」→「実行」を選んでください。</p>
     <p>古い <code>.grids</code>、<code>.qdr</code>、<code>grids.ini</code> は開けません。現在のウィンドウから新しい <code>.maguro</code> セッションを保存してください。</p>
-    <p>Maguro を削除したあとフォルダーが開かない場合は、<strong>既定のフォルダーアプリとして使用</strong>がオンのままだった可能性があります。Windows が無いプログラムを実行し続けようとします。正規の手順は、削除する前に設定 → 一般でこのオプションをオフにすることです。オフにすると、以前の既定に戻ります。</p>
+    <p>すでに Maguro を削除してしまい、フォルダーが開かないときは、<strong>既定のフォルダーアプリとして使用</strong>がオンのままだった可能性があります。Maguro を再ダウンロードして実行し、設定 → 一般でスイッチをオフにしてから削除してください。</p>
   </section>
 </main>
 </div>

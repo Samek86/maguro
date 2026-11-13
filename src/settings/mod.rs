@@ -1324,24 +1324,24 @@ mod tests {
         assert_eq!(h, Some(card_h(folder, 96)));
         assert_eq!(
             tx(crate::Key::TurnOffBeforeUninstall),
-            "Turn this off before uninstalling or deleting Maguro, or folders will keep opening in the missing program."
+            "If you want to remove Maguro completely, turn this switch off first, then delete it."
         );
-        assert!(card_hit(folder, "uninstalling or deleting"));
-        let (anchor, page) = commit_search(2, 2, "uninstalling or deleting");
+        assert!(card_hit(folder, "remove Maguro completely"));
+        let (anchor, page) = commit_search(2, 2, "remove Maguro completely");
         assert_eq!((anchor, page), (2, 0));
-        let g = geo(client(), &shot(page, "uninstalling or deleting"));
+        let g = geo(client(), &shot(page, "remove Maguro completely"));
         assert!(g.show[0]);
         assert!(g.items.iter().any(|it| matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_FOLDER))));
 
         crate::UI.store(1, Ordering::Relaxed);
         assert_eq!(
             tx(crate::Key::TurnOffBeforeUninstall),
-            "삭제 전에 끄세요. 끄지 않으면 없는 프로그램으로 폴더가 열립니다."
+            "Maguro를 완전히 삭제하고 싶을 때는 이 스위치를 끄고 나서 삭제해 주세요."
         );
-        assert!(card_hit(folder, "삭제 전에 끄세요"));
-        let (_, page) = commit_search(2, 2, "삭제 전에 끄세요");
+        assert!(card_hit(folder, "이 스위치를 끄고 나서"));
+        let (_, page) = commit_search(2, 2, "이 스위치를 끄고 나서");
         assert_eq!(page, 0);
-        assert!(geo(client(), &shot(page, "삭제 전에 끄세요"))
+        assert!(geo(client(), &shot(page, "이 스위치를 끄고 나서"))
             .items
             .iter()
             .any(|it| matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_FOLDER))));
@@ -1349,12 +1349,12 @@ mod tests {
         crate::UI.store(2, Ordering::Relaxed);
         assert_eq!(
             tx(crate::Key::TurnOffBeforeUninstall),
-            "削除前にオフにしてください。オフにしないと無いプログラムでフォルダーが開きます。"
+            "Maguroを完全に削除したいときは、このスイッチをオフにしてから削除してください。"
         );
-        assert!(card_hit(folder, "削除前にオフ"));
-        let (_, page) = commit_search(2, 2, "削除前にオフ");
+        assert!(card_hit(folder, "このスイッチをオフにしてから"));
+        let (_, page) = commit_search(2, 2, "このスイッチをオフにしてから");
         assert_eq!(page, 0);
-        assert!(geo(client(), &shot(page, "削除前にオフ"))
+        assert!(geo(client(), &shot(page, "このスイッチをオフにしてから"))
             .items
             .iter()
             .any(|it| matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_FOLDER))));
