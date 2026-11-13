@@ -887,11 +887,12 @@ pub(crate) enum Key {
     UpdateFailReason,
     IconList,
     TurnOffBeforeUninstall,
+    PaneNumTip,
 }
 
-pub(crate) const KEY_COUNT: usize = 882;
+pub(crate) const KEY_COUNT: usize = 883;
 
-const _: () = assert!((Key::TurnOffBeforeUninstall as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::PaneNumTip as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1776,6 +1777,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Reason: {reason}",
     "List",
     "If you want to remove Maguro completely, turn this switch off first, then delete it.",
+    "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2662,4 +2664,5 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "update_fail_reason",
     "icon_list",
     "turn_off_before_uninstall",
+    "pane_num_tip",
 ];

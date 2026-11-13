@@ -974,7 +974,7 @@ mod tests {
             let s = |v: i32| v * dpi / 96;
             for w in 60..=600 {
                 let p = pane_geo(w, 500, dpi, true);
-                assert_eq!(p.num.right - p.num.left, s(18), "{w}@{dpi}");
+                assert_eq!(p.num.right - p.num.left, s(PANE_NUM_W), "{w}@{dpi}");
                 assert_eq!(p.btn[0].left, p.num.right, "{w}@{dpi}");
                 let row = [p.num, p.btn[0], p.btn[1], p.btn[2], p.addr, p.btn[3], p.filt, p.fav];
                 assert!(row.windows(2).all(|x| x[0].right <= x[1].left), "{w}@{dpi}");

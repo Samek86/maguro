@@ -689,6 +689,62 @@ pub(crate) unsafe fn paint_main(h: HWND) {
     });
 }
 
+unsafe fn pointer_on_num(h: HWND, x: i32, y: i32) -> bool {
+    let mut rc = RECT::default();
+    _ = GetClientRect(h, &mut rc);
+    let dpi = app(|a| a.dpi);
+    let num = pane_geo_of(h, rc.right, rc.bottom, dpi).num;
+    num.right > num.left && inside(num, x, y)
+}
+
+unsafe fn cursor_on_num(h: HWND) -> bool {
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() {
+        return false;
+    }
+    _ = ScreenToClient(h, &mut pt);
+    pointer_on_num(h, pt.x, pt.y)
+}
+
+/// Repaint only this pane's number badge.
+unsafe fn invalidate_num(h: HWND) {
+    if h.0.is_null() || !IsWindow(Some(h)).as_bool() {
+        return;
+    }
+    let mut rc = RECT::default();
+    _ = GetClientRect(h, &mut rc);
+    let dpi = app(|a| a.dpi);
+    let num = pane_geo_of(h, rc.right, rc.bottom, dpi).num;
+    if num.right > num.left {
+        _ = InvalidateRect(Some(h), Some(&num), false);
+    }
+}
+
+unsafe fn sync_num_hot(h: HWND, on: bool) {
+    let changed = app(|a| {
+        let next = if on {
+            Some(h)
+        } else if a.num_hot == Some(h) {
+            None
+        } else {
+            a.num_hot
+        };
+        if next == a.num_hot {
+            return None;
+        }
+        let prev = a.num_hot;
+        a.num_hot = next;
+        Some((prev, next))
+    });
+    let Some((prev, next)) = changed else { return };
+    if let Some(old) = prev {
+        invalidate_num(old);
+    }
+    if let Some(now) = next.filter(|&n| Some(n) != prev) {
+        invalidate_num(now);
+    }
+}
+
 pub(crate) extern "system" fn pane_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     crate::crash::catch_wnd(std::panic::AssertUnwindSafe(|| pane_proc_inner(h, msg, wp, lp)))
 }
@@ -779,11 +835,17 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 } else {
                     addr_tip_at(h, false);
                 }
+                let pressed = app(|a| a.pane_drag.is_some() || a.pane_press.is_some() || a.pane_tab_drag.is_some() || a.tab_drag.is_some());
+                let on_num = pane_num_tip_open(pointer_on_num(h, x, y), pressed);
+                num_tip_at(h, on_num);
+                sync_num_hot(h, on_num);
             }
             WM_MOUSELEAVE => {
                 hide_pane_tab_tip(h);
                 crumb_hover(h, None);
                 refresh_addr_tip(h);
+                hide_num_tip();
+                sync_num_hot(h, false);
             }
             WM_KIDS => kids_show(h, wp.0),
             WM_NET => net_done(h, wp.0),
@@ -793,6 +855,8 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_TIMER if wp.0 == TIMER_KIDS => kids_timeout(h),
             WM_LBUTTONDOWN => {
                 hide_addr_tip();
+                hide_num_tip();
+                sync_num_hot(h, false);
                 let (x, y) = xy(lp);
                 if let Some(i) = pane_of(h) {
                     if pane_drag_down(h, i, x, y) {
@@ -838,6 +902,13 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 return DefWindowProcW(h, msg, wp, lp);
             }
             WM_SETCURSOR if app(|a| a.pane_drag.is_some()) => {
+                if let Ok(c) = LoadCursorW(None, IDC_SIZEALL) {
+                    SetCursor(Some(c));
+                }
+                return LRESULT(1);
+            }
+            // The number badge is a move handle. The rest of the header keeps the arrow.
+            WM_SETCURSOR if wp.0 == h.0 as usize && (lp.0 & 0xffff) as u32 == HTCLIENT && cursor_on_num(h) => {
                 if let Ok(c) = LoadCursorW(None, IDC_SIZEALL) {
                     SetCursor(Some(c));
                 }
@@ -1012,6 +1083,7 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             // Right-click on the header itself (not its buttons or fields): view, colour, split, close.
             WM_CONTEXTMENU if wp.0 == h.0 as usize => {
+                hide_num_tip();
                 let mut p = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: (lp.0 >> 16 & 0xffff) as i16 as i32 };
                 let screen = p;
                 _ = ScreenToClient(h, &mut p);

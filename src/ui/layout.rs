@@ -38,6 +38,9 @@ pub(crate) fn cells(start: i32, len: i32, ratios: &[f64], gap: i32) -> Vec<(i32,
 
 /// Smallest pane plate, at 100% DPI. `pane_min_w` / `pane_min_h` scale it.
 pub(crate) const PANE_MIN_W: i32 = 140;
+/// Pane-number badge width, DIP. Two digits (panes 1–16) plus padding.
+/// "1" and "16" share this width, so the header does not jump.
+pub(crate) const PANE_NUM_W: i32 = 30;
 pub(crate) const PANE_MIN_H: i32 = 120;
 
 pub(crate) fn pane_min_w(dpi: i32) -> i32 {
@@ -685,7 +688,7 @@ pub(crate) fn cell_rect(g: &Geo, h: &[usize], i: usize) -> RECT {
 // One tab hides the strip (the list uses it) and shows `add` just to the right of ⇄.
 // Window tabs are a different strip, on the main window.
 pub(crate) struct PaneGeo {
-    pub(crate) num: RECT,      // pane number (Ctrl+N); the header drag handle, kept on a narrow pane
+    pub(crate) num: RECT,      // pane-number badge; the header drag handle, kept on a narrow pane
     pub(crate) btn: [RECT; 4], // back, forward, up, open-in
     pub(crate) addr: RECT,
     pub(crate) add: RECT, // add-tab button; zero width while the strip is showing
@@ -775,7 +778,7 @@ fn place_header(w: i32, h: i32, dpi: i32, strip: bool, chrome: &HeaderChrome) ->
     let rect = |x: i32, wd: i32| RECT { left: x, top: y, right: x + wd.max(0), bottom: y + bh };
     let zero = |x: i32| rect(x, 0);
     let num_left = if w > pad { pad } else { 0 };
-    let num = rect(num_left, s(18).min((w - num_left).max(0)));
+    let num = rect(num_left, s(PANE_NUM_W).min((w - num_left).max(0)));
     let mut x = num.right;
     let take = |x: &mut i32, on: bool| -> RECT {
         if !on {
@@ -864,6 +867,26 @@ pub(crate) fn pane_tab_rects(strip: RECT, n: usize, dpi: i32) -> (Vec<RECT>, REC
 pub(crate) fn pane_tab_close_rect(tab: RECT, dpi: i32) -> Option<RECT> {
     let s = |v: i32| v * dpi / 96;
     (tab.right - tab.left >= s(64)).then(|| RECT { left: tab.right - s(22), right: tab.right - s(4), ..tab })
+}
+
+/// Ellipse passed to `aa_rfill` (the RoundRect corner diameter). The shorter side
+/// makes a pill, and a square a circle.
+pub(crate) fn pane_num_radius(r: RECT) -> i32 {
+    let w = (r.right - r.left).max(0);
+    let h = (r.bottom - r.top).max(0);
+    w.min(h).max(1)
+}
+
+/// The number tip and the stronger wash show only while the pointer rests on the badge.
+pub(crate) fn pane_num_tip_open(on_badge: bool, dragging: bool) -> bool {
+    on_badge && !dragging
+}
+
+/// Fill and border of the pane-number badge. `head` is the header fill, and the
+/// anti-alias ground. `ink` is the digit colour. Hover mixes a little more of it in.
+pub(crate) fn pane_num_face(head: u32, ink: u32, hot: bool) -> (u32, u32) {
+    let (fill_t, edge_t) = if hot { (0.16, 0.46) } else { (0.08, 0.28) };
+    (blend(head, ink, fill_t), blend(head, ink, edge_t))
 }
 
 pub(crate) fn inside(r: RECT, x: i32, y: i32) -> bool {
@@ -1647,7 +1670,7 @@ mod tests {
         // The number is reserved first and stays either way.
         for strip in [false, true] {
             let narrow = pane_geo(80, 400, 96, strip);
-            assert_eq!(narrow.num.right - narrow.num.left, 18, "strip={strip}");
+            assert_eq!(narrow.num.right - narrow.num.left, PANE_NUM_W, "strip={strip}");
         }
         for (dpi, strip) in [(96, false), (144, false), (96, true), (144, true)] {
             let s = |v: i32| v * dpi / 96;
@@ -1655,7 +1678,7 @@ mod tests {
                 let p = pane_geo(w, 400, dpi, strip);
                 let row = [p.num, p.btn[0], p.btn[1], p.btn[2], p.addr, p.btn[3], p.add, p.filt, p.fav];
                 assert!(row.windows(2).all(|x| x[0].right <= x[1].left), "{w}@{dpi} strip={strip}");
-                assert!(p.num.right - p.num.left == s(18) && p.fav.right <= w && p.view.top >= p.btn[0].bottom, "{w}@{dpi}");
+                assert!(p.num.right - p.num.left == s(PANE_NUM_W) && p.fav.right <= w && p.view.top >= p.btn[0].bottom, "{w}@{dpi}");
             }
             for w in 60..=700 {
                 let p = pane_geo(w, 400, dpi, strip);
@@ -1692,21 +1715,30 @@ mod tests {
     fn pane_number_is_reserved_before_the_address() {
         // Wide pane: the number leads, and the address edit still keeps its s(32).
         let wide = pane_geo(800, 500, 96, true);
-        assert_eq!((wide.num.left, wide.num.right), (4, 22));
-        assert_eq!((wide.btn[0].left, wide.btn[2].right, wide.addr.left, wide.addr.right), (22, 94, 98, 590));
+        assert_eq!((wide.num.left, wide.num.right), (4, 34));
+        assert_eq!((wide.btn[0].left, wide.btn[2].right, wide.addr.left, wide.addr.right), (34, 106, 110, 590));
         assert_eq!((wide.btn[3].left, wide.filt.left, wide.filt.right, wide.fav.left), (594, 620, 770, 772));
         // Just below the old cutoff the number used to vanish. It stays, and the address keeps a folder name.
         let above = pane_geo(241, 500, 96, true);
         let below = pane_geo(240, 500, 96, true);
         let edit = |p: &PaneGeo| (p.addr.right - 6) - (p.addr.left + 8);
-        assert_eq!((above.num.left, above.num.right), (4, 22));
+        assert_eq!((above.num.left, above.num.right), (4, 34));
         assert!(edit(&above) >= 66 && edit(&below) >= 66);
-        assert_eq!((below.num.left, below.num.right), (4, 22));
+        assert_eq!((below.num.left, below.num.right), (4, 34));
         assert_eq!((below.btn[0].left, below.addr.left), (above.btn[0].left, above.addr.left));
-        assert!(below.btn.iter().all(|r| r.right - r.left == 24) && below.fav.right - below.fav.left == 24);
+        // The badge is 12 DIP wider than the old 18px label, so Up gives way at 240.
+        // Back, forward, swap and the star stay full size. Nothing is a sliver.
+        assert_eq!(below.btn[2].left, below.btn[2].right);
+        assert_eq!(
+            (below.btn[0].right - below.btn[0].left, below.btn[1].right - below.btn[1].left, below.btn[3].right - below.btn[3].left, below.fav.right - below.fav.left),
+            (24, 24, 24, 24)
+        );
+        let room = pane_geo(248, 500, 96, true);
+        assert!(room.btn.iter().all(|r| r.right - r.left == 24) && room.fav.right - room.fav.left == 24);
+        assert_eq!(room.filt.left, room.filt.right);
         // A ~20% column at 200% DPI (1x3). The label is the whole grab target.
         let col = pane_geo(384, 500, 192, true);
-        assert_eq!(col.num.right - col.num.left, 36);
+        assert_eq!(col.num.right - col.num.left, 60);
         assert!(col.addr.right - col.addr.left >= 160);
         for c in [col.btn[0], col.btn[1], col.btn[2], col.btn[3], col.addr, col.filt, col.fav] {
             if c.right > c.left {
@@ -1716,12 +1748,77 @@ mod tests {
     }
 
     #[test]
+    fn pane_number_badge_fits_two_digits_at_each_dpi() {
+        // 30 DIP holds "16" inside a pill. The width does not follow the digit count.
+        const DIP_W: i32 = 30;
+        const DIP_H: i32 = 22;
+        for dpi in [96, 144, 192] {
+            let s = |v: i32| v * dpi / 96;
+            for strip in [false, true] {
+                let p = pane_geo(800, 500, dpi, strip);
+                let w = p.num.right - p.num.left;
+                let h = p.num.bottom - p.num.top;
+                assert_eq!(w, s(DIP_W), "{dpi} strip={strip}");
+                assert_eq!(h, s(DIP_H), "{dpi} strip={strip}");
+                assert!(w > h, "pill is wider than a circle so two digits fit {dpi}");
+                // aa_rfill's rad is the RoundRect ellipse. The shorter side is a semicircle end.
+                assert_eq!(pane_num_radius(p.num), h, "{dpi} strip={strip}");
+                assert_eq!(p.btn[0].left, p.num.right, "{dpi} strip={strip}");
+                for c in [p.btn[0], p.btn[1], p.btn[2], p.btn[3], p.addr, p.add, p.filt, p.fav] {
+                    if c.right > c.left {
+                        assert!(c.left >= p.num.right, "overlaps the badge {dpi} strip={strip}");
+                    }
+                }
+                let min = pane_geo(s(140), s(120), dpi, strip);
+                assert_eq!(min.num.right - min.num.left, s(DIP_W), "min {dpi} strip={strip}");
+                assert!(min.num.right <= s(140), "min {dpi}");
+                assert!(min.addr.right - min.addr.left >= s(80), "address {dpi} strip={strip}");
+            }
+        }
+        let wide = pane_geo(800, 500, 96, false);
+        let again = pane_geo(1200, 500, 96, false);
+        assert_eq!(wide.num.right - wide.num.left, again.num.right - again.num.left);
+        // A pane narrower than the badge keeps a round end on whatever width is left.
+        let tiny = pane_geo(20, 200, 96, false);
+        let tw = tiny.num.right - tiny.num.left;
+        let th = tiny.num.bottom - tiny.num.top;
+        assert!(tw > 0 && tw < PANE_NUM_W);
+        assert_eq!(pane_num_radius(tiny.num), tw.min(th));
+    }
+
+    #[test]
+    fn pane_number_badge_hover_is_a_stronger_wash() {
+        fn dist(a: u32, b: u32) -> u32 {
+            let d = |s: u32| (a >> s & 0xFF).abs_diff(b >> s & 0xFF) as u32;
+            d(16) + d(8) + d(0)
+        }
+        // Inactive sub ink on white, white digits on cerulean, sub ink on a dark card.
+        for (head, ink) in [(0xFFFFFFu32, 0x7C776Fu32), (0x0A9BD6, 0xFFFFFF), (0x26282C, 0x9AA0A8)] {
+            let (rest_fill, rest_edge) = pane_num_face(head, ink, false);
+            let (hot_fill, hot_edge) = pane_num_face(head, ink, true);
+            assert!(dist(head, hot_fill) > dist(head, rest_fill), "fill {head:06X}");
+            assert!(dist(head, hot_edge) > dist(head, rest_edge), "edge {head:06X}");
+            assert!(dist(head, rest_edge) > dist(head, rest_fill), "ring {head:06X}");
+            assert_ne!(rest_fill, head);
+            assert!(dist(ink, hot_fill) > dist(head, hot_fill), "digits stay clearer than the wash {head:06X}");
+        }
+    }
+
+    #[test]
+    fn pane_number_tip_hides_off_the_badge_and_while_dragging() {
+        assert!(pane_num_tip_open(true, false));
+        assert!(!pane_num_tip_open(false, false));
+        assert!(!pane_num_tip_open(true, true));
+        assert!(!pane_num_tip_open(false, true));
+    }
+
+    #[test]
     fn pane_number_stays_visible_at_the_minimum_width() {
         for &(dpi, strip) in &[(96, false), (96, true), (192, false), (192, true)] {
             let s = |v: i32| v * dpi / 96;
             let w = s(140);
             let p = pane_geo(w, s(120), dpi, strip);
-            assert_eq!(p.num.right - p.num.left, s(18), "{dpi} strip={strip}");
+            assert_eq!(p.num.right - p.num.left, s(PANE_NUM_W), "{dpi} strip={strip}");
             assert!(p.num.left >= 0 && p.num.right <= w, "{dpi} strip={strip}");
             for c in [p.btn[0], p.btn[1], p.btn[2], p.btn[3], p.addr, p.add, p.filt, p.fav] {
                 if c.right > c.left {

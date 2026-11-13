@@ -590,6 +590,24 @@ mod tests {
     }
 
     #[test]
+    fn pane_number_tip_is_in_every_bundled_language() {
+        let id = "pane_num_tip";
+        let en = "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu";
+        let pos = KEY_ID.iter().position(|k| *k == id).unwrap_or_else(|| panic!("missing {id}"));
+        assert_eq!(EN[pos], en);
+        let expect = [
+            ("ko", KO_INI, "드래그: 패널 이동 / Ctrl+드래그: 탭 복사 / 우클릭: 메뉴"),
+            ("ja", JA_INI, "ドラッグ: ペインを移動 / Ctrl+ドラッグ: タブをコピー / 右クリック: メニュー"),
+            ("fr", FR_INI, "Glisser : déplacer le panneau / Ctrl+glisser : copier l'onglet / Clic droit : menu"),
+            ("de", DE_INI, "Ziehen: Bereich verschieben / Strg+Ziehen: Registerkarte kopieren / Rechtsklick: Menü"),
+        ];
+        for (code, text, tip) in expect {
+            let (_, map) = parse_ini(text);
+            assert_eq!(map[id], tip, "{code}");
+        }
+    }
+
+    #[test]
     fn bundled_files_cover_every_key_and_no_unknown_keys() {
         for (code, text) in [("ko", KO_INI), ("ja", JA_INI), ("fr", FR_INI), ("de", DE_INI)] {
             let (meta, map) = parse_ini(text);
