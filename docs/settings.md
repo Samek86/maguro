@@ -6,6 +6,8 @@ Where the file lives is described under [Install](../README.md#install).
 
 Maguro reads and writes `maguro.json` in the settings folder (`%APPDATA%\Maguro`, or beside the exe when `portable.txt` is present). A missing file starts from the built-in defaults. Named sessions are `.maguro` files in `maguro-sessions` next to `maguro.json`.
 
+**Use as default folder app** is not a key in this file. Settings → General writes only the current user’s `HKCU\Software\Classes\Directory\shell` and `HKCU\Software\Classes\Drive\shell`. Turn the option off there before you delete Maguro. Reset all settings turns that registration off as well.
+
 ## Writing, language, and view
 
 The file is replaced atomically. A failed write is tried again in 5 seconds. A file that cannot be read is left alone (Retry or Cancel, never overwritten with defaults). Unknown keys are kept. Minimizing keeps a maximized window maximized.

@@ -219,6 +219,8 @@ Settings live in `%APPDATA%\Maguro\maguro.json`. Put a file named `portable.txt`
 
 To build from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+If you turned on **Use as default folder app**, turn it off under Settings → General before you delete `maguro.exe`.
+
 ## Keyboard shortcuts
 
 Defaults. A chord that appears under Settings → Shortcuts can be changed there. The online help lists every chord. Explorer keys such as F2, Del, Ctrl+C, Ctrl+V, and F5 stay as they are. Esc and Space close Quick look; they are not separate shortcut rows.
@@ -268,6 +270,16 @@ Defaults. A chord that appears under Settings → Shortcuts can be changed there
 The gear on the tab row is labelled Settings and view and opens that menu. Settings is in the menu (`Ctrl+,`). Between the favourites star and the gear, the basket button opens the file basket (`Ctrl+Shift+B`) and the eye button opens folder watch (`Ctrl+Shift+W`). Those two buttons hide with the toolbar. The gear stays.
 
 Language (Auto, English, and every language file), font, light / dark theme, accent, and shortcuts are all set there. How the file is written, and the full `maguro.json` key table, are in [docs/settings.md](docs/settings.md).
+
+### Default folder app
+
+**Settings → General → Use as default folder app** makes Maguro the program that opens file-system folders and drives for the current Windows user. A folder opened from another program, or by double-clicking it, opens in Maguro. Win+E, the taskbar, and virtual folders such as `shell:` still open in File Explorer.
+
+This is not saved in `maguro.json`. Turning the option on writes only to the current-user registry (`HKCU\Software\Classes\Directory\shell` and `HKCU\Software\Classes\Drive\shell`): it adds a `Maguro` verb whose command runs this `maguro.exe`, and sets that verb as the default. Machine-wide settings (HKLM) and the `Folder` class are left alone.
+
+Turn the same option **off** to undo it. Maguro restores the previous default it saved and removes its verb.
+
+**Turn this option off before you uninstall or delete Maguro.** If you remove the exe while the option is still on, opening a folder will keep trying to launch the missing program.
 
 ## Language files
 

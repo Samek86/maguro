@@ -6,6 +6,8 @@
 
 Maguro는 설정 폴더의 `maguro.json`만 읽고 씁니다(`%APPDATA%\Maguro`, `portable.txt`가 있으면 exe 옆). 파일이 없으면 기본값으로 시작합니다. 이름 붙인 세션은 `maguro.json` 옆 `maguro-sessions` 안의 `.maguro` 파일입니다.
 
+**기본 폴더 앱으로 사용**은 이 파일의 키가 아닙니다. 설정 → 일반은 현재 사용자의 `HKCU\Software\Classes\Directory\shell`과 `HKCU\Software\Classes\Drive\shell`에만 씁니다. Maguro를 지우기 전에 거기서 끄세요. 모든 설정 초기화도 이 등록을 끕니다.
+
 ## 저장 방식, 언어, 보기
 
 파일은 원자적으로 바뀝니다. 저장이 실패하면 5초 뒤에 다시 시도합니다. 읽지 못하는 파일은 기본값으로 덮지 않고, 다시 시도하거나 종료합니다. 모르는 키는 그대로 둡니다. 최소화해도 최대화였으면 최대화로 기억합니다.
