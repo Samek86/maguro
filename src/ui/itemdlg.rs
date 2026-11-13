@@ -1,4 +1,5 @@
 //! Add or edit a favourite. Kind, name, and icon are shared.
+//! The title sits in the same header as the shortcut list. Dragging that header moves the window.
 //! The automatic / custom row keeps a live preview of the chosen icon, or the kind's default.
 //! Folder and file keep the path they have always stored. A password stays in the
 //! edit and in Credential Manager; the favourites file only records that one exists.
@@ -19,7 +20,7 @@ use crate::shell::{forget_hosts, stage_secret};
 
 use super::{
     body_font, bold_ui_font, buffered, color_field_edit, draw_fav_icon, field_edit_rect, icon_font, paint_button, paint_card_fill, paint_check, paint_field, paint_label, paint_leaf_icon, paint_meta,
-    paint_section_header, paint_segment_group, paint_window, pal, segment_row, segment_widths, shell_icon, style_popup_chrome, text, visual_from_pointer, wrap_text, ButtonKind, FocusRing, SegmentCell,
+    paint_segment_group, paint_window, pal, segment_row, segment_widths, shell_icon, style_popup_chrome, text, visual_from_pointer, wrap_text, ButtonKind, FocusRing, SegmentCell,
     BTN_GAP, BTN_H_FOOTER, BTN_MIN_W, FIELD_H, FIELD_PAD_X,
     FONT_PX, PAD_BODY_X, PAD_BODY_Y, SPACE_4, SPACE_8, px,
 };
@@ -54,6 +55,7 @@ const HIT_BROWSE_ICON: i32 = 30;
 const HIT_OK: i32 = 31;
 const HIT_CANCEL: i32 = 32;
 const HIT_ICON_LIST: i32 = 33;
+const HIT_CLOSE: i32 = 34;
 /// Side of the icon preview, DIP. It shares the automatic / custom row.
 const ICON_PREVIEW_DIP: i32 = 32;
 
@@ -75,7 +77,10 @@ pub(crate) enum Slot {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Geom {
-    pub(crate) title: RECT,
+    /// Title bar. Dragging it moves the window. The close mark is [`Self::close`].
+    pub(crate) header: RECT,
+    /// Close mark. Same rectangle as the shortcut list. Not a tab stop.
+    pub(crate) close: RECT,
     pub(crate) kind_label: RECT,
     pub(crate) kinds: [RECT; 6],
     pub(crate) name: RECT,
@@ -289,12 +294,13 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     let seg_h = s(BTN_H_FOOTER);
     let right = (width - pad).max(pad + 1);
     let inner = (right - pad).max(1);
-    let mut y = pad;
+    let head = super::keys::keys_head(dpi);
+    let header = RECT { left: 0, top: 0, right: width, bottom: head };
+    let close = super::keys::keys_close(width, dpi);
+    let mut y = head + pad;
     let mut labels = Vec::new();
     let mut slots = Vec::new();
     let mut browse = Vec::new();
-    let title = RECT { left: pad, top: y, right, bottom: y + lab };
-    y = title.bottom + gap;
     let kind_label = RECT { left: pad, top: y, right, bottom: y + lab };
     y = kind_label.bottom + gap4;
     // Six kind names on one row. A long label takes a wider cell; the row still fills the content width.
@@ -411,7 +417,8 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     let cancel = RECT { left: ok.right + s(BTN_GAP), top: y, right, bottom: y + bh };
     y = cancel.bottom + s(PAD_BODY_Y);
     Geom {
-        title,
+        header,
+        close,
         kind_label,
         kinds,
         name,
@@ -431,6 +438,17 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
         cancel,
         height: y,
     }
+}
+
+/// Client-coordinate hit. The header drags the window. The close mark and the form stay client.
+/// A point outside the client is nowhere, so the modal frame keeps the system hit.
+pub(crate) fn item_nc_hit(width: i32, height: i32, x: i32, y: i32, dpi: i32) -> u32 {
+    if x < 0 || y < 0 || x >= width || y >= height {
+        return HTNOWHERE;
+    }
+    let close = super::keys::keys_close(width, dpi);
+    let on_close = x >= close.left && x < close.right && y >= close.top && y < close.bottom;
+    if y < super::keys::keys_head(dpi) && !on_close { HTCAPTION } else { HTCLIENT }
 }
 
 /// Square on the icon-source row, centered on the segment and kept inside the gaps around it.
@@ -869,14 +887,14 @@ unsafe extern "system" fn item_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             LRESULT(0)
         }
         WM_NCHITTEST => {
-            let hit = DefWindowProcW(h, msg, wp, lp);
-            if hit.0 == HTCLIENT as isize {
-                let (_x, y) = lp_xy(lp);
-                if y < sc(dpi_of(h), PAD_BODY_X + FONT_PX + SPACE_4) {
-                    return LRESULT(HTCAPTION as isize);
-                }
-            }
-            hit
+            // lParam is a screen point. The header test is in client pixels.
+            let mut pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
+            _ = ScreenToClient(h, &mut pt);
+            let mut rc = RECT::default();
+            _ = GetClientRect(h, &mut rc);
+            let dpi = view(h).map(|v| (*v).dpi).unwrap_or_else(|| dpi_of(h));
+            let hit = item_nc_hit(rc.right, rc.bottom, pt.x, pt.y, dpi);
+            if hit == HTNOWHERE { DefWindowProcW(h, msg, wp, lp) } else { LRESULT(hit as isize) }
         }
         _ => DefWindowProcW(h, msg, wp, lp),
     }
@@ -905,7 +923,6 @@ unsafe fn paint(h: HWND) {
         let down_id = (down >= 0).then_some(down);
         let editing = view(h).is_some_and(|p| (*p).editing);
         let title = if editing { tr(crate::Key::EditFavourite) } else { tr(crate::Key::AddItem) };
-        paint_section_header(dc, g.title, title, bold);
         paint_meta(dc, g.kind_label, tr(crate::Key::ItemKind), body);
         let kind_cells: Vec<SegmentCell> = KINDS.iter().enumerate().map(|(i, kind_i)| SegmentCell {
             rect: g.kinds[i],
@@ -978,6 +995,7 @@ unsafe fn paint(h: HWND) {
         let ok = if editing { tr(crate::Key::Save) } else { tr(crate::Key::ItemAdd) };
         paint_button(dc, g.ok, ButtonKind::Primary, visual_from_pointer(HIT_OK, hot_id, down_id), ok, bold, dpi, ground, FocusRing::Outside);
         paint_button(dc, g.cancel, ButtonKind::Secondary, visual_from_pointer(HIT_CANCEL, hot_id, down_id), tr(crate::Key::Cancel), body, dpi, ground, FocusRing::Outside);
+        super::keys::paint_caption_header(dc, rc, dpi, title, body, icon_font(), visual_from_pointer(HIT_CLOSE, hot_id, down_id));
     });
 }
 
@@ -1034,6 +1052,7 @@ unsafe fn hit(h: HWND, lp: LPARAM, down: bool, up: bool) {
         (g.ok, HIT_OK),
         (g.cancel, HIT_CANCEL),
         (g.icon_list, HIT_ICON_LIST),
+        (g.close, HIT_CLOSE),
     ];
     for (r, hit) in pairs {
         if r.bottom > r.top && inside(r, x, y) {
@@ -1133,7 +1152,7 @@ unsafe fn activate(h: HWND, id: i32) {
             }
         }
         HIT_OK => commit(h),
-        HIT_CANCEL => _ = DestroyWindow(h),
+        HIT_CANCEL | HIT_CLOSE => _ = DestroyWindow(h),
         _ => {}
     }
 }
@@ -1389,7 +1408,7 @@ mod tests {
 
     fn boxes(g: &Geom) -> Vec<RECT> {
         let mut v = Vec::new();
-        v.push(g.title);
+        v.push(g.header);
         v.push(g.kind_label);
         v.extend(g.kinds);
         v.extend(g.labels.iter().map(|(_, r)| *r));
@@ -1515,14 +1534,15 @@ mod tests {
         // The retired layout stacked the six kinds as two rows of three. Dropping that
         // row removes one segment height and the gap under it.
         let saved = |dpi| px(dpi, BTN_H_FOOTER + SPACE_8);
-        let folder_h = [(96, 307), (144, 458), (192, 614)];
+        // The caption bar replaced the in-form title: keys_head minus that title and the gap under it.
+        let folder_h = [(96, 326), (144, 487), (192, 652)];
         for (dpi, h) in folder_h {
             let g = form_geom(dpi, 520 * dpi / 96, ItemKind::Folder, false, false);
             assert_eq!(g.kinds[0].top, g.kinds[5].top, "{dpi}");
             assert_eq!(g.height, h, "{dpi}");
             assert_eq!(
                 h + saved(dpi),
-                if dpi == 96 { 343 } else if dpi == 144 { 512 } else { 686 },
+                if dpi == 96 { 362 } else if dpi == 144 { 541 } else { 724 },
                 "{dpi}"
             );
         }
@@ -1605,7 +1625,7 @@ mod tests {
     fn icon_preview_sits_on_the_segment_row_at_96_144_and_192() {
         // Automatic already has the icon label and the segment. Custom only adds the path row.
         let path_row = |dpi| px(dpi, FIELD_H) + px(dpi, SPACE_8);
-        let folder_h = [(96, 307), (144, 458), (192, 614)];
+        let folder_h = [(96, 326), (144, 487), (192, 652)];
         for dpi in [96, 144, 192] {
             let width = 520 * dpi / 96;
             for kind in KINDS {
@@ -1699,6 +1719,56 @@ mod tests {
             let dark_g = form_geom(dpi, width, ItemKind::Folder, true, false);
             assert_eq!(light_g.icon_preview, dark_g.icon_preview);
             assert_eq!(light_g.height, dark_g.height);
+        }
+    }
+
+    #[test]
+    fn header_moves_and_the_close_mark_stays_a_button() {
+        // Same caption rule as the shortcut list: the bar drags, the close mark does not.
+        // This dialog is fixed, so an edge is still the form, not a sizing grip.
+        let (w, h, dpi) = (520, 400, 96);
+        let head = super::super::keys::keys_head(dpi);
+        assert_eq!(item_nc_hit(w, h, 30, 20, dpi), HTCAPTION);
+        assert_eq!(item_nc_hit(w, h, 1, 1, dpi), HTCAPTION);
+        assert_eq!(item_nc_hit(w, h, w - 2, 40, dpi), HTCAPTION);
+        let close = super::super::keys::keys_close(w, dpi);
+        assert_eq!(item_nc_hit(w, h, close.left + 2, close.top + 2, dpi), HTCLIENT);
+        assert_eq!(item_nc_hit(w, h, 40, head + 8, dpi), HTCLIENT);
+        assert_eq!(item_nc_hit(w, h, 1, head + 8, dpi), HTCLIENT);
+        assert_eq!(item_nc_hit(w, h, w - 2, head + 8, dpi), HTCLIENT);
+        assert_eq!(item_nc_hit(w, h, -1, 10, dpi), HTNOWHERE);
+        assert_eq!(item_nc_hit(w, h, w, 10, dpi), HTNOWHERE);
+    }
+
+    #[test]
+    fn header_clears_the_form_at_96_144_and_192() {
+        for dpi in [96, 144, 192] {
+            let width = 520 * dpi / 96;
+            let head = super::super::keys::keys_head(dpi);
+            for kind in KINDS {
+                for custom in [false, true] {
+                    for clear in [false, true] {
+                        let g = form_geom(dpi, width, kind, custom, clear);
+                        assert_eq!(g.header, RECT { left: 0, top: 0, right: width, bottom: head }, "{kind:?} {dpi}");
+                        assert_eq!(g.close, super::super::keys::keys_close(width, dpi), "{kind:?} {dpi}");
+                        assert!(g.close.top >= g.header.top && g.close.bottom <= g.header.bottom, "{kind:?} {dpi}");
+                        assert!(g.close.left >= g.header.left && g.close.right <= g.header.right, "{kind:?} {dpi}");
+                        assert_eq!(g.kind_label.top, g.header.bottom + px(dpi, PAD_BODY_X), "{kind:?} {dpi}");
+                        assert!(g.icon_preview.top >= g.header.bottom, "{kind:?} {dpi} preview");
+                        assert!(g.name.top >= g.header.bottom, "{kind:?} {dpi} name");
+                        for r in boxes(&g) {
+                            if r == g.header {
+                                continue;
+                            }
+                            assert!(!overlap(g.header, r), "{kind:?} {dpi} header {r:?}");
+                            assert!(!overlap(g.close, r), "{kind:?} {dpi} close {r:?}");
+                        }
+                        assert_eq!(item_nc_hit(width, g.height, 8, head / 2, dpi), HTCAPTION, "{kind:?} {dpi}");
+                        assert_eq!(item_nc_hit(width, g.height, g.close.left + 2, g.close.top + 2, dpi), HTCLIENT, "{kind:?} {dpi}");
+                        assert_eq!(item_nc_hit(width, g.height, g.icon_preview.left + 1, g.icon_preview.top + 1, dpi), HTCLIENT, "{kind:?} {dpi}");
+                    }
+                }
+            }
         }
     }
 }

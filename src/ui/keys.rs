@@ -131,6 +131,18 @@ pub(crate) fn keys_close(width: i32, dpi: i32) -> RECT {
     RECT { left: width - s(44), top: s(6), right: width - s(12), bottom: s(38) }
 }
 
+/// Caption bar shared with the item dialog. Ground, a 1px line, the title, and the close mark.
+pub(crate) unsafe fn paint_caption_header(dc: HDC, rc: RECT, dpi: i32, title: &str, font: HFONT, icon: HFONT, close_vis: ButtonVisual) {
+    let head = keys_head(dpi);
+    let s = |v: i32| v * dpi / 96;
+    let ground = ui_tokens().bg;
+    let bar = RECT { bottom: head, ..rc };
+    fill(dc, bar, ground);
+    fill(dc, RECT { top: head - 1, ..bar }, ui_tokens().line);
+    text(dc, RECT { left: rc.left + s(KEYS_PAD), ..bar }, title, font, pal().text, DT_LEFT);
+    paint_button(dc, keys_close(rc.right, dpi), ButtonKind::Icon, close_vis, "\u{E711}", icon, dpi, ground, FocusRing::Outside);
+}
+
 /// Shortcut list stays within this percent of the owner client, not the monitor.
 const KEYS_OWNER_PCT: i32 = 85;
 /// Smallest size the user can drag to, in DIP. The same floor as the first open size.
@@ -303,7 +315,6 @@ pub(crate) unsafe fn paint_keys(h: HWND) {
     let s = |v: i32| v * dpi / 96;
     let head = keys_head(dpi);
     let down = |r: RECT| RECT { top: r.top + head - scroll, bottom: r.bottom + head - scroll, ..r };
-    let ground = ui_tokens().bg;
     buffered(h, |dc, rc| {
         paint_window(dc, rc);
         let names = [tr(crate::Key::Keyboard), tr(crate::Key::MouseAndButtons)];
@@ -327,11 +338,7 @@ pub(crate) unsafe fn paint_keys(h: HWND) {
             }
             wrap_text(dc, down(gr.desc), &r.desc, font, pal().text, false);
         }
-        let bar = RECT { bottom: head, ..rc };
-        fill(dc, bar, ground);
-        fill(dc, RECT { top: head - 1, ..bar }, ui_tokens().line);
-        text(dc, RECT { left: s(KEYS_PAD), ..bar }, tr(crate::Key::KeyboardShortcuts2), font, pal().text, DT_LEFT);
-        paint_button(dc, keys_close(rc.right, dpi), ButtonKind::Icon, close_vis, "\u{E711}", icon_font, dpi, ground, FocusRing::Outside);
+        paint_caption_header(dc, rc, dpi, tr(crate::Key::KeyboardShortcuts2), font, icon_font, close_vis);
         let page = rc.bottom - head;
         if g.h > page && g.h > 0 {
             let th = (page * page / g.h).max(s(24));
