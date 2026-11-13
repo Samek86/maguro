@@ -307,9 +307,77 @@ pub(crate) fn fav_panel_group_on_accent(selected: bool, into: bool) -> bool {
 }
 
 /// One-pixel keyboard mark. Not a fill, and not drawn over a drop-into wash.
-/// Only while this panel is the focused window, so a click that moved focus away leaves no mark.
-pub(crate) fn fav_panel_focus_frame(key_focus: bool, selected: bool, into: bool) -> bool {
-    key_focus && selected && !into
+/// Only while this panel is the focused window and the keyboard cue is showing.
+/// `hide_focus` is `UISF_HIDEFOCUS`: a mouse click hides the mark the way Explorer
+/// does, and arrows, Tab, or F2 show it again. A click that moved focus away also
+/// leaves no mark.
+pub(crate) fn fav_panel_focus_frame(key_focus: bool, selected: bool, into: bool, hide_focus: bool) -> bool {
+    key_focus && selected && !into && !hide_focus
+}
+
+/// Next `UISF_HIDEFOCUS` bit after one UI-state message.
+/// An action that does not name that flag (accelerators, the active window)
+/// leaves the keyboard mark alone, so this panel does not react to other cues.
+pub(crate) fn fav_uis_hide_focus(action: u32, flags: u32, hide_focus: bool) -> bool {
+    if flags & UISF_HIDEFOCUS == 0 {
+        return hide_focus;
+    }
+    match action {
+        UIS_SET => true,
+        UIS_CLEAR => false,
+        _ => hide_focus,
+    }
+}
+
+/// Hover after a menu or a dialog closes.
+/// On the panel, the row under the pointer (`None` is empty space).
+/// Off the panel, no hover, even if a row index was still stored.
+pub(crate) fn fav_hover_after_overlay(on_panel: bool, row: Option<usize>) -> Option<usize> {
+    if on_panel { row } else { None }
+}
+
+/// Arrows, Tab, and F2 show the keyboard mark. Other keys leave it as it is.
+fn fav_key_shows_focus(vk: u16) -> bool {
+    matches!(VIRTUAL_KEY(vk), VK_LEFT | VK_UP | VK_RIGHT | VK_DOWN | VK_TAB | VK_F2)
+}
+
+/// `UISF_HIDEFOCUS` for this panel only. A click here must not change the cue
+/// on the file list or the folder tree, so the message stays on this hwnd.
+static SIDE_HIDE_FOCUS: AtomicBool = AtomicBool::new(false);
+
+fn uis_wparam(action: u32, flags: u32) -> WPARAM {
+    WPARAM((action as u16 as usize) | ((flags as u16 as usize) << 16))
+}
+
+/// Record a UI-state change for this window. Does not call `DefWindowProc`:
+/// that would forward `WM_CHANGEUISTATE` to the root and then to every pane.
+fn apply_side_uistate(h: HWND, wp: WPARAM) {
+    let action = (wp.0 & 0xffff) as u32;
+    let flags = ((wp.0 >> 16) & 0xffff) as u32;
+    let prev = SIDE_HIDE_FOCUS.load(Ordering::Relaxed);
+    let next = fav_uis_hide_focus(action, flags, prev);
+    if next == prev {
+        return;
+    }
+    SIDE_HIDE_FOCUS.store(next, Ordering::Relaxed);
+    if h.0.is_null() {
+        return;
+    }
+    unsafe {
+        if fav_panel_draws(crate::keys::modal()) && !ime_composing(h) {
+            _ = InvalidateRect(Some(h), None, false);
+        }
+    }
+}
+
+/// Hide or show this panel's keyboard mark. `WM_CHANGEUISTATE` is delivered
+/// here only; the parent never sees it.
+unsafe fn fav_focus_cue(h: HWND, show: bool) {
+    if h.0.is_null() {
+        return;
+    }
+    let action = if show { UIS_CLEAR } else { UIS_SET };
+    _ = SendMessageW(h, WM_CHANGEUISTATE, Some(uis_wparam(action, UISF_HIDEFOCUS)), Some(LPARAM(0)));
 }
 
 /// Colour of that mark: the shared palette line, never the accent wash.
@@ -494,6 +562,53 @@ unsafe fn cursor_in_client(h: HWND) -> Option<(i32, i32)> {
         return None;
     }
     (pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom).then_some((pt.x, pt.y))
+}
+
+/// Drop the hover wash and paint that before a menu or a dialog covers the row.
+unsafe fn clear_side_hover(h: HWND) {
+    let paint = app(|a| a.side_hot.take().is_some());
+    if paint && !h.0.is_null() && fav_panel_draws(crate::keys::modal()) && !ime_composing(h) {
+        _ = InvalidateRect(Some(h), None, false);
+        _ = UpdateWindow(h);
+    }
+}
+
+/// The window under the pointer is this panel.
+unsafe fn pointer_on_side(h: HWND) -> bool {
+    if h.0.is_null() {
+        return false;
+    }
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() {
+        return false;
+    }
+    WindowFromPoint(pt) == h
+}
+
+/// After a menu, a dialog, or a group toggle: hover the row under the pointer
+/// when it is still on this panel, otherwise leave the hover clear.
+/// Leave is armed only while the pointer is on the panel. Arming it from
+/// `WM_MOUSELEAVE` while the pointer is still inside is a different path and
+/// stays closed (`fav_leave_paints`).
+unsafe fn restore_side_hover(h: HWND) {
+    if h.0.is_null() {
+        return;
+    }
+    let on_panel = pointer_on_side(h);
+    let row = if on_panel {
+        cursor_in_client(h).and_then(|(_, y)| row_at(y))
+    } else {
+        None
+    };
+    let next = fav_hover_after_overlay(on_panel, row);
+    app(|a| a.side_hot = next);
+    if on_panel {
+        let mut t = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
+        _ = TrackMouseEvent(&mut t);
+    }
+    if fav_panel_draws(crate::keys::modal()) && !ime_composing(h) {
+        _ = InvalidateRect(Some(h), None, false);
+    }
 }
 
 /// Hide the panel tip and let the next hover show it.
@@ -683,9 +798,10 @@ pub(crate) unsafe fn paint_side(h: HWND) {
     let (dpi, font, icon, hot, sel, scroll, drop, accent) = app(|a| {
         (a.dpi, a.font, a.icon_font, a.side_hot, a.side_sel, a.side_scroll, a.side_drop, a.s.accent_now())
     });
-    // Hairline for the key target. Gone once focus leaves the panel, so the file list
-    // does not sit beside a leftover mark.
+    // Hairline for the key target. Gone once focus leaves the panel, and while
+    // UISF_HIDEFOCUS is set, so a click does not leave the mark beside the file list.
     let key_focus = GetFocus() == h;
+    let hide_focus = SIDE_HIDE_FOCUS.load(Ordering::Relaxed);
     buffered(h, |dc, rc| {
         let s = |v: i32| v * dpi / 96;
         let rh = row_h();
@@ -719,7 +835,7 @@ pub(crate) unsafe fn paint_side(h: HWND) {
             if let Some(rgb) = fav_panel_row_fill(sel == Some(i), hot == Some(i), into, dark, accent, side_ground(), pal().bg, pal().card) {
                 fill(dc, r, rgb);
             }
-            if fav_panel_focus_frame(key_focus, sel == Some(i), into) {
+            if fav_panel_focus_frame(key_focus, sel == Some(i), into, hide_focus) {
                 frame(dc, r, 1, fav_panel_focus_rgb(dark));
             }
             let indent = s(14) * f.depth.min(8) as i32;
@@ -793,7 +909,12 @@ pub(crate) unsafe fn begin_side_rename(id: &[usize]) {
     let Some(row) = list.iter().find(|r| r.in_tree() && r.id == id) else { return };
     let label = if row.name.is_empty() { short_name(&row.path) } else { row.name.clone() };
     let (host, key) = app(|a| (a.side_hwnd, node_key(&a.s.tree, id)));
-    let Some(name) = crate::settings::ask(host, tr(crate::Key::Rename2), &label) else { return };
+    // The dialog covers the row. Clear the wash first, then put it back only if
+    // the pointer is still on this panel when the prompt closes (cancel too).
+    clear_side_hover(host);
+    let name = crate::settings::ask(host, tr(crate::Key::Rename2), &label);
+    restore_side_hover(host);
+    let Some(name) = name else { return };
     let name = name.trim().to_string();
     if name.is_empty() {
         return;
@@ -910,6 +1031,9 @@ unsafe fn side_menu(h: HWND, index: Option<usize>, x: i32, y: i32) {
     }
     let mut pt = POINT { x, y };
     _ = ClientToScreen(h, &mut pt);
+    // The menu (and Esc, which returns 0) does not deliver a move. Clear the wash
+    // before it opens so a pointer that leaves does not keep the old row.
+    clear_side_hover(h);
     let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, None, h, None).0;
     _ = DestroyMenu(menu);
     let Some(row) = row else {
@@ -920,6 +1044,7 @@ unsafe fn side_menu(h: HWND, index: Option<usize>, x: i32, y: i32) {
         } else if cmd == 9 {
             open_item_dialog(app(|a| a.main), &[], None);
         }
+        restore_side_hover(h);
         return;
     };
     if !row.in_tree() {
@@ -935,6 +1060,7 @@ unsafe fn side_menu(h: HWND, index: Option<usize>, x: i32, y: i32) {
             6 => unpin_path(&row.path, row.kind == RowKind::Files),
             _ => {}
         }
+        restore_side_hover(h);
         return;
     }
     match cmd {
@@ -976,6 +1102,8 @@ unsafe fn side_menu(h: HWND, index: Option<usize>, x: i32, y: i32) {
         }
         _ => {}
     }
+    // After the command, including Edit item and a menu closed with Esc.
+    restore_side_hover(h);
 }
 
 fn set_drop(next: Option<DropLine>) -> bool {
@@ -1339,6 +1467,9 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
             WM_ERASEBKGND => return LRESULT(1),
+            // This panel only. DefWindowProc would hand the change to the root,
+            // which then updates every sibling pane.
+            WM_CHANGEUISTATE | WM_UPDATEUISTATE => apply_side_uistate(h, wp),
             WM_SETCURSOR => {
                 // The scrollbar is not a row. A drag (reorder or a file dropped from outside)
                 // keeps the cursor it already shows; do not put a hand on top of it.
@@ -1493,6 +1624,8 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_LBUTTONDOWN => {
                 // Gone before the click is handled, so the tip cannot take the click.
                 hide_side_fav_tip();
+                // Hide the keyboard mark before SetFocus can paint it.
+                fav_focus_cue(h, false);
                 let (x, y) = xy(lp);
                 _ = SetFocus(Some(h));
                 if let Some(i) = row_at(y) {
@@ -1501,6 +1634,7 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     if list.get(i).is_some_and(|r| chevron_hit(x, r, dpi)) {
                         let row = list[i].clone();
                         toggle_row(&row);
+                        restore_side_hover(h);
                     } else {
                         app(|a| {
                             a.side_sel = Some(i);
@@ -1535,7 +1669,10 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let on_row = side_inside(h, x, y) && row_at(y) == Some(i);
                     if let Some(row) = rows().get(i).cloned() {
                         match fav_release(row.group, x - px, y - py, on_row) {
-                            FavRelease::Toggle => toggle_row(&row),
+                            FavRelease::Toggle => {
+                                toggle_row(&row);
+                                restore_side_hover(h);
+                            }
                             FavRelease::Open => {
                                 // The accent wash is selection, not hover. Clear it before the pane navigates.
                                 app(|a| a.side_sel = fav_sel_after_release(FavRelease::Open, a.side_sel));
@@ -1562,6 +1699,9 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_SYSKEYDOWN => {
                 let vk = wp.0 as u16;
+                if fav_key_shows_focus(vk) {
+                    fav_focus_cue(h, true);
+                }
                 let down = |k: VIRTUAL_KEY| GetKeyState(k.0 as i32) < 0;
                 if fav_step(vk, down(VK_CONTROL), down(VK_MENU), down(VK_SHIFT)).is_none() || app(|a| a.side_drag.is_some()) {
                     return DefWindowProcW(h, msg, wp, lp);
@@ -1576,7 +1716,9 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_RBUTTONDOWN => {
                 // Left click focuses the panel. Right click did not, so F2 after the menu
                 // hit the file list. Focus before the menu opens; TrackPopupMenu restores it.
+                // The mark stays hidden: this SetFocus is for the key, not a keyboard cue.
                 hide_side_fav_tip();
+                fav_focus_cue(h, false);
                 let (_x, y) = xy(lp);
                 _ = SetFocus(Some(h));
                 if let Some(i) = row_at(y) {
@@ -1587,6 +1729,7 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_RBUTTONUP => {
                 // The menu opens at the pointer. The tip would sit on top of it.
                 hide_side_fav_tip();
+                fav_focus_cue(h, false);
                 let (x, y) = xy(lp);
                 let i = row_at(y);
                 if let Some(i) = i {
@@ -1599,6 +1742,9 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_KEYDOWN => {
                 let vk = wp.0 as u16;
+                if fav_key_shows_focus(vk) {
+                    fav_focus_cue(h, true);
+                }
                 {
                     match VIRTUAL_KEY(vk) {
                         VK_DELETE => {
@@ -2049,7 +2195,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::{
-        fav_hover_cursor, fav_hover_paints, fav_leave_paints, fav_panel_draws, fav_panel_focus_frame, fav_panel_focus_rgb, fav_panel_group_on_accent, fav_panel_row_fill, fav_release, fav_row_at, fav_row_height, fav_sel_after_release, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text,
+        fav_hover_after_overlay, fav_hover_cursor, fav_hover_paints, fav_leave_paints, fav_panel_draws, fav_panel_focus_frame, fav_panel_focus_rgb, fav_panel_group_on_accent, fav_panel_row_fill, fav_release, fav_row_at, fav_row_height, fav_sel_after_release, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text, fav_uis_hide_focus,
         mark_rows, FavCursor, FavRelease, FavRow, FavTipAct, RowKind,
     };
     use crate::{fav_end_gap_px, fav_in_end_gap, fav_list_extent, fav_list_max_scroll, fav_root_end_hit};
@@ -2236,15 +2382,17 @@ mod tests {
             assert!(fav_panel_group_on_accent(false, true));
             assert_eq!(crate::fav_group_icon_ink(accent, fav_panel_group_on_accent(true, false)), accent);
             assert_eq!(crate::fav_group_icon_ink(accent, fav_panel_group_on_accent(false, true)), crate::on_color(accent));
-            // Focused key target: a palette line, not an accent fill. Gone when the panel is not focused,
+            // Focused key target with the cue showing: a palette line, not an accent fill.
+            // Gone when the panel is not focused, when the mouse has hidden the cue,
             // and not drawn on top of a drop-into wash.
             assert_eq!(fav_panel_focus_rgb(dark), pal.line);
             assert_ne!(fav_panel_focus_rgb(dark), old_sel);
             assert!(fav_panel_focus_rgb(dark) <= 0x00FF_FFFF);
-            assert!(fav_panel_focus_frame(true, true, false));
-            assert!(!fav_panel_focus_frame(false, true, false));
-            assert!(!fav_panel_focus_frame(true, false, false));
-            assert!(!fav_panel_focus_frame(true, true, true));
+            assert!(fav_panel_focus_frame(true, true, false, false));
+            assert!(!fav_panel_focus_frame(false, true, false, false));
+            assert!(!fav_panel_focus_frame(true, false, false, false));
+            assert!(!fav_panel_focus_frame(true, true, true, false));
+            assert!(!fav_panel_focus_frame(true, true, false, true));
         }
         let src = include_str!("favpanel.rs");
         let start = src.find("pub(crate) unsafe fn paint_side").expect("paint_side");
@@ -2257,6 +2405,29 @@ mod tests {
         assert!(!paint.contains("blend(accent, side_ground(), 0.16)"));
     }
 
+
+    #[test]
+    fn focus_mark_hides_with_the_mouse_and_hover_returns_only_on_the_panel() {
+        use windows::Win32::UI::WindowsAndMessaging::{UISF_HIDEACCEL, UISF_HIDEFOCUS, UIS_CLEAR, UIS_INITIALIZE, UIS_SET};
+        // Cue hidden: no frame, even with focus, a selected row, and no drop-into.
+        assert!(!fav_panel_focus_frame(true, true, false, true));
+        assert!(fav_panel_focus_frame(true, true, false, false));
+        assert!(!fav_panel_focus_frame(false, true, false, false));
+        assert!(!fav_panel_focus_frame(true, false, false, false));
+        assert!(!fav_panel_focus_frame(true, true, true, false));
+        // Only the focus flag moves. An accelerator update must not show or hide the mark.
+        assert!(fav_uis_hide_focus(UIS_SET, UISF_HIDEFOCUS, false));
+        assert!(!fav_uis_hide_focus(UIS_CLEAR, UISF_HIDEFOCUS, true));
+        assert!(!fav_uis_hide_focus(UIS_SET, UISF_HIDEACCEL, false));
+        assert!(fav_uis_hide_focus(UIS_CLEAR, UISF_HIDEACCEL, true));
+        assert!(fav_uis_hide_focus(UIS_INITIALIZE, UISF_HIDEFOCUS, true));
+        assert!(!fav_uis_hide_focus(UIS_INITIALIZE, UISF_HIDEFOCUS, false));
+        // After a menu or a dialog: the row under the pointer, or nothing once it has left.
+        assert_eq!(fav_hover_after_overlay(true, Some(3)), Some(3));
+        assert_eq!(fav_hover_after_overlay(true, None), None);
+        assert_eq!(fav_hover_after_overlay(false, Some(3)), None);
+        assert_eq!(fav_hover_after_overlay(false, None), None);
+    }
 
     #[test]
     fn a_leave_that_is_still_inside_the_panel_does_not_paint_or_rearm_tracking() {
