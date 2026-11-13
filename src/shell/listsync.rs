@@ -13,6 +13,11 @@
 // stale is refreshed, and the top row, focus, and surviving selection are put back.
 //
 // A UNC or mapped share is not enumerated and not refreshed here.
+//
+// A shell label edit (F2, new folder, new file) pauses the check. The drift
+// waits in `EditHold`, and one compare runs after the edit closes. The Refresh
+// that follows a create is an echo for at least `CAP_MS`, so a late
+// `SHCNE_UPDATEDIR` does not start a second burst.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -74,6 +79,19 @@ impl Drift {
 /// A directory event that is only the echo of our own refresh must not arm another one.
 pub(crate) fn keep_note(kind: ShellNote, echo: bool) -> bool {
     !(echo && kind == ShellNote::Dir)
+}
+
+/// How long `SHCNE_UPDATEDIR` counts as the echo of our own Refresh.
+/// Listsync's Refresh keeps [`ECHO_MS`]. Creating a folder or file refreshes before the
+/// rename box opens, and the shell can deliver that directory update about two seconds
+/// later, so that path stays an echo for at least [`CAP_MS`].
+pub(crate) fn echo_window_ms(own_create: bool) -> u64 {
+    if own_create { CAP_MS } else { ECHO_MS }
+}
+
+/// `true` while a marked echo has not expired. Same cutoff as the echo list (`until > now`).
+pub(crate) fn echo_live(until_ms: u64, now: u64) -> bool {
+    until_ms > now
 }
 
 /// What one shell event says to compare.
@@ -394,6 +412,62 @@ impl Grace {
     }
 }
 
+/// What a due compare does with a shell label edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DueGate {
+    /// No label edit: compare now. Nothing is stored.
+    Run(Drift),
+    /// Label edit is open. Compare, Refresh, calm_selection, and grace all wait.
+    Held,
+}
+
+/// Drift parked until the shell label edit closes. The same folder merges.
+/// This is not the hidden-tab queue (`Pending` / `pending`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EditHold {
+    slots: Vec<(String, Drift)>,
+}
+
+impl EditHold {
+    pub(crate) fn note(&mut self, key: &str, drift: Drift) {
+        if key.is_empty() {
+            return;
+        }
+        if let Some(slot) = self.slots.iter_mut().find(|(k, _)| k == key) {
+            slot.1 = slot.1.merge(drift);
+            return;
+        }
+        self.slots.push((key.to_string(), drift));
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    pub(crate) fn take(&mut self) -> Vec<(String, Drift)> {
+        std::mem::take(&mut self.slots)
+    }
+}
+
+/// A due folder while `editing` is the pane's shell label edit.
+/// Held drift is not compared. A folder that is not being edited is returned and not stored.
+pub(crate) fn gate_due(hold: &mut EditHold, key: &str, drift: Drift, editing: bool) -> DueGate {
+    if editing && !key.is_empty() {
+        hold.note(key, drift);
+        return DueGate::Held;
+    }
+    DueGate::Run(drift)
+}
+
+/// Timer poll. Still editing, or nothing held: nothing to compare. Edit finished: the queue, once.
+pub(crate) fn poll_edit_hold(hold: &mut EditHold, editing: bool) -> Vec<(String, Drift)> {
+    if editing || hold.is_empty() {
+        Vec::new()
+    } else {
+        hold.take()
+    }
+}
+
 /// Posts the compare when dropped. Built on the worker so every return, including
 /// cancel and a panic the worker catches, still reaches the UI thread.
 pub(crate) struct RefreshLater {
@@ -497,6 +571,17 @@ fn pending() -> &'static Mutex<Vec<Pending>> {
     &PENDING
 }
 
+/// Label-edit holds for one main window. Not the hidden-tab queue.
+struct EditWatch {
+    hwnd: isize,
+    queue: EditHold,
+}
+
+fn held() -> &'static Mutex<EditWatch> {
+    static HELD: Mutex<EditWatch> = Mutex::new(EditWatch { hwnd: 0, queue: EditHold { slots: Vec::new() } });
+    &HELD
+}
+
 fn restores() -> &'static Mutex<Vec<Restore>> {
     static RESTORES: Mutex<Vec<Restore>> = Mutex::new(Vec::new());
     &RESTORES
@@ -582,12 +667,12 @@ fn take_job(id: u64) -> Option<Vec<(String, Drift)>> {
 
 fn is_echo(key: &str, now: u64) -> bool {
     let mut g = guard(echoes());
-    g.retain(|e| e.until_ms > now);
+    g.retain(|e| echo_live(e.until_ms, now));
     g.iter().any(|e| e.key == key)
 }
 
-fn mark_echo(keys: &[String], now: u64) {
-    let until = now.saturating_add(ECHO_MS);
+fn mark_echo(keys: &[String], now: u64, window_ms: u64) {
+    let until = now.saturating_add(window_ms);
     let mut g = guard(echoes());
     for k in keys {
         if k.is_empty() {
@@ -599,7 +684,17 @@ fn mark_echo(keys: &[String], now: u64) {
             g.push(Echo { key: k.clone(), until_ms: until });
         }
     }
-    g.retain(|e| e.until_ms > now);
+    g.retain(|e| echo_live(e.until_ms, now));
+}
+
+/// The folder Refresh that follows creating a file or folder.
+/// Its `SHCNE_UPDATEDIR` can arrive after [`ECHO_MS`], still inside the burst cap.
+pub(crate) fn note_own_refresh(path: &str) {
+    let key = norm_key(path);
+    if key.is_empty() {
+        return;
+    }
+    mark_echo(std::slice::from_ref(&key), mono_ms(), echo_window_ms(true));
 }
 
 fn refreshing_pane(pane: isize) -> bool {
@@ -691,6 +786,13 @@ pub(crate) unsafe fn disarm(hwnd: HWND) {
         found
     };
     guard(restores()).retain(|r| r.hwnd != hwnd.0 as isize);
+    {
+        let mut h = guard(held());
+        if h.hwnd == hwnd.0 as isize {
+            let _ = h.queue.take();
+            h.hwnd = 0;
+        }
+    }
     if cookie != 0 {
         let _ = SHChangeNotifyDeregister(cookie);
     }
@@ -740,6 +842,7 @@ pub(crate) unsafe fn on_timer(hwnd: HWND) {
     };
     consider(hwnd, &due, false);
     consider(hwnd, &again, true);
+    release_edit(hwnd);
     poll_restores(hwnd);
     arm_list_timer(hwnd);
 }
@@ -772,7 +875,11 @@ fn soonest(hwnd: HWND, now: u64) -> Option<u64> {
         })
     };
     let restore = guard(restores()).iter().any(|r| r.hwnd == hwnd.0 as isize).then_some(RESTORE_MS);
-    scheduled.flatten().into_iter().chain(restore).min()
+    let edit = {
+        let h = guard(held());
+        (!h.queue.is_empty() && h.hwnd == hwnd.0 as isize).then_some(RESTORE_MS)
+    };
+    scheduled.flatten().into_iter().chain(restore).chain(edit).min()
 }
 
 fn drift_for(folders: &[(String, Drift)], path: &str) -> Drift {
@@ -799,6 +906,20 @@ unsafe fn consider(hwnd: HWND, folders: &[(String, Drift)], again: bool) {
             continue;
         }
         let drift = drift_for(folders, &v.path);
+        // The pane HWND is the parent, so it does not see the rename box.
+        // Look under this pane's shell view. While that box is open, do not
+        // compare: Refresh and calm_selection both close it. The held drift
+        // is checked once, with grace, after the edit ends.
+        let editing = if hwnd.0.is_null() {
+            false
+        } else if let Some(i) = v.slot {
+            pane_shell_label_open(i)
+        } else {
+            false
+        };
+        if hold_due(hwnd, &norm_key(&v.path), drift, editing) {
+            continue;
+        }
         match look_at(&v, show_hidden, drift) {
             Look::Blind { view, disk } => {
                 write_log(&check_line(&v.path, false, view, disk, false));
@@ -830,6 +951,51 @@ unsafe fn consider(hwnd: HWND, folders: &[(String, Drift)], again: bool) {
     if touched {
         update_status();
     }
+}
+
+/// `true` when the due folder was parked on the label-edit queue.
+fn hold_due(hwnd: HWND, key: &str, drift: Drift, editing: bool) -> bool {
+    let mut h = guard(held());
+    if gate_due(&mut h.queue, key, drift, editing) != DueGate::Held {
+        return false;
+    }
+    h.hwnd = hwnd.0 as isize;
+    true
+}
+
+unsafe fn release_edit(hwnd: HWND) {
+    let keys = {
+        let h = guard(held());
+        if h.hwnd != hwnd.0 as isize || h.queue.is_empty() {
+            return;
+        }
+        h.queue.slots.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()
+    };
+    let editing = edit_open_for(&keys);
+    let released = {
+        let mut h = guard(held());
+        if h.hwnd != hwnd.0 as isize {
+            return;
+        }
+        poll_edit_hold(&mut h.queue, editing)
+    };
+    if !released.is_empty() {
+        consider(hwnd, &released, false);
+    }
+}
+
+unsafe fn edit_open_for(keys: &[String]) -> bool {
+    for v in views_for(keys) {
+        if !v.sited {
+            continue;
+        }
+        if let Some(i) = v.slot {
+            if pane_shell_label_open(i) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn arm_grace(hwnd: HWND, key: &str, drift: Drift) {
@@ -1187,7 +1353,7 @@ unsafe fn child_name(sf: &IShellFolder, pidl: *const ITEMIDLIST) -> String {
 
 unsafe fn start_refresh(hwnd: HWND, v: &View, plan: &KeepPlan, before: i32, view_n: i64, disk_n: i64) {
     let key = norm_key(&v.path);
-    mark_echo(std::slice::from_ref(&key), mono_ms());
+    mark_echo(std::slice::from_ref(&key), mono_ms(), echo_window_ms(false));
     let Ok(sv) = v.eb.GetCurrentView::<IShellView>() else {
         write_log(&check_line(&v.path, true, view_n, disk_n, false));
         note_status(v.slot);
@@ -1714,5 +1880,70 @@ mod tests {
         let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(names.len(), 1, "only the one rotated file is kept");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn label_edit_holds_a_due_compare() {
+        let mut h = EditHold::default();
+        assert_eq!(gate_due(&mut h, r"c:\work", Drift::Arrived, true), DueGate::Held);
+        assert_eq!(h.take(), due(&[(r"c:\work", Drift::Arrived)]));
+    }
+
+    #[test]
+    fn label_edit_hold_merges_drift_and_arrived_wins() {
+        let mut h = EditHold::default();
+        assert_eq!(gate_due(&mut h, r"c:\work", Drift::Gone, true), DueGate::Held);
+        assert_eq!(gate_due(&mut h, r"c:\work", Drift::Arrived, true), DueGate::Held);
+        assert_eq!(h.take(), due(&[(r"c:\work", Drift::Arrived)]));
+    }
+
+    #[test]
+    fn label_edit_hold_is_taken_once_when_the_edit_ends() {
+        let mut h = EditHold::default();
+        gate_due(&mut h, r"c:\work", Drift::Arrived, true);
+        assert_eq!(poll_edit_hold(&mut h, false), due(&[(r"c:\work", Drift::Arrived)]));
+        assert!(h.is_empty());
+        assert!(poll_edit_hold(&mut h, false).is_empty());
+    }
+
+    #[test]
+    fn label_edit_hold_stays_while_the_edit_continues() {
+        let mut h = EditHold::default();
+        gate_due(&mut h, r"c:\work", Drift::Gone, true);
+        assert!(poll_edit_hold(&mut h, true).is_empty());
+        assert_eq!(poll_edit_hold(&mut h, false), due(&[(r"c:\work", Drift::Gone)]));
+    }
+
+    #[test]
+    fn label_edit_hold_is_empty_when_nothing_is_waiting() {
+        let mut h = EditHold::default();
+        assert!(poll_edit_hold(&mut h, false).is_empty());
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn label_edit_due_without_an_edit_compares_now() {
+        let mut h = EditHold::default();
+        assert_eq!(gate_due(&mut h, r"c:\work", Drift::Gone, false), DueGate::Run(Drift::Gone));
+        assert!(h.is_empty());
+        assert!(poll_edit_hold(&mut h, false).is_empty());
+    }
+
+    #[test]
+    fn label_edit_create_echo_lasts_at_least_the_burst_cap() {
+        assert!(echo_window_ms(true) >= CAP_MS);
+        assert_eq!(echo_window_ms(false), ECHO_MS);
+        assert_eq!(ECHO_MS, QUIET_MS);
+        let now = 50u64;
+        let until = now.saturating_add(echo_window_ms(true));
+        let during = now + CAP_MS - 1;
+        assert!(echo_live(until, during));
+        assert!(!keep_note(ShellNote::Dir, echo_live(until, during)));
+        assert_eq!(shell_note(SHCNE_CREATE.0), Some(ShellNote::Child));
+        assert_eq!(shell_note(SHCNE_MKDIR.0), Some(ShellNote::Child));
+        assert!(keep_note(ShellNote::Child, echo_live(until, during)));
+        let after = now.saturating_add(echo_window_ms(true));
+        assert!(!echo_live(until, after));
+        assert!(keep_note(ShellNote::Dir, echo_live(until, after)));
     }
 }

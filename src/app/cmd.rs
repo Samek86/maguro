@@ -58,6 +58,9 @@ pub(crate) unsafe fn new_file(i: usize) {
     let wide: Vec<u16> = full.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
     SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, Some(wide.as_ptr() as _), None);
     if let Some(sv) = view_of::<IShellView>(i) {
+        // The shell can echo this Refresh as SHCNE_UPDATEDIR about two seconds later.
+        // Mark it first so that echo does not arm another Refresh over the rename box.
+        crate::shell::listsync::note_own_refresh(&dir);
         _ = sv.Refresh();
     }
     if let Ok(mut p) = PENDING_FILE.lock() {
@@ -208,8 +211,17 @@ unsafe fn label_edit_hwnd(svh: HWND) -> HWND {
     visible_label_edit(svh, 0)
 }
 
-unsafe fn label_edit_open(svh: HWND) -> bool {
+pub(crate) unsafe fn label_edit_open(svh: HWND) -> bool {
     !label_edit_hwnd(svh).0.is_null()
+}
+
+/// A shell rename box is open in this pane.
+/// [`pane_label_editing`] only matches the edit or the items window, so the pane
+/// HWND (their parent) is not enough. This looks under the shell view.
+pub(crate) unsafe fn pane_shell_label_open(pane: usize) -> bool {
+    let Some(sv) = view_of::<IShellView>(pane) else { return false };
+    let svh = sv.GetWindow().unwrap_or_default();
+    !svh.0.is_null() && label_edit_open(svh)
 }
 
 unsafe fn shell_label_edit(pane: usize) -> HWND {
