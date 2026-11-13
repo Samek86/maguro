@@ -39,7 +39,7 @@ const MIGRATED: &[(&str, &[&str])] = &[
         &[
             "paint_window(",
             "paint_field(",
-            "paint_segment(",
+            "paint_segment_group(",
             "paint_check(",
             "paint_button(",
             "color_field_edit(",
@@ -51,7 +51,7 @@ const MIGRATED: &[(&str, &[&str])] = &[
         &[
             "paint_window(",
             "paint_field(",
-            "paint_segment(",
+            "paint_segment_group(",
             "paint_check(",
             "paint_button(",
             "paint_meta(",
@@ -68,7 +68,7 @@ const MIGRATED: &[(&str, &[&str])] = &[
         "src/ui/iconpick.rs",
         &[
             "paint_window(",
-            "paint_segment(",
+            "paint_segment_group(",
             "paint_button(",
             "paint_section_header(",
             "style_popup_chrome(",
@@ -132,7 +132,7 @@ const MIGRATED: &[(&str, &[&str])] = &[
             "paint_wash(",
             "paint_button(",
             "paint_check(",
-            "paint_segment(",
+            "paint_segment_group(",
             "paint_label(",
             "paint_meta(",
             "paint_section_header(",
@@ -424,6 +424,23 @@ mod tests {
             for needle in *needles {
                 assert!(code.contains(needle), "{rel} no longer calls {needle}");
             }
+        }
+    }
+
+    #[test]
+    fn segment_painter_uses_tokens_not_raw_gdi_colours() {
+        let code = read_code("src/ui/segment.rs");
+        let hits = banned_hits(&code);
+        assert!(hits.is_empty(), "segment.rs paints with raw GDI: {hits:?}");
+        assert!(code.contains("paint_segment_group("));
+        assert!(code.contains("tokens_for("));
+        assert!(code.contains("segment_border("));
+        let callers = ["src/ui/itemdlg.rs", "src/ui/srvdlg.rs", "src/ui/iconpick.rs", "src/settings/win.rs"];
+        for rel in callers {
+            let code = read_code(rel);
+            assert!(code.contains("paint_segment_group("), "{rel}");
+            let stripped = code.replace("paint_segment_group(", "");
+            assert!(!stripped.contains("paint_segment("), "{rel} still calls paint_segment");
         }
     }
 }
