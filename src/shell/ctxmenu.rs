@@ -60,7 +60,7 @@ use crate::imports::*;
 use crate::app::*;
 use crate::i18n::tr;
 
-/// `CMINVOKECOMMANDINFOEX.lpVerbW` is a Unicode verb. The windows crate no longer exports the flag.
+/// `CMINVOKECOMMANDINFOEX` Unicode members (`lpVerbW`, `lpDirectoryW`). The windows crate no longer exports the flag.
 const CMIC_MASK_UNICODE: u32 = 0x0000_4000;
 
 pub(crate) const FILE: u8 = 1;
@@ -2442,7 +2442,95 @@ unsafe fn forward_one(cm: &IContextMenu, umsg: u32, wparam: WPARAM, lparam: LPAR
     Ok(())
 }
 
+/// One part invoke runs in `dir`. The process directory goes back afterwards.
+struct WorkDir {
+    prev: Option<std::path::PathBuf>,
+}
+
+impl WorkDir {
+    fn enter(dir: &str) -> Self {
+        let prev = std::env::current_dir().ok();
+        if std::env::set_current_dir(dir).is_ok() {
+            Self { prev }
+        } else {
+            Self { prev: None }
+        }
+    }
+}
+
+impl Drop for WorkDir {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            let _ = std::env::set_current_dir(prev);
+        }
+    }
+}
+
+unsafe fn z_wide(p: PCWSTR) -> String {
+    if p.0.is_null() {
+        return String::new();
+    }
+    let mut n = 0usize;
+    while *p.0.add(n) != 0 {
+        n += 1;
+        if n > 32_768 {
+            break;
+        }
+    }
+    String::from_utf16_lossy(std::slice::from_raw_parts(p.0, n))
+}
+
+unsafe fn z_ansi(p: PCSTR) -> String {
+    if p.0.is_null() {
+        return String::new();
+    }
+    let mut n = 0usize;
+    while *p.0.add(n) != 0 {
+        n += 1;
+        if n > 32_768 {
+            break;
+        }
+    }
+    if n == 0 {
+        return String::new();
+    }
+    let bytes = std::slice::from_raw_parts(p.0, n);
+    let flags = windows::Win32::Globalization::MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+    let need = windows::Win32::Globalization::MultiByteToWideChar(0, flags, bytes, None);
+    if need <= 0 {
+        return String::new();
+    }
+    let mut wide = vec![0u16; need as usize];
+    let got = windows::Win32::Globalization::MultiByteToWideChar(0, flags, bytes, Some(&mut wide));
+    if got <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&wide[..got as usize])
+}
+
+/// Folder from the caller's invoke info. A wide directory wins; an ANSI one is used when the wide
+/// string is null or empty. A missing path, an empty string, or a file stays unset.
+unsafe fn invoke_work_dir(ici: &CMINVOKECOMMANDINFO) -> Option<String> {
+    let mut text = String::new();
+    if ici.cbSize >= std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32 {
+        let ex = &*(ici as *const CMINVOKECOMMANDINFO as *const CMINVOKECOMMANDINFOEX);
+        text = z_wide(ex.lpDirectoryW);
+    }
+    if text.is_empty() {
+        text = z_ansi(ici.lpDirectory);
+    }
+    if text.is_empty() || !Path::new(&text).is_dir() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 unsafe fn invoke_part(cm: &IContextMenu, local: u32, ici: &CMINVOKECOMMANDINFO) -> Result<()> {
+    let dir = invoke_work_dir(ici);
+    let work_wide = dir.as_ref().map(|d| d.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>());
+    let _cwd = dir.as_deref().map(WorkDir::enter);
+    let directory_w = work_wide.as_ref().map(|w| PCWSTR(w.as_ptr())).unwrap_or(PCWSTR::null());
     let verb = part_verb(cm, local as usize);
     if !verb.is_empty() {
         let mut wide: Vec<u16> = verb.encode_utf16().chain(std::iter::once(0)).collect();
@@ -2457,12 +2545,33 @@ unsafe fn invoke_part(cm: &IContextMenu, local: u32, ici: &CMINVOKECOMMANDINFO) 
             nShow: ici.nShow,
             dwHotKey: ici.dwHotKey,
             lpVerbW: PCWSTR(wide.as_mut_ptr()),
+            lpDirectoryW: directory_w,
             ..Default::default()
         };
         if cm.InvokeCommand(&ex as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO).is_ok() {
+            let _ = (&mut ex, &mut wide, &mut ansi, &work_wide);
             return Ok(());
         }
         let _ = (&mut ex, &mut wide, &mut ansi);
+    }
+    if work_wide.is_some() {
+        let ex = CMINVOKECOMMANDINFOEX {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            fMask: ici.fMask | CMIC_MASK_UNICODE,
+            hwnd: ici.hwnd,
+            lpVerb: PCSTR(local as usize as *const u8),
+            lpParameters: ici.lpParameters,
+            lpDirectory: ici.lpDirectory,
+            nShow: ici.nShow,
+            dwHotKey: ici.dwHotKey,
+            hIcon: ici.hIcon,
+            lpVerbW: PCWSTR(local as usize as *const u16),
+            lpDirectoryW: directory_w,
+            ..Default::default()
+        };
+        let hr = cm.InvokeCommand(&ex as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO);
+        let _ = (&ex, &work_wide);
+        return hr;
     }
     let mut c = *ici;
     c.lpVerb = PCSTR(local as usize as *const u8);
@@ -4485,5 +4594,296 @@ mod utf8_boundary_tests {
         assert!(super::parse_guid("한글폴더").is_none());
         assert!(super::parse_guid("😀あ").is_none());
         assert!(super::parse_guid("abcdサ").is_none());
+    }
+}
+
+#[cfg(test)]
+mod invoke_part_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use windows::core::implement;
+
+    struct Hit {
+        ex: bool,
+        dir: String,
+        mask: u32,
+        cwd: PathBuf,
+        verb_ptr: usize,
+        verb_w: String,
+        verb_w_ptr: usize,
+    }
+
+    fn read_w(p: PCWSTR) -> String {
+        if p.0.is_null() {
+            return String::new();
+        }
+        unsafe {
+            let mut n = 0usize;
+            while *p.0.add(n) != 0 {
+                n += 1;
+                if n > 4096 {
+                    break;
+                }
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(p.0, n))
+        }
+    }
+
+    #[implement(IContextMenu)]
+    struct PartProbe {
+        verb: String,
+        fail_named: bool,
+        hits: Arc<Mutex<Vec<Hit>>>,
+    }
+
+    impl IContextMenu_Impl for PartProbe_Impl {
+        fn QueryContextMenu(&self, _: HMENU, _: u32, _: u32, _: u32, _: u32) -> HRESULT {
+            E_NOTIMPL
+        }
+
+        fn InvokeCommand(&self, pici: *const CMINVOKECOMMANDINFO) -> Result<()> {
+            let hit = unsafe {
+                let ici = &*pici;
+                let ex = ici.cbSize >= std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32;
+                let (dir, verb_w, verb_w_ptr) = if ex {
+                    let e = &*(pici as *const CMINVOKECOMMANDINFOEX);
+                    let verb_w_ptr = e.lpVerbW.0 as usize;
+                    // An offset below 0x10000 is MAKEINTRESOURCE, not a string.
+                    let verb_w = if verb_w_ptr < 0x10000 { String::new() } else { read_w(e.lpVerbW) };
+                    (read_w(e.lpDirectoryW), verb_w, verb_w_ptr)
+                } else {
+                    (String::new(), String::new(), 0)
+                };
+                Hit {
+                    ex,
+                    dir,
+                    mask: ici.fMask,
+                    cwd: std::env::current_dir().unwrap_or_default(),
+                    verb_ptr: ici.lpVerb.0 as usize,
+                    verb_w,
+                    verb_w_ptr,
+                }
+            };
+            let mut hits = self.hits.lock().unwrap();
+            let first = hits.is_empty();
+            hits.push(hit);
+            drop(hits);
+            if self.fail_named && first { Err(E_FAIL.into()) } else { Ok(()) }
+        }
+
+        fn GetCommandString(&self, _: usize, utype: u32, _: *const u32, pszname: PSTR, cchmax: u32) -> Result<()> {
+            if self.verb.is_empty() || utype & GCS_VERBW == 0 {
+                return Err(E_NOTIMPL.into());
+            }
+            unsafe { write_verb(pszname, cchmax, utype, &self.verb) };
+            Ok(())
+        }
+    }
+
+    struct Back(PathBuf);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
+    fn folder(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("maguro-part-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn probe(verb: &str, fail_named: bool) -> (IContextMenu, Arc<Mutex<Vec<Hit>>>) {
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let cm: IContextMenu = PartProbe { verb: verb.to_string(), fail_named, hits: hits.clone() }.into();
+        (cm, hits)
+    }
+
+    fn as_ici(ex: &CMINVOKECOMMANDINFOEX) -> &CMINVOKECOMMANDINFO {
+        unsafe { &*(ex as *const CMINVOKECOMMANDINFOEX as *const CMINVOKECOMMANDINFO) }
+    }
+
+    #[test]
+    fn named_verb_passes_a_unicode_folder_and_restores_cwd() {
+        let dir = folder("サンプル");
+        let shown = dir.to_str().unwrap().to_string();
+        let w = wide(&shown);
+        let before = std::env::current_dir().unwrap();
+        let _back = Back(before.clone());
+        let ex = CMINVOKECOMMANDINFOEX {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            fMask: CMIC_MASK_SHIFT_DOWN,
+            lpDirectoryW: PCWSTR(w.as_ptr()),
+            ..Default::default()
+        };
+        let (cm, hits) = probe("open", false);
+        unsafe { invoke_part(&cm, 7, as_ici(&ex)).unwrap() };
+        assert_eq!(std::env::current_dir().unwrap(), before);
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].ex);
+        assert_eq!(hits[0].dir, shown);
+        assert_eq!(hits[0].mask & CMIC_MASK_UNICODE, CMIC_MASK_UNICODE);
+        assert_eq!(hits[0].mask & CMIC_MASK_SHIFT_DOWN, CMIC_MASK_SHIFT_DOWN);
+        assert_eq!(hits[0].cwd, dir);
+        assert_eq!(hits[0].verb_w, "open");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn offset_fallback_passes_an_ansi_folder_and_restores_cwd() {
+        let dir = folder("ansi");
+        let shown = dir.to_str().unwrap().to_string();
+        let ansi: Vec<u8> = shown.bytes().chain(std::iter::once(0)).collect();
+        let before = std::env::current_dir().unwrap();
+        let _back = Back(before.clone());
+        let ici = CMINVOKECOMMANDINFO {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+            lpDirectory: PCSTR(ansi.as_ptr()),
+            ..Default::default()
+        };
+        let (cm, hits) = probe("", false);
+        unsafe { invoke_part(&cm, 42, &ici).unwrap() };
+        assert_eq!(std::env::current_dir().unwrap(), before);
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].ex);
+        assert_eq!(hits[0].dir, shown);
+        assert_eq!(hits[0].mask & CMIC_MASK_UNICODE, CMIC_MASK_UNICODE);
+        assert_eq!(hits[0].cwd, dir);
+        assert_eq!(hits[0].verb_ptr, 42);
+        assert_eq!(hits[0].verb_w_ptr, 42);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wide_directory_wins_and_an_empty_wide_uses_ansi() {
+        let wide_dir = folder("wide-サンプル");
+        let ansi_dir = folder("ansi-only");
+        let wide_shown = wide_dir.to_str().unwrap().to_string();
+        let ansi_shown = ansi_dir.to_str().unwrap().to_string();
+        let w = wide(&wide_shown);
+        let ansi: Vec<u8> = ansi_shown.bytes().chain(std::iter::once(0)).collect();
+        let other: Vec<u8> = b"C:\\no-such-maguro-invoke\\ansi\0".to_vec();
+        let before = std::env::current_dir().unwrap();
+        let _back = Back(before.clone());
+        let (cm, hits) = probe("open", false);
+
+        let both = CMINVOKECOMMANDINFOEX {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            lpDirectory: PCSTR(other.as_ptr()),
+            lpDirectoryW: PCWSTR(w.as_ptr()),
+            ..Default::default()
+        };
+        unsafe { invoke_part(&cm, 1, as_ici(&both)).unwrap() };
+
+        let empty = [0u16];
+        let ansi_only = CMINVOKECOMMANDINFOEX {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            lpDirectory: PCSTR(ansi.as_ptr()),
+            lpDirectoryW: PCWSTR(empty.as_ptr()),
+            ..Default::default()
+        };
+        unsafe { invoke_part(&cm, 1, as_ici(&ansi_only)).unwrap() };
+
+        assert_eq!(std::env::current_dir().unwrap(), before);
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].dir, wide_shown);
+        assert_eq!(hits[0].cwd, wide_dir);
+        assert_eq!(hits[0].mask & CMIC_MASK_UNICODE, CMIC_MASK_UNICODE);
+        assert_eq!(hits[1].dir, ansi_shown);
+        assert_eq!(hits[1].cwd, ansi_dir);
+        assert_eq!(hits[1].mask & CMIC_MASK_UNICODE, CMIC_MASK_UNICODE);
+        let _ = std::fs::remove_dir_all(&wide_dir);
+        let _ = std::fs::remove_dir_all(&ansi_dir);
+    }
+
+    #[test]
+    fn a_missing_or_file_directory_is_not_set_and_cwd_stays() {
+        let before = std::env::current_dir().unwrap();
+        let _back = Back(before.clone());
+        let root = folder("not-a-dir");
+        let file = root.join("note.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let missing = wide(r"C:\no-such-maguro-invoke\part");
+        let file_w = wide(file.to_str().unwrap());
+        let empty = [0u16];
+        let (cm, hits) = probe("open", false);
+        for dir_w in [PCWSTR::null(), PCWSTR(empty.as_ptr()), PCWSTR(missing.as_ptr()), PCWSTR(file_w.as_ptr())] {
+            let ex = CMINVOKECOMMANDINFOEX {
+                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+                lpDirectoryW: dir_w,
+                ..Default::default()
+            };
+            unsafe { invoke_part(&cm, 1, as_ici(&ex)).unwrap() };
+        }
+        let ici = CMINVOKECOMMANDINFO {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+            ..Default::default()
+        };
+        let (cm_off, hits_off) = probe("", false);
+        unsafe { invoke_part(&cm_off, 5, &ici).unwrap() };
+        assert_eq!(std::env::current_dir().unwrap(), before);
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 4);
+        for h in hits.iter() {
+            assert!(h.dir.is_empty());
+            assert_eq!(h.cwd, before);
+            assert_eq!(h.mask & CMIC_MASK_UNICODE, CMIC_MASK_UNICODE);
+            assert_eq!(h.verb_w, "open");
+        }
+        let off = hits_off.lock().unwrap();
+        assert_eq!(off.len(), 1);
+        assert!(off[0].dir.is_empty());
+        assert_eq!(off[0].cwd, before);
+        assert_eq!(off[0].mask & CMIC_MASK_UNICODE, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn named_verb_failure_still_passes_the_unicode_folder_on_the_offset() {
+        let dir = folder("fallback-サンプル");
+        let shown = dir.to_str().unwrap().to_string();
+        let w = wide(&shown);
+        let before = std::env::current_dir().unwrap();
+        let _back = Back(before.clone());
+        let ex = CMINVOKECOMMANDINFOEX {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            lpDirectoryW: PCWSTR(w.as_ptr()),
+            ..Default::default()
+        };
+        let (cm, hits) = probe("explore", true);
+        unsafe { invoke_part(&cm, 9, as_ici(&ex)).unwrap() };
+        assert_eq!(std::env::current_dir().unwrap(), before);
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].dir, shown);
+        assert_eq!(hits[0].verb_w, "explore");
+        assert_eq!(hits[0].cwd, dir);
+        assert_eq!(hits[0].mask & CMIC_MASK_UNICODE, CMIC_MASK_UNICODE);
+        assert_eq!(hits[1].dir, shown);
+        assert_eq!(hits[1].cwd, dir);
+        assert_eq!(hits[1].mask & CMIC_MASK_UNICODE, CMIC_MASK_UNICODE);
+        assert_eq!(hits[1].verb_ptr, 9);
+        assert_eq!(hits[1].verb_w_ptr, 9);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn work_dir_puts_the_process_back() {
+        let dir = folder("cwd");
+        let before = std::env::current_dir().unwrap();
+        {
+            let _hold = super::WorkDir::enter(dir.to_str().unwrap());
+            assert_eq!(std::env::current_dir().unwrap(), dir);
+        }
+        assert_eq!(std::env::current_dir().unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
