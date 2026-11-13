@@ -15,6 +15,13 @@ pub(crate) fn logfont(face: &str, px: i32) -> LOGFONTW {
     lf
 }
 
+/// Body face at `dpi` for a test that needs a real dialog font. The caller deletes it.
+#[cfg(test)]
+pub(crate) fn test_body_font(dpi: i32) -> HFONT {
+    let px = (super::FONT_PX * dpi.max(96) / 96).max(1);
+    unsafe { CreateFontIndirectW(&logfont(ui_face(), px)) }
+}
+
 fn utf16_face(buf: &[u16]) -> String {
     let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len()).min(31);
     String::from_utf16_lossy(&buf[..n])
