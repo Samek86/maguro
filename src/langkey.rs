@@ -886,11 +886,12 @@ pub(crate) enum Key {
     CouldNotSavePassword,
     UpdateFailReason,
     IconList,
+    TurnOffBeforeUninstall,
 }
 
-pub(crate) const KEY_COUNT: usize = 881;
+pub(crate) const KEY_COUNT: usize = 882;
 
-const _: () = assert!((Key::IconList as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::TurnOffBeforeUninstall as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1774,6 +1775,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Could not save the password to Credential Manager.",
     "Reason: {reason}",
     "List",
+    "Turn this off before uninstalling or deleting Maguro, or folders will keep opening in the missing program.",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2659,4 +2661,5 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "could_not_save_password",
     "update_fail_reason",
     "icon_list",
+    "turn_off_before_uninstall",
 ];

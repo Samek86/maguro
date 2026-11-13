@@ -298,7 +298,9 @@ fn has(hay: &str, q: &str) -> bool {
 }
 
 fn card_hit(c: &Spec, q: &str) -> bool {
-    has(tx(c.title), q) || has(tx(c.desc), q)
+    has(tx(c.title), q)
+        || has(tx(c.desc), q)
+        || (c.ctl == Ctl::Toggle(TG_FOLDER) && has(tx(crate::Key::TurnOffBeforeUninstall), q))
 }
 
 fn key_hit_i(i: usize, q: &str) -> bool {
@@ -570,6 +572,8 @@ fn card_h(spec: &Spec, dpi: i32) -> i32 {
     } else if spec.ctl == Ctl::Adv || spec.ctl == Ctl::EvStatus || spec.ctl == Ctl::EvAct || spec.ctl == Ctl::WmStatus {
         sc(dpi, 84)
     } else if spec.ctl == Ctl::Toggle(TG_CLIP) && crate::cliphot::registration_notice().is_some() {
+        sc(dpi, 88)
+    } else if spec.ctl == Ctl::Toggle(TG_FOLDER) {
         sc(dpi, 88)
     } else if tx(spec.desc).is_empty() {
         sc(dpi, 48)
@@ -1301,6 +1305,59 @@ mod tests {
         assert_eq!(page, 0);
         assert!(hit(&geo(client(), &shot(page, "既定のフォルダーアプリとして使用"))));
         assert!(hit(&geo(client(), &shot(0, "特殊フォルダー"))));
+    }
+
+    #[test]
+    fn default_folder_app_warns_before_uninstall() {
+        let _lock = ui_lock();
+        let _keep = lang(0);
+        let folder = GEN.iter().find(|c| c.ctl == Ctl::Toggle(TG_FOLDER)).unwrap();
+        let plain = GEN.iter().find(|c| c.ctl == Ctl::Toggle(TG_SINGLE)).unwrap();
+        assert!(!tx(plain.desc).is_empty());
+        assert_eq!(card_h(plain, 96), 64);
+        assert!(card_h(folder, 96) > 64, "the uninstall note needs a taller card");
+        let laid = geo(client(), &shot(0, ""));
+        let h = laid.items.iter().find_map(|it| match it {
+            Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_FOLDER) => Some(c.rect.bottom - c.rect.top),
+            _ => None,
+        });
+        assert_eq!(h, Some(card_h(folder, 96)));
+        assert_eq!(
+            tx(crate::Key::TurnOffBeforeUninstall),
+            "Turn this off before uninstalling or deleting Maguro, or folders will keep opening in the missing program."
+        );
+        assert!(card_hit(folder, "uninstalling or deleting"));
+        let (anchor, page) = commit_search(2, 2, "uninstalling or deleting");
+        assert_eq!((anchor, page), (2, 0));
+        let g = geo(client(), &shot(page, "uninstalling or deleting"));
+        assert!(g.show[0]);
+        assert!(g.items.iter().any(|it| matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_FOLDER))));
+
+        crate::UI.store(1, Ordering::Relaxed);
+        assert_eq!(
+            tx(crate::Key::TurnOffBeforeUninstall),
+            "삭제 전에 끄세요. 끄지 않으면 없는 프로그램으로 폴더가 열립니다."
+        );
+        assert!(card_hit(folder, "삭제 전에 끄세요"));
+        let (_, page) = commit_search(2, 2, "삭제 전에 끄세요");
+        assert_eq!(page, 0);
+        assert!(geo(client(), &shot(page, "삭제 전에 끄세요"))
+            .items
+            .iter()
+            .any(|it| matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_FOLDER))));
+
+        crate::UI.store(2, Ordering::Relaxed);
+        assert_eq!(
+            tx(crate::Key::TurnOffBeforeUninstall),
+            "削除前にオフにしてください。オフにしないと無いプログラムでフォルダーが開きます。"
+        );
+        assert!(card_hit(folder, "削除前にオフ"));
+        let (_, page) = commit_search(2, 2, "削除前にオフ");
+        assert_eq!(page, 0);
+        assert!(geo(client(), &shot(page, "削除前にオフ"))
+            .items
+            .iter()
+            .any(|it| matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_FOLDER))));
     }
 
     #[test]

@@ -1089,6 +1089,14 @@ unsafe fn draw_card(dc: HDC, c: &CardItem, sn: &Snap, accent: u32, h: HWND) {
                 crate::paint_label(dc, more, &note, sn.small);
             }
         }
+    } else if c.spec.ctl == Ctl::Toggle(TG_FOLDER) {
+        let line = sc(dpi, 16);
+        let desc_r = RECT { top: title_line.bottom, bottom: (title_line.bottom + line).min(text_r.bottom), ..text_r };
+        crate::paint_meta(dc, desc_r, tx(c.spec.desc), sn.small);
+        let more = RECT { top: desc_r.bottom, bottom: text_r.bottom, ..text_r };
+        if more.bottom > more.top {
+            crate::paint_label(dc, more, tx(crate::Key::TurnOffBeforeUninstall), sn.small);
+        }
     } else if !tx(c.spec.desc).is_empty() {
         crate::paint_meta(dc, RECT { top: title_line.bottom, ..text_r }, tx(c.spec.desc), sn.small);
     }
