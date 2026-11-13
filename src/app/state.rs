@@ -247,6 +247,8 @@ pub(crate) struct Desk {
     pub(crate) addr_tip: bool,     // tracking tooltip for a truncated address path is installed
     pub(crate) addr_tip_pane: HWND, // pane that address tooltip is showing for; null while hidden
     pub(crate) addr_tip_shown: bool, // that tooltip is on screen (installed does not mean visible)
+    pub(crate) num_hot: Option<HWND>, // pane whose number badge is under the pointer
+    pub(crate) num_tip: bool,         // pane-number tooltip tool is installed
     pub(crate) fav_tip: bool,       // tracking tooltip for a favourites row is installed
     pub(crate) fav_tip_shown: bool, // that tooltip is on screen (installed does not mean visible)
     /// Live tracking tip (tool, key, text). Same key+text while shown sends no tip messages.
@@ -445,6 +447,8 @@ pub(crate) fn blank_desk() -> Desk {
         addr_tip: false,
         addr_tip_pane: HWND::default(),
         addr_tip_shown: false,
+        num_hot: None,
+        num_tip: false,
         fav_tip: false,
         fav_tip_shown: false,
         hover_tip: None,

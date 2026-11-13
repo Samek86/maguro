@@ -1347,6 +1347,8 @@ pub(crate) unsafe fn kids_show(h: HWND, id: usize) {
 
 /// Tracking tooltip for one pane's address. Same id space as the tab tips (lock 7, paths 8).
 const ADDR_TIP_ID: usize = 9;
+/// Pane-number badge. 10/11 are favourites, 13 is find, 14/15 are pane tabs.
+const PANE_NUM_TIP: usize = 12;
 const EM_GETRECT: u32 = 0xB2;
 
 unsafe fn cursor_on_addr(h: HWND) -> bool {
@@ -1428,6 +1430,45 @@ unsafe fn addr_tip_body(h: HWND) -> Option<String> {
 /// A visible address tip hides when the pointer is no longer on that pane's address pill.
 pub(crate) fn addr_tip_hides(shown: bool, on_addr: bool) -> bool {
     shown && !on_addr
+}
+
+/// Hide the pane-number tooltip. The tool stays installed. No messages when it is not the live tip.
+pub(crate) unsafe fn hide_num_tip() {
+    let (main, added) = app(|a| (a.main, a.num_tip));
+    if main.0.is_null() {
+        return;
+    }
+    let (now, _) = crate::ui::tip_leave(main, PANE_NUM_TIP, added);
+    app(|a| a.num_tip = now);
+}
+
+/// `over` is the pointer on pane `h`'s number badge. A drag hides it. The text does not
+/// include the pane number, so the same badge sends nothing on later moves.
+pub(crate) unsafe fn num_tip_at(h: HWND, over: bool) {
+    if !over {
+        hide_num_tip();
+        return;
+    }
+    let (tip, main) = app(|a| (a.tip, a.main));
+    if tip.0.is_null() || main.0.is_null() || h.0.is_null() {
+        return;
+    }
+    let text = tr(Key::PaneNumTip);
+    let mut rc = RECT::default();
+    _ = GetClientRect(h, &mut rc);
+    let dpi = app(|a| a.dpi);
+    let item = crate::ui::tip_screen_rect(h, pane_geo_of(h, rc.right, rc.bottom, dpi).num);
+    let key = 0xB100_0000_0000_0000u64 ^ (h.0 as usize as u64);
+    let added = app(|a| a.num_tip);
+    let (now, _) = crate::ui::tip_enter(main, PANE_NUM_TIP, key, text, item, crate::ui::TipSide::Below, added);
+    app(|a| a.num_tip = now);
+    let mut t = TRACKMOUSEEVENT {
+        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: h,
+        dwHoverTime: 0,
+    };
+    _ = TrackMouseEvent(&mut t);
 }
 
 /// Hide the address tooltip. The tool stays installed for the next hover.
@@ -1542,7 +1583,7 @@ pub(crate) unsafe fn crumb_hover(h: HWND, at: Option<usize>) {
 
 // One white plate per pane: a single accent border when active, flat fields in the top bar.
 pub(crate) unsafe fn paint_pane(h: HWND) {
-    let (active, i, dpi, icon_font, small_font, font, accent, hot, tint, folder, waiting, link) = app(|a| {
+    let (active, i, dpi, icon_font, small_font, font, accent, hot, tint, folder, waiting, link, num_hot) = app(|a| {
         let i = a.panes.iter().position(|p| p.as_ref().is_some_and(|p| p.hwnd == h));
         // a drop target-to-be looks active too
         let active = a.panes[a.s.active].as_ref().is_some_and(|p| p.hwnd == h) || a.drop_hover == h;
@@ -1552,7 +1593,8 @@ pub(crate) unsafe fn paint_pane(h: HWND) {
         // While a share is unresolved the previous folder's icon stays out of the pill.
         let folder = if link.is_some() { -1 } else { i.and_then(|i| a.panes[i].as_ref()).map_or(-1, |p| p.icon) };
         let waiting = a.kids.as_ref().filter(|k| k.hwnd == h).map(|k| k.dir.clone());
-        (active, i, a.dpi, a.icon_font, a.small_font, a.font, a.s.accent_now(), hot, tint, folder, waiting, link)
+        let num_hot = a.num_hot == Some(h);
+        (active, i, a.dpi, a.icon_font, a.small_font, a.font, a.s.accent_now(), hot, tint, folder, waiting, link, num_hot)
     });
     let ilist = match app(|a| a.ilist.clone()) {
         None if folder >= 0 => {
@@ -1584,8 +1626,11 @@ pub(crate) unsafe fn paint_pane(h: HWND) {
             fill(dc, RECT { left: pg.view.left, top: pg.view.top - 1, right: pg.view.right, bottom: pg.view.top }, pal().line);
         }
         if let Some(i) = i.filter(|_| pg.num.right > pg.num.left) {
-            // On the header fill. A label colours the whole bar, so the number has no chip of its own.
+            // Digit ink stays the header ink on a tint or the active bar, and sub otherwise.
+            // The pill is a light wash of that ink so it still reads on a coloured header.
             let num_ink = if tint.is_some() || active { ink } else { pal().sub };
+            let (fill_c, edge_c) = pane_num_face(head, num_ink, num_hot);
+            aa_rfill(dc, pg.num, pane_num_radius(pg.num), fill_c, Some(edge_c), head);
             text(dc, pg.num, &(i + 1).to_string(), small_font, num_ink, DT_CENTER);
         }
         for (p, on) in [(pg.addr, addr_on), (pg.filt, filt_on)] {

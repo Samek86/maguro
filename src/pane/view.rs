@@ -186,6 +186,10 @@ pub(crate) unsafe fn destroy_pane(i: usize) {
         if app(|a| a.addr_tip_pane) == p.hwnd {
             hide_addr_tip();
         }
+        if app(|a| a.num_hot) == Some(p.hwnd) {
+            app(|a| a.num_hot = None);
+            hide_num_tip();
+        }
         for id in [ID_EDIT, ID_FILTER] {
             if let Ok(c) = GetDlgItem(Some(p.hwnd), id) {
                 a11y_name(c, None);
