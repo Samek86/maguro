@@ -1775,7 +1775,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Could not save the password to Credential Manager.",
     "Reason: {reason}",
     "List",
-    "Turn this off before uninstalling or deleting Maguro, or folders will keep opening in the missing program.",
+    "If you want to remove Maguro completely, turn this switch off first, then delete it.",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [

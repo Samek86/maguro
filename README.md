@@ -219,7 +219,7 @@ Settings live in `%APPDATA%\Maguro\maguro.json`. Put a file named `portable.txt`
 
 To build from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-If you turned on **Use as default folder app**, turn it off under Settings → General before you delete `maguro.exe`.
+**If you want to remove Maguro completely, turn this switch off first, then delete it.** The steps are under [Default folder app](#default-folder-app).
 
 ## Keyboard shortcuts
 
@@ -279,7 +279,13 @@ This is not saved in `maguro.json`. Turning the option on writes only to the cur
 
 Turn the same option **off** to undo it. Maguro restores the previous default it saved and removes its verb.
 
-**Turn this option off before you uninstall or delete Maguro.** If you remove the exe while the option is still on, opening a folder will keep trying to launch the missing program.
+**If you want to remove Maguro completely, turn this switch off first, then delete it.**
+
+1. Open **Settings → General** and turn off **Use as default folder app**.
+2. Check that a folder opens in File Explorer.
+3. Delete Maguro.
+
+If Maguro was already deleted and folders no longer open, download and run Maguro again, turn the switch off, then delete it.
 
 ## Language files
 
