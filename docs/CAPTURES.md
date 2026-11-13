@@ -1,8 +1,8 @@
-# 스크린샷 캡처 기록 (docs/images-v7)
+# 스크린샷 캡처 기록 (docs/images-v8)
 
-**현재 스크린샷 자산 폴더는 `docs/images-v7/`이다.** 캐시 회피용이다. 새로 찍는 샷은 이 폴더에만 넣는다. 같은 경로를 덮어쓰면 GitHub·브라우저 캐시에 옛 그림이 남으므로, `docs/images-v6`·`docs/images-v5`·`docs/images-v0.2.6`은 새 샷의 대상으로 쓰지 않는다.
+**현재 스크린샷 자산 폴더는 `docs/images-v8/`이다.** 캐시 회피용이다. 새로 찍는 샷은 이 폴더에만 넣는다. 같은 경로를 덮어쓰면 GitHub·브라우저 캐시에 옛 그림이 남으므로, `docs/images-v7`·`docs/images-v6`·`docs/images-v5`·`docs/images-v0.2.6`은 새 샷의 대상으로 쓰지 않는다.
 
-README(en/ja/ko)와 도움말(en/ja/ko)의 UI 이미지 경로는 `docs/images-v7/`을 가리킨다(v0.2.11, 28px 글자 버튼 반영 재촬영). `docs/images-v6/`는 **대체됨(superseded)**: 다음 재촬영은 새 폴더(`docs/images-v8/` 등)에 넣는다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
+README(en/ja/ko)와 도움말(en/ja/ko)의 UI 이미지 경로는 `docs/images-v8/`을 가리킨다. `docs/images-v7/`는 **대체됨(superseded)**: 다음 재촬영은 새 폴더(`docs/images-v9/` 등)에 넣는다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
 
 Maguro README / 도움말용 스크린샷. 모든 제품 이미지는 **포터블 빌드만** 사용하고, AppData·레지스트리·grids.ini·설치본 경로를 쓰지 않는다.
 
@@ -179,15 +179,15 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 | search.ja.png | 하위폴더 검색 | MaguroSearch | light/ja | 데모 트리 | 56167 B (1226×823) | 검색 캡처 | DWM |  |
 | search.ko.png | 하위폴더 검색 | MaguroSearch | light/ko | 데모 트리 | 54110 B (1226×823) | 검색 캡처 | DWM |  |
 | search.png | 하위폴더 검색 | MaguroSearch | light/en | 데모 트리 | 52222 B (1226×823) | 검색 캡처 | DWM |  |
-| servers.ja.png | 서버 연결 추가 | MaguroServer | light/ja | **가짜** Demo Server / sftp.example.com | 12940 B (400×560) | capture-servers-fake.ps1 | DWM | 실호스트·실비번 금지 |
-| servers.ko.png | 서버 연결 추가 | MaguroServer | light/ko | **가짜** Demo Server / sftp.example.com | 10236 B (400×560) | capture-servers-fake.ps1 | DWM | 실호스트·실비번 금지 |
-| servers.png | 서버 연결 추가 | MaguroServer | light/en | **가짜** Demo Server / sftp.example.com | 11651 B (400×560) | capture-servers-fake.ps1 | DWM | 실호스트·실비번 금지 |
+| servers.ja.png | 서버 연결 추가 | MaguroServer | light/ja | **가짜** Demo Server / sftp.example.com | 11356 B (406×526) | capture-servers-fake.ps1 | DWM | 실호스트·실비번 금지 |
+| servers.ko.png | 서버 연결 추가 | MaguroServer | light/ko | **가짜** Demo Server / sftp.example.com | 8925 B (406×526) | capture-servers-fake.ps1 | DWM | 실호스트·실비번 금지 |
+| servers.png | 서버 연결 추가 | MaguroServer | light/en | **가짜** Demo Server / sftp.example.com | 9883 B (406×526) | capture-servers-fake.ps1 | DWM | 실호스트·실비번 금지 |
 | settings.ja.png | 설정 일반 | MaguroSettings General | light/ja | dialogs 시드 | 46373 B (986×633) | Ctrl+, + RedrawWindow | DWM |  |
 | settings.ko.png | 설정 일반 | MaguroSettings General | light/ko | dialogs 시드 | 33848 B (986×633) | Ctrl+, + RedrawWindow | DWM |  |
 | settings.png | 설정 일반 | MaguroSettings General | light/en | dialogs 시드 | 35243 B (986×633) | Ctrl+, + RedrawWindow | DWM |  |
-| settings_ctxmenu.ja.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/ja | 시드 | 38516 B (986×633) | Click-MaguroSettingsPage(8) | DWM | Right-click menu items 페이지인지 눈확인 |
-| settings_ctxmenu.ko.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/ko | 시드 | 30605 B (986×633) | Click-MaguroSettingsPage(8) | DWM | Right-click menu items 페이지인지 눈확인 |
-| settings_ctxmenu.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/en | 시드 | 32467 B (986×633) | Click-MaguroSettingsPage(8) | DWM | Right-click menu items 페이지인지 눈확인 |
+| settings_ctxmenu.ja.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/ja | 시드 | 45203 B (984×631) | Click-MaguroSettingsPage(8) | DWM | Right-click menu items 페이지인지 눈확인 |
+| settings_ctxmenu.ko.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/ko | 시드 | 26016 B (984×631) | Click-MaguroSettingsPage(8) | DWM | Right-click menu items 페이지인지 눈확인 |
+| settings_ctxmenu.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/en | 시드 | 28309 B (984×631) | Click-MaguroSettingsPage(8) | DWM | Right-click menu items 페이지인지 눈확인 |
 | settings_general.ja.png | 설정 일반(별칭) | MaguroSettings General | light/ja | 동일 | 46373 B (986×633) | Ctrl+, | DWM |  |
 | settings_general.ko.png | 설정 일반(별칭) | MaguroSettings General | light/ko | 동일 | 33848 B (986×633) | Ctrl+, | DWM |  |
 | settings_general.png | 설정 일반(별칭) | MaguroSettings General | light/en | 동일 | 34694 B (986×633) | Ctrl+, | DWM |  |
@@ -249,6 +249,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 
 ## 변경 이력 (관련)
 
+- **2026-11-13:** 세그먼트 컨트롤 반영 재촬영 → `docs/images-v8/` (84장, common/en/ja/ko). servers.png(en/ko/ja, 406×526)와 settings_ctxmenu.png(en/ko/ja, 984×631)만 새로 찍고 나머지는 v7을 복사. 우클릭 시간 기록을 Advanced로 옮기고(#393) 페이지 안내문을 뺀 화면. README·도움말 경로 images-v7 → images-v8. `docs/images-v7/`는 트리에 남김(옛 URL을 덮어쓰지 않음). 시드 `readme2-cfgs-v6`.
 - **2026-11-08 (v0.2.10):** 버튼 높이 28 반영 재촬영 → `docs/images-v7/` (84장, common/en/ja/ko). README·도움말 경로 images-v6 → images-v7. 시드 `readme2-cfgs-v6`. 폴더 감시 위쪽 버튼은 28이다.
 - **2026-11-06 (v0.2.7):** 글꼴 +1 릴리스 후 전체 재촬영 → `docs/images-v6/` (84장, common/en/ja/ko). README·도움말 경로 images-v5 → images-v6. 시드 `readme2-cfgs-v6`(fav_panel+tree_panel, side_split=0.5). copy_progress는 help-demo\src 2GB 파일로. 루트 `workspaces*.png`(톱니 하위 메뉴, 참조 없음)는 공식 스크립트가 없어 v6에 넣지 않음.
 - **2026-11-06:** 다음 재촬영의 현재 자산 폴더를 `docs/images-v5/`로 정함(캐시 회피). main의 `docs/images-v0.2.6`은 존재하지만 거부·대체. Jun 지시 모음을 공통 규칙 아래에 추가. README·도움말 경로와 PNG는 이 기록만으로 바꾸지 않는다.
