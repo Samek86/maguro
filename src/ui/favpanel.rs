@@ -266,13 +266,48 @@ pub(crate) fn fav_release(group: bool, dx: i32, dy: i32, on_pressed_row: bool) -
     }
 }
 
-/// Selection after a click. Opening a favourite navigates the pane and clears the highlight.
-/// A group toggle and a drag keep the row that was pressed.
+/// Key target after a click. Opening a favourite clears it. A group toggle and a drag
+/// keep the pressed row for F2, Delete, and Return. Keeping the index does not paint
+/// an accent wash: this panel's fill is hover or drop-into only.
 pub(crate) fn fav_sel_after_release(release: FavRelease, sel: Option<usize>) -> Option<usize> {
     match release {
         FavRelease::Open => None,
         FavRelease::Toggle | FavRelease::None => sel,
     }
+}
+
+/// Fill on top of the panel ground or the group wash.
+/// `selected` is the key target. It is not a fill: a toggle, a short move, a right click,
+/// and a lost capture all leave that index set, and the old accent wash stayed with it.
+/// Hover keeps the existing hover blend. A drop landing inside a group keeps the into blend
+/// and covers hover. Anything else is not filled.
+pub(crate) fn fav_panel_row_fill(selected: bool, hot: bool, into: bool, dark: bool, accent: u32, ground: u32, bg: u32, card: u32) -> Option<u32> {
+    let _ = selected;
+    if into {
+        Some(blend(accent, ground, 0.28))
+    } else if hot {
+        Some(blend(bg, card, if dark { 0.5 } else { 0.7 }))
+    } else {
+        None
+    }
+}
+
+/// The group glyph flips to contrasting ink only on an accent fill.
+/// Selection is not that fill on this panel, so only drop-into flips it.
+pub(crate) fn fav_panel_group_on_accent(selected: bool, into: bool) -> bool {
+    let _ = selected;
+    into
+}
+
+/// One-pixel keyboard mark. Not a fill, and not drawn over a drop-into wash.
+/// Only while this panel is the focused window, so a click that moved focus away leaves no mark.
+pub(crate) fn fav_panel_focus_frame(key_focus: bool, selected: bool, into: bool) -> bool {
+    key_focus && selected && !into
+}
+
+/// Colour of that mark: the shared palette line, never the accent wash.
+pub(crate) fn fav_panel_focus_rgb(dark: bool) -> u32 {
+    if dark { DARK.line } else { LIGHT.line }
 }
 
 /// Hover and timer repaints of the favourites panel.
@@ -641,6 +676,9 @@ pub(crate) unsafe fn paint_side(h: HWND) {
     let (dpi, font, icon, hot, sel, scroll, drop, accent) = app(|a| {
         (a.dpi, a.font, a.icon_font, a.side_hot, a.side_sel, a.side_scroll, a.side_drop, a.s.accent_now())
     });
+    // Hairline for the key target. Gone once focus leaves the panel, so the file list
+    // does not sit beside a leftover mark.
+    let key_focus = GetFocus() == h;
     buffered(h, |dc, rc| {
         let s = |v: i32| v * dpi / 96;
         let rh = row_h();
@@ -654,8 +692,9 @@ pub(crate) unsafe fn paint_side(h: HWND) {
         }
         let any_group = list.iter().any(|f| f.group);
         let bold = if any_group { bold_ui_font() } else { font };
+        let dark = DARK_ON.load(Ordering::Relaxed);
         let wash = if any_group {
-            group_wash_brush(group_tint(accent, side_ground(), DARK_ON.load(Ordering::Relaxed)))
+            group_wash_brush(group_tint(accent, side_ground(), dark))
         } else {
             HBRUSH::default()
         };
@@ -669,14 +708,12 @@ pub(crate) unsafe fn paint_side(h: HWND) {
             if f.group && !wash.is_invalid() {
                 FillRect(dc, &r, wash);
             }
-            // Selection and hover replace the wash. The selected fill is mostly accent, so it wins.
-            if sel == Some(i) {
-                fill(dc, r, blend(accent, side_ground(), 0.16));
-            } else if hot == Some(i) {
-                fill(dc, r, blend(pal().bg, pal().card, if DARK_ON.load(Ordering::Relaxed) { 0.5 } else { 0.7 }));
+            // Hover, or a drop landing inside a group. side_sel is not an accent fill.
+            if let Some(rgb) = fav_panel_row_fill(sel == Some(i), hot == Some(i), into, dark, accent, side_ground(), pal().bg, pal().card) {
+                fill(dc, r, rgb);
             }
-            if into {
-                fill(dc, r, blend(accent, side_ground(), 0.28));
+            if fav_panel_focus_frame(key_focus, sel == Some(i), into) {
+                frame(dc, r, 1, fav_panel_focus_rgb(dark));
             }
             let indent = s(14) * f.depth.min(8) as i32;
             let mut x = s(4) + indent;
@@ -686,8 +723,8 @@ pub(crate) unsafe fn paint_side(h: HWND) {
                 text(dc, chev, if f.open { "\u{E70D}" } else { "\u{E76C}" }, icon, pal().sub, DT_CENTER);
                 x += s(16);
                 let ir = RECT { left: x, top: y, right: x + s(18), bottom: y + rh };
-                // Selected and drop-into fills are mostly accent, so the glyph flips. Same glyph as the list.
-                let glyph_ink = fav_group_icon_ink(accent, sel == Some(i) || into);
+                // Drop-into is an accent fill, so the glyph flips. Selection is not. Same glyph as the list.
+                let glyph_ink = fav_group_icon_ink(accent, fav_panel_group_on_accent(sel == Some(i), into));
                 paint_fav_group_icon(dc, ir, icon, glyph_ink);
                 label_left = ir.right + s(4);
             } else {
@@ -704,7 +741,7 @@ pub(crate) unsafe fn paint_side(h: HWND) {
             let label_font = if f.group { bold } else { font };
             // A folder or file the background check has found gone is drawn in the secondary colour.
             // Commands, links, remote desktops, and shell places are not missing files.
-            let ink = fav_name_ink(fav_row_missing(f), DARK_ON.load(Ordering::Relaxed));
+            let ink = fav_name_ink(fav_row_missing(f), dark);
             text(dc, RECT { left: label_left, right: rc.right - s(6), ..r }, &label, label_font, ink, DT_LEFT);
         }
         if !list.iter().any(|f| f.in_tree()) {
@@ -1933,7 +1970,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::{
-        fav_hover_cursor, fav_hover_paints, fav_leave_paints, fav_panel_draws, fav_release, fav_row_at, fav_row_height, fav_sel_after_release, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text,
+        fav_hover_cursor, fav_hover_paints, fav_leave_paints, fav_panel_draws, fav_panel_focus_frame, fav_panel_focus_rgb, fav_panel_group_on_accent, fav_panel_row_fill, fav_release, fav_row_at, fav_row_height, fav_sel_after_release, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text,
         mark_rows, FavCursor, FavRelease, FavRow, FavTipAct, RowKind,
     };
     use crate::i18n::UI;
@@ -2055,12 +2092,74 @@ mod tests {
     }
 
     #[test]
-    fn click_open_clears_the_highlight_and_a_toggle_keeps_it() {
+    fn click_open_and_a_toggle_leave_no_accent_selection_fill() {
+        // Open drops the key target. A toggle and a drag keep it for F2, Delete, and Return.
         assert_eq!(fav_sel_after_release(FavRelease::Open, Some(2)), None);
         assert_eq!(fav_sel_after_release(FavRelease::Open, None), None);
         assert_eq!(fav_sel_after_release(FavRelease::Toggle, Some(1)), Some(1));
         assert_eq!(fav_sel_after_release(FavRelease::None, Some(4)), Some(4));
         assert_eq!(fav_sel_after_release(FavRelease::None, None), None);
+
+        let accent = 0x0A9BD6;
+        for dark in [false, true] {
+            let pal = if dark { crate::DARK } else { crate::LIGHT };
+            let (ground, bg, card) = (pal.bg, pal.bg, pal.card);
+            let old_sel = crate::blend(accent, ground, 0.16);
+            let hover = crate::blend(bg, card, if dark { 0.5 } else { 0.7 });
+            let into_rgb = crate::blend(accent, ground, 0.28);
+            // Opening, toggling, or releasing past the drag slop: no accent wash.
+            // A kept index still paints like a plain row.
+            for release in [FavRelease::Open, FavRelease::Toggle, FavRelease::None] {
+                let kept = fav_sel_after_release(release, Some(1));
+                let fill = fav_panel_row_fill(kept == Some(1), false, false, dark, accent, ground, bg, card);
+                assert_eq!(fill, None, "{release:?} dark={dark}");
+                assert_ne!(fill, Some(old_sel));
+            }
+            assert_eq!(fav_panel_row_fill(true, false, false, dark, accent, ground, bg, card), fav_panel_row_fill(false, false, false, dark, accent, ground, bg, card));
+            // Pointer hover is the existing blend, including on the key target. Not the accent wash.
+            assert_eq!(fav_panel_row_fill(true, true, false, dark, accent, ground, bg, card), Some(hover));
+            assert_eq!(fav_panel_row_fill(false, true, false, dark, accent, ground, bg, card), Some(hover));
+            assert_ne!(hover, old_sel);
+            // Dropping into a group still covers the row.
+            assert_eq!(fav_panel_row_fill(true, true, true, dark, accent, ground, bg, card), Some(into_rgb));
+            assert_eq!(fav_panel_row_fill(false, false, true, dark, accent, ground, bg, card), Some(into_rgb));
+            for sample in [0u32, 0xFFFFFF, accent, 0x010203] {
+                for selected in [false, true] {
+                    for hot in [false, true] {
+                        for into in [false, true] {
+                            if let Some(rgb) = fav_panel_row_fill(selected, hot, into, dark, sample, ground, bg, card) {
+                                assert!(rgb <= 0x00FF_FFFF, "channel spilled {rgb:#x}");
+                            }
+                        }
+                    }
+                }
+            }
+            // Selection alone does not flip the group glyph. Drop-into still does.
+            assert!(!fav_panel_group_on_accent(true, false));
+            assert!(!fav_panel_group_on_accent(false, false));
+            assert!(fav_panel_group_on_accent(true, true));
+            assert!(fav_panel_group_on_accent(false, true));
+            assert_eq!(crate::fav_group_icon_ink(accent, fav_panel_group_on_accent(true, false)), accent);
+            assert_eq!(crate::fav_group_icon_ink(accent, fav_panel_group_on_accent(false, true)), crate::on_color(accent));
+            // Focused key target: a palette line, not an accent fill. Gone when the panel is not focused,
+            // and not drawn on top of a drop-into wash.
+            assert_eq!(fav_panel_focus_rgb(dark), pal.line);
+            assert_ne!(fav_panel_focus_rgb(dark), old_sel);
+            assert!(fav_panel_focus_rgb(dark) <= 0x00FF_FFFF);
+            assert!(fav_panel_focus_frame(true, true, false));
+            assert!(!fav_panel_focus_frame(false, true, false));
+            assert!(!fav_panel_focus_frame(true, false, false));
+            assert!(!fav_panel_focus_frame(true, true, true));
+        }
+        let src = include_str!("favpanel.rs");
+        let start = src.find("pub(crate) unsafe fn paint_side").expect("paint_side");
+        let tail = &src[start..];
+        let end = tail.find("pub(crate) unsafe fn begin_side_rename").expect("begin_side_rename");
+        let paint = &tail[..end];
+        assert!(paint.contains("fav_panel_row_fill("));
+        assert!(paint.contains("fav_panel_group_on_accent("));
+        assert!(paint.contains("fav_panel_focus_frame("));
+        assert!(!paint.contains("blend(accent, side_ground(), 0.16)"));
     }
 
 
