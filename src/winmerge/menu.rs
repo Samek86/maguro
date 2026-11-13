@@ -21,6 +21,11 @@ const _: () = assert!(
         && ID_WM_NEXT != crate::ID_WATCH
         && ID_WM_SAME != crate::ID_WATCH
         && ID_WM_FILES != crate::ID_BASKET
+        && ID_WM_NEXT != crate::ID_FOLDER_APP
+        && ID_WM_FILES != crate::ID_FOLDER_APP
+        && ID_WM_SAME != crate::ID_FOLDER_APP
+        && ID_WM_POP_FOLDERS != crate::ID_FOLDER_APP
+        && ID_WM_POP_SAME != crate::ID_FOLDER_APP
 );
 pub(crate) const ID_WM_PANE: usize = 1300; // + pane index
 pub(crate) const ID_WM_SAMEP: usize = 1320; // + pane index

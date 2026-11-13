@@ -55,11 +55,11 @@ Copy and move go through **IFileOperation**, so you get the Windows progress win
 
 Turn this on, and double-clicking a folder or a drive opens it in Maguro. You don’t have to start Maguro first.
 
-This option is **off by default**. You turn it on yourself: **Settings → General → Use as default folder app**.
+This option is **off by default**. You turn it on yourself: **Settings → General → Use as default folder app**, or the gear menu → **Behavior**.
 
 **If you want to remove Maguro completely, turn this switch off first, then delete it.**
 
-1. Open **Settings → General** and turn off **Use as default folder app**.
+1. Open **Settings → General**, or the gear menu → **Behavior**, and turn off **Use as default folder app**.
 2. Check that a folder opens in File Explorer.
 3. Delete Maguro.
 
@@ -289,7 +289,7 @@ Language (Auto, English, and every language file), font, light / dark theme, acc
 
 ### Default folder app
 
-The switch is **Settings → General → Use as default folder app**. It is **off by default**; you turn it on yourself. For why to use it, how to turn it on, and the steps to take before you delete Maguro, see [Use Maguro as your default folder app (recommended)](#use-maguro-as-your-default-folder-app-recommended).
+The switch is **Settings → General → Use as default folder app**, or the gear menu → **Behavior**. It is **off by default**; you turn it on yourself. For why to use it, how to turn it on, and the steps to take before you delete Maguro, see [Use Maguro as your default folder app (recommended)](#use-maguro-as-your-default-folder-app-recommended).
 
 This is not saved in `maguro.json`. Turning the option on writes only to the current-user registry (`HKCU\Software\Classes\Directory\shell` and `HKCU\Software\Classes\Drive\shell`): it adds a `Maguro` verb whose command runs this `maguro.exe`, and sets that verb as the default. Machine-wide settings (HKLM) and the `Folder` class are left alone.
 

@@ -22,6 +22,12 @@ pub(crate) fn shown_on() -> bool {
     SHOWN.load(Ordering::Relaxed)
 }
 
+/// Test-only cache write. Does not read or write the registry.
+#[cfg(test)]
+pub(crate) fn set_shown_for_test(on: bool) {
+    SHOWN.store(on, Ordering::Relaxed);
+}
+
 pub(crate) fn reload_shown() {
     SHOWN.store(is_registered(&read_states()), Ordering::Relaxed);
 }
