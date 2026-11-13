@@ -739,6 +739,37 @@ fn seg_w(label: &str, dpi: i32) -> i32 {
     ink_w(label, dpi) + sc(dpi, 32)
 }
 
+/// Reset sits on `right`. Refresh sits to its left with `gap` between them.
+/// A pair wider than the row shrinks and keeps that gap, and neither rect crosses `left`.
+fn ctx_bar_rects(left: i32, right: i32, top: i32, bh: i32, gap: i32, reset_w: i32, refresh_w: i32) -> (RECT, RECT) {
+    let right = right.max(left);
+    let row = right - left;
+    let gap = gap.max(0);
+    let mut reset_w = reset_w.max(0);
+    let mut refresh_w = refresh_w.max(0);
+    if gap >= row {
+        let edge = RECT { left: right, top, right, bottom: top + bh };
+        return (edge, edge);
+    }
+    let room = row - gap;
+    if reset_w + refresh_w > room {
+        let sum = (reset_w + refresh_w).max(1);
+        if room >= 2 {
+            reset_w = (reset_w * room / sum).clamp(1, room - 1);
+            refresh_w = room - reset_w;
+        } else {
+            reset_w = room;
+            refresh_w = 0;
+        }
+    }
+    let reset_left = right - reset_w;
+    let refresh_right = reset_left - gap;
+    (
+        RECT { left: reset_left, top, right, bottom: top + bh },
+        RECT { left: refresh_right - refresh_w, top, right: refresh_right, bottom: top + bh },
+    )
+}
+
 fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str) -> i32 {
     let dpi = sn.dpi.max(96);
     let sh = sc(dpi, 32);
@@ -759,16 +790,12 @@ fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str
     });
     let rows = if win11_view { Vec::new() } else { crate::shell::ctxmenu::ui_rows(&off, &on, &seen, &quiet, rq) };
     let pack_rows = if win11_view { crate::shell::ctxpack::ui_rows(&pack_on, rq) } else { Vec::new() };
-    let reset_w = sc(dpi, 220);
-    let refresh_w = sc(dpi, 140);
+    // Measured in the dialog font on every layout, so a language or DPI change
+    // resizes the pair. "Reset to all enabled" is wider than "모두 사용".
+    let reset_w = win::ctx_btn_w(sn.font, dpi, tx(CTX_RESET_L));
+    let refresh_w = win::ctx_btn_w(sn.font, dpi, tx(CTX_REFRESH_L));
     let bh = sc(dpi, crate::BTN_H_FOOTER);
-    let reset = RECT { left: (right - reset_w).max(left), top: y, right, bottom: y + bh };
-    let refresh = RECT {
-        left: (reset.left - gap - refresh_w).max(left),
-        top: y,
-        right: (reset.left - gap).max(left),
-        bottom: y + bh,
-    };
+    let (reset, refresh) = ctx_bar_rects(left, right, y, bh, gap, reset_w, refresh_w);
     g.items.push(Item::CtxBar { reset, refresh });
     y += bh + sc(dpi, 12);
     if win11_view {
@@ -1528,20 +1555,23 @@ mod tests {
         assert!(!page_match("Record right-click timing", CTX_PAGE));
         let (anchor, page) = commit_search(0, 0, "Right-click menu");
         assert_eq!((anchor, page), (0, CTX_PAGE));
-        let g = geo(client(), &shot(page, "Right-click menu"));
+        let sn = shot(page, "Right-click menu");
+        let g = geo(client(), &sn);
         assert!(g.show[CTX_PAGE]);
         assert!(g.items.iter().all(|it| !matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_CTX_LOG))));
         assert!(matches!(g.items.first(), Some(Item::CtxSeg { .. })));
-        let (reset, refresh) = g.items.iter().find_map(|it| match it {
-            Item::CtxBar { reset, refresh } => Some((*reset, *refresh)),
-            _ => None,
-        }).expect("ctx bar");
-        assert_eq!(reset.right - reset.left, 220);
-        assert_eq!(refresh.right - refresh.left, 140);
+        let (reset, refresh) = ctx_bar(&g);
+        let en_reset = win::ctx_btn_w(sn.font, sn.dpi, tx(CTX_RESET_L));
+        let en_refresh = win::ctx_btn_w(sn.font, sn.dpi, tx(CTX_REFRESH_L));
+        assert_eq!(reset.right - reset.left, en_reset);
+        assert_eq!(refresh.right - refresh.left, en_refresh);
+        assert!(en_reset <= 220);
+        assert!(en_refresh <= 140);
         assert_eq!(reset.bottom - reset.top, crate::BTN_H_FOOTER);
         assert_eq!(refresh.bottom - refresh.top, crate::BTN_H_FOOTER);
         assert_eq!(refresh.top, reset.top);
         assert_eq!(reset.left - refresh.right, 8);
+        assert_eq!(reset.right, g.title.right);
         assert!(refresh.left >= g.content.left);
 
         crate::UI.store(1, Ordering::Relaxed);
@@ -1554,9 +1584,18 @@ mod tests {
         assert_eq!(tx(CTX_EMPTY), "타사 메뉴 항목이 없어요");
         let (_, page) = commit_search(0, 0, "우클릭 메뉴 항목");
         assert_eq!(page, CTX_PAGE);
-        let g = geo(client(), &shot(page, "우클릭"));
+        let sn = shot(page, "우클릭");
+        let g = geo(client(), &sn);
         assert!(g.show[CTX_PAGE]);
-        assert!(g.items.iter().any(|it| matches!(it, Item::CtxBar { .. })));
+        let (reset, refresh) = ctx_bar(&g);
+        let ko_reset = win::ctx_btn_w(sn.font, sn.dpi, tx(CTX_RESET_L));
+        let ko_refresh = win::ctx_btn_w(sn.font, sn.dpi, tx(CTX_REFRESH_L));
+        assert_eq!(reset.right - reset.left, ko_reset);
+        assert_eq!(refresh.right - refresh.left, ko_refresh);
+        // "Reset to all enabled" is longer than "모두 사용", so the button follows the label.
+        assert!(ko_reset < en_reset, "en {en_reset} ko {ko_reset}");
+        assert!(ko_reset <= 220);
+        assert!(ko_refresh <= 140);
 
         crate::UI.store(2, Ordering::Relaxed);
         assert_eq!(tx(PAGES[CTX_PAGE]), "右クリックメニュー項目");
@@ -1566,9 +1605,24 @@ mod tests {
         assert!(!page_match("右クリックの時間を記録", CTX_PAGE));
         let (_, page) = commit_search(0, 0, "右クリックメニュー");
         assert_eq!(page, CTX_PAGE);
-        let g = geo(client(), &shot(page, "右クリック"));
+        let sn = shot(page, "右クリック");
+        let g = geo(client(), &sn);
         assert!(g.show[CTX_PAGE]);
         assert!(matches!(g.items.first(), Some(Item::CtxSeg { .. })));
+        let (reset, refresh) = ctx_bar(&g);
+        let ja_reset = win::ctx_btn_w(sn.font, sn.dpi, tx(CTX_RESET_L));
+        let ja_refresh = win::ctx_btn_w(sn.font, sn.dpi, tx(CTX_REFRESH_L));
+        assert_eq!(reset.right - reset.left, ja_reset);
+        assert_eq!(refresh.right - refresh.left, ja_refresh);
+        assert!(ja_reset <= 220);
+        assert!(ja_refresh <= 140);
+    }
+
+    fn ctx_bar(g: &Geo) -> (RECT, RECT) {
+        g.items.iter().find_map(|it| match it {
+            Item::CtxBar { reset, refresh } => Some((*reset, *refresh)),
+            _ => None,
+        }).expect("ctx bar")
     }
 
     #[test]
@@ -1650,15 +1704,13 @@ mod tests {
         assert!(page_match("Windows 11 menu", CTX_PAGE));
         assert_eq!(tx(CTX_CLASSIC), "Classic menu");
         assert_eq!(tx(CTX_WIN11), "Windows 11 menu");
-        let g = geo(client(), &shot(CTX_PAGE, "Right-click menu"));
+        let sn = shot(CTX_PAGE, "Right-click menu");
+        let g = geo(client(), &sn);
         let (classic, win11) = g.items.iter().find_map(|it| match it {
             Item::CtxSeg { classic, win11 } => Some((*classic, *win11)),
             _ => None,
         }).expect("segment");
-        let (reset, refresh) = g.items.iter().find_map(|it| match it {
-            Item::CtxBar { reset, refresh } => Some((*reset, *refresh)),
-            _ => None,
-        }).expect("ctx bar");
+        let (reset, refresh) = ctx_bar(&g);
         assert_eq!(classic.top, g.title.bottom + 16);
         assert_eq!(classic.left, g.title.left);
         assert_eq!(classic.bottom - classic.top, 32);
@@ -1669,8 +1721,12 @@ mod tests {
         assert_eq!(win11.right - win11.left, 137);
         assert_eq!(refresh.top - classic.bottom, 8);
         assert_eq!(refresh.top, reset.top);
-        assert_eq!(refresh.right - refresh.left, 140);
-        assert_eq!(reset.right - reset.left, 220);
+        let refresh_w = win::ctx_btn_w(sn.font, sn.dpi, tx(CTX_REFRESH_L));
+        let reset_w = win::ctx_btn_w(sn.font, sn.dpi, tx(CTX_RESET_L));
+        assert_eq!(refresh.right - refresh.left, refresh_w);
+        assert_eq!(reset.right - reset.left, reset_w);
+        assert!(refresh_w <= 140);
+        assert!(reset_w <= 220);
         assert_eq!(reset.left - refresh.right, 8);
         let row_top = g.items.iter().find_map(|it| match it {
             Item::CtxRow { rect, .. } => Some(rect.top),
@@ -1680,6 +1736,146 @@ mod tests {
         // The note was 72 DIP tall plus an 8 DIP gap. At 96 DPI the list starts 80 DIP higher.
         let old_row = classic.top + 72 + 8 + (classic.bottom - classic.top) + (refresh.top - classic.bottom) + (refresh.bottom - refresh.top) + 12;
         assert_eq!(old_row - row_top, 80);
+    }
+
+    struct Face(HFONT);
+    impl Drop for Face {
+        fn drop(&mut self) {
+            if !self.0.0.is_null() && !self.0.is_invalid() {
+                unsafe { let _ = DeleteObject(self.0.into()); }
+            }
+        }
+    }
+
+    fn face_at(dpi: i32) -> Face {
+        let font = crate::test_body_font(dpi);
+        assert!(!font.0.is_null() && !font.is_invalid(), "dpi {dpi}");
+        Face(font)
+    }
+
+    #[test]
+    fn ctx_button_width_tracks_the_label_without_a_window_font() {
+        let _lock = ui_lock();
+        let _keep = lang(0);
+        let en = tx(CTX_RESET_L);
+        let refresh = tx(CTX_REFRESH_L);
+        // No dialog font: the shared pad and minimum stay, and the text width is the ink estimate.
+        assert_eq!(win::ctx_btn_w(HFONT::default(), 96, en), win::ask_btn_w(ink_w(en, 96), 96));
+        assert_eq!(win::ctx_btn_w(HFONT::default(), 96, refresh), win::ask_btn_w(ink_w(refresh, 96), 96));
+        let en_w = win::ctx_btn_w(HFONT::default(), 96, en);
+        crate::UI.store(1, Ordering::Relaxed);
+        let ko_w = win::ctx_btn_w(HFONT::default(), 96, tx(CTX_RESET_L));
+        // "Reset to all enabled" is longer than "모두 사용".
+        assert!(en_w > ko_w, "en {en_w} ko {ko_w}");
+        crate::UI.store(2, Ordering::Relaxed);
+        assert!(win::ctx_btn_w(HFONT::default(), 96, tx(CTX_RESET_L)) <= 220);
+        assert!(win::ctx_btn_w(HFONT::default(), 96, tx(CTX_REFRESH_L)) <= 140);
+
+        crate::UI.store(0, Ordering::Relaxed);
+        let mut sn = shot(CTX_PAGE, "Right-click menu");
+        sn.dpi = 192;
+        let g = geo(RECT { left: 0, top: 0, right: 2400, bottom: 1600 }, &sn);
+        let (reset, refresh) = ctx_bar(&g);
+        let reset_w = win::ctx_btn_w(sn.font, 192, tx(CTX_RESET_L));
+        let refresh_w = win::ctx_btn_w(sn.font, 192, tx(CTX_REFRESH_L));
+        assert_eq!(reset.right - reset.left, reset_w);
+        assert_eq!(refresh.right - refresh.left, refresh_w);
+        assert!(reset_w > en_w);
+        assert!(reset_w <= sc(192, 220));
+        assert!(refresh_w <= sc(192, 140));
+        assert_eq!(reset.left - refresh.right, sc(192, 8));
+        assert_eq!(reset.bottom - reset.top, sc(192, crate::BTN_H_FOOTER));
+        assert_eq!(reset.right, g.title.right);
+        assert!(refresh.left >= g.title.left);
+    }
+
+    #[test]
+    fn ctx_button_width_uses_the_dialog_font() {
+        let _lock = ui_lock();
+        let _keep = lang(0);
+        let font = face_at(96);
+        let label = tx(CTX_RESET_L);
+        let px = unsafe { win::label_px(font.0, label) }.expect("measured");
+        assert_ne!(px, ink_w(label, 96), "dialog font is measured, not the ink estimate");
+        let en = win::ctx_btn_w(font.0, 96, label);
+        assert_eq!(en, win::ask_btn_w(px, 96));
+        assert_ne!(en, win::ctx_btn_w(HFONT::default(), 96, label));
+        assert!(en <= 220);
+        let refresh_w = win::ctx_btn_w(font.0, 96, tx(CTX_REFRESH_L));
+        assert!(refresh_w <= 140);
+        let mut sn = shot(CTX_PAGE, "Right-click menu");
+        sn.font = font.0;
+        let g = geo(client(), &sn);
+        let (reset, refresh) = ctx_bar(&g);
+        assert_eq!(reset.right - reset.left, en);
+        assert_eq!(refresh.right - refresh.left, refresh_w);
+        assert_eq!(reset.left - refresh.right, 8);
+        drop(font);
+
+        crate::UI.store(1, Ordering::Relaxed);
+        let font = face_at(96);
+        let ko = win::ctx_btn_w(font.0, 96, tx(CTX_RESET_L));
+        let ko_refresh = win::ctx_btn_w(font.0, 96, tx(CTX_REFRESH_L));
+        assert!(ko <= 220);
+        assert!(ko_refresh <= 140);
+        // Measured "Reset to all enabled" is wider than measured "모두 사용".
+        assert!(en > ko, "en {en} ko {ko}");
+        let mut sn = shot(CTX_PAGE, "우클릭");
+        sn.font = font.0;
+        let g = geo(client(), &sn);
+        let (reset, _) = ctx_bar(&g);
+        assert_eq!(reset.right - reset.left, ko);
+        drop(font);
+
+        crate::UI.store(2, Ordering::Relaxed);
+        let font = face_at(96);
+        assert!(win::ctx_btn_w(font.0, 96, tx(CTX_RESET_L)) <= 220);
+        assert!(win::ctx_btn_w(font.0, 96, tx(CTX_REFRESH_L)) <= 140);
+        drop(font);
+
+        crate::UI.store(0, Ordering::Relaxed);
+        let font96 = face_at(96);
+        let font192 = face_at(192);
+        let w96 = win::ctx_btn_w(font96.0, 96, tx(CTX_RESET_L));
+        let w192 = win::ctx_btn_w(font192.0, 192, tx(CTX_RESET_L));
+        assert!(w192 > w96, "96 {w96} 192 {w192}");
+        assert!(w192 <= sc(192, 220));
+        let mut sn = shot(CTX_PAGE, "Right-click menu");
+        sn.dpi = 192;
+        sn.font = font192.0;
+        let g = geo(RECT { left: 0, top: 0, right: 2400, bottom: 1600 }, &sn);
+        let (reset, refresh) = ctx_bar(&g);
+        assert_eq!(reset.right - reset.left, w192);
+        assert!(win::ctx_btn_w(font192.0, 192, tx(CTX_REFRESH_L)) <= sc(192, 140));
+        assert_eq!(refresh.right - refresh.left, win::ctx_btn_w(sn.font, 192, tx(CTX_REFRESH_L)));
+        assert_eq!(reset.left - refresh.right, sc(192, 8));
+    }
+
+    #[test]
+    fn ctx_buttons_shrink_to_keep_the_gap() {
+        let (reset, refresh) = ctx_bar_rects(0, 800, 4, 28, 8, 164, 73);
+        assert_eq!(reset.right - reset.left, 164);
+        assert_eq!(refresh.right - refresh.left, 73);
+        assert_eq!(reset.right, 800);
+        assert_eq!(reset.left - refresh.right, 8);
+        assert_eq!(refresh.top, 4);
+        assert_eq!(reset.bottom - reset.top, 28);
+
+        let (reset, refresh) = ctx_bar_rects(10, 110, 0, 28, 8, 220, 140);
+        assert_eq!(reset.right, 110);
+        assert_eq!(reset.left - refresh.right, 8);
+        assert!(refresh.left >= 10);
+        assert!(refresh.right <= reset.left);
+        assert!(reset.left >= 10);
+        assert!(reset.right - reset.left < 220);
+        assert!(refresh.right - refresh.left < 140);
+        assert_eq!((reset.right - reset.left) + (refresh.right - refresh.left) + 8, 100);
+
+        let (reset, refresh) = ctx_bar_rects(50, 50, 0, 28, 8, 72, 72);
+        assert_eq!(reset.left, 50);
+        assert_eq!(reset.right, 50);
+        assert_eq!(refresh.left, 50);
+        assert_eq!(refresh.right, 50);
     }
 
     #[test]

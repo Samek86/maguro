@@ -2992,9 +2992,33 @@ fn ask_button_kind(id: i32) -> crate::ButtonKind {
 }
 
 /// Label width plus the token pad, and at least the token minimum.
-fn ask_btn_w(text_px: i32, dpi: i32) -> i32 {
+pub(super) fn ask_btn_w(text_px: i32, dpi: i32) -> i32 {
     let dpi = dpi.max(96);
     (text_px.max(0) + 2 * sc(dpi, crate::BTN_PAD_X)).max(sc(dpi, crate::BTN_MIN_W))
+}
+
+/// Drawn width of `label` in `font`, or `None` when that font cannot be selected.
+/// `font` is already the dialog face for the current DPI. This does not call [`crate::body_font`].
+pub(super) unsafe fn label_px(font: HFONT, label: &str) -> Option<i32> {
+    if label.is_empty() || font.0.is_null() || font.is_invalid() {
+        return None;
+    }
+    let dc = GetDC(None);
+    if dc.0.is_null() || dc.is_invalid() {
+        return None;
+    }
+    let px = text_w(dc, font, label);
+    let _ = ReleaseDC(None, dc);
+    if px <= 0 { None } else { Some(px) }
+}
+
+/// Settings text-button width. Same pad and minimum as [`ask_btn_w`].
+/// An unusable font uses the coarse [`ink_w`] estimate with that same pad and minimum,
+/// so layout tests stay stable when no window font exists.
+pub(super) fn ctx_btn_w(font: HFONT, dpi: i32, label: &str) -> i32 {
+    let dpi = dpi.max(96);
+    let text_px = unsafe { label_px(font, label) }.unwrap_or_else(|| ink_w(label, dpi));
+    ask_btn_w(text_px, dpi)
 }
 
 /// Client height: body pad, label, field, footer rule, footer buttons, body pad.
