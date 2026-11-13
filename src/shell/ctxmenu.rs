@@ -22,7 +22,7 @@
 // loaded every handler on the real menu, including ones that are off — that is the
 // cost of an identical item set. Disabled handlers are never given their own visible menu.
 //
-// Settings → Right-click menu can record each phase. The file is
+// Settings → Advanced can record each phase. The file is
 // `Log/maguro-ctx-timing-YYYY-MM-DD.log` next to maguro.json. Files older than
 // 14 days are deleted when a window opens. `MAGURO_CTX_TIMING=1` forces the same
 // log (and OutputDebugString) without the switch. `MAGURO_CTX_TIMING_LOG` is an

@@ -166,12 +166,6 @@ const CTX_CLASSIC: crate::Key = crate::Key::ClassicMenu;
 const CTX_WIN11: crate::Key = crate::Key::Windows11Menu;
 const CTX_WIN11_EMPTY: crate::Key = crate::Key::CtxWin11Empty;
 const CTX_WIN11_NOTE: crate::Key = crate::Key::CtxWin11Note;
-const CTX_LOG: &[Spec] = &[Spec {
-    title: crate::Key::CtxTiming,
-    desc: crate::Key::CtxTimingHint,
-    live: true,
-    ctl: Ctl::Toggle(TG_CTX_LOG),
-}];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Ctl {
@@ -274,6 +268,7 @@ const ADV: &[Spec] = &[
     Spec { title: crate::Key::CheckForUpdatesOnStartup, desc: crate::Key::AsksGithubForNewerMaguroReleaseAnd, live: true, ctl: Ctl::Toggle(TG_UPDATE) },
     Spec { title: crate::Key::SettingsFile, desc: crate::Key::PortableTxtNextExeKeepsThisFile, live: true, ctl: Ctl::Adv },
     Spec { title: crate::Key::ResetAllSettings, desc: crate::Key::PreferencesReturnTheirDefaultsLayoutFolde, live: true, ctl: Ctl::AdvReset },
+    Spec { title: crate::Key::CtxTiming, desc: crate::Key::CtxTimingHint, live: true, ctl: Ctl::Toggle(TG_CTX_LOG) },
 ];
 
 const KEY_NOTE: crate::Key = crate::Key::DoubleClickRowOrPressChangeThen;
@@ -336,9 +331,6 @@ fn page_match(q: &str, page: usize) -> bool {
         return (0..crate::keys::len()).any(|i| key_hit_i(i, q)) || has(tx(KEY_NOTE), q);
     }
     if page == CTX_PAGE {
-        if CTX_LOG.iter().any(|c| card_hit(c, q)) {
-            return true;
-        }
         return has(tx(CTX_NOTE), q)
             || has(tx(CTX_WIN11_NOTE), q)
             || has(tx(CTX_RESET_L), q)
@@ -730,15 +722,6 @@ fn fill_items(g: &mut Geo, sn: &Snap, bar: bool) -> i32 {
         y = key_items(g, sn, left, right, y, rq);
     }
     if page == CTX_PAGE {
-        for spec in CTX_LOG {
-            if !rq.is_empty() && !card_hit(spec, rq) {
-                continue;
-            }
-            let h = card_h(spec, dpi);
-            let rect = RECT { left, top: y, right, bottom: y + h };
-            g.items.push(Item::Card(card_item(rect, *spec, dpi)));
-            y += h + gap;
-        }
         y = ctx_items(g, sn, left, right, y, rq);
     }
     (y + sn.scroll) - start + sc(dpi, 16)
@@ -1495,12 +1478,13 @@ mod tests {
         assert_eq!(tx(CTX_RESET_L), "Reset to all enabled");
         assert_eq!(tx(CTX_REFRESH_L), "Refresh");
         assert!(page_match("Refresh", CTX_PAGE));
-        assert!(page_match("Record right-click timing", CTX_PAGE));
+        assert!(!page_match("Record right-click timing", CTX_PAGE));
         let (anchor, page) = commit_search(0, 0, "Right-click menu");
         assert_eq!((anchor, page), (0, CTX_PAGE));
         let g = geo(client(), &shot(page, "Right-click menu"));
         assert!(g.show[CTX_PAGE]);
-        assert!(g.items.iter().any(|it| matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_CTX_LOG))));
+        assert!(g.items.iter().all(|it| !matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_CTX_LOG))));
+        assert!(matches!(g.items.first(), Some(Item::CtxNote(_))));
         assert!(g.items.iter().any(|it| matches!(it, Item::CtxNote(_))));
         let (reset, refresh) = g.items.iter().find_map(|it| match it {
             Item::CtxBar { reset, refresh } => Some((*reset, *refresh)),
@@ -1520,6 +1504,7 @@ mod tests {
         assert_eq!(tx(CTX_RESET_L), "모두 사용");
         assert_eq!(tx(CTX_REFRESH_L), "새로고침");
         assert!(page_match("새로고침", CTX_PAGE));
+        assert!(!page_match("우클릭 시간 기록", CTX_PAGE));
         assert_eq!(tx(CTX_EMPTY), "타사 메뉴 항목이 없어요");
         let (_, page) = commit_search(0, 0, "우클릭 메뉴 항목");
         assert_eq!(page, CTX_PAGE);
@@ -1532,11 +1517,68 @@ mod tests {
         assert_eq!(tx(CTX_WIN11_NOTE), "Windows 11 のアプリはオフから始まります。必要なものだけオンにしてください。既にある項目は重ねません。オンにした項目は「開く」の近くに入り、プロパティは最後のままです。");
         assert_eq!(tx(CTX_RESET_L), "すべて有効に戻す");
         assert_eq!(tx(CTX_NOTE), "Maguro の右クリックメニューに出る項目です。開く、コピー、プロパティなどの Windows の項目はそのままです。新しい項目はオンで始まります。エクスプローラーは変わりません。");
+        assert!(!page_match("右クリックの時間を記録", CTX_PAGE));
         let (_, page) = commit_search(0, 0, "右クリックメニュー");
         assert_eq!(page, CTX_PAGE);
         let g = geo(client(), &shot(page, "右クリック"));
         assert!(g.show[CTX_PAGE]);
         assert!(g.items.iter().any(|it| matches!(it, Item::CtxNote(_))));
+    }
+
+    #[test]
+    fn ctx_timing_toggle_is_the_last_advanced_card() {
+        let _lock = ui_lock();
+        let _keep = lang(0);
+        assert!(ADV[0].ctl == Ctl::Toggle(TG_UPDATE));
+        assert!(ADV[1].ctl == Ctl::Adv);
+        assert!(ADV[2].ctl == Ctl::AdvReset);
+        assert_eq!(ADV[3].title, crate::Key::CtxTiming);
+        assert_eq!(ADV[3].desc, crate::Key::CtxTimingHint);
+        assert!(ADV[3].live);
+        assert!(ADV[3].ctl == Ctl::Toggle(TG_CTX_LOG));
+
+        let cards = |g: &Geo| {
+            g.items.iter().filter_map(|it| match it {
+                Item::Card(c) => Some(c.spec.ctl),
+                _ => None,
+            }).collect::<Vec<_>>()
+        };
+        let expect = [Ctl::Toggle(TG_UPDATE), Ctl::Adv, Ctl::AdvReset, Ctl::Toggle(TG_CTX_LOG)];
+        assert!(cards(&geo(client(), &shot(7, ""))) == expect);
+
+        let check = |q: &str| {
+            assert!(page_match(q, 7), "{q}");
+            assert!(!page_match(q, CTX_PAGE), "{q}");
+            assert_eq!(commit_search(0, 0, q), (0, 7), "{q}");
+            let shown = cards(&geo(client(), &shot(7, q)));
+            assert!(shown.last().copied() == Some(Ctl::Toggle(TG_CTX_LOG)), "{q}");
+        };
+
+        assert_eq!(tx(crate::Key::CtxTiming), "Record right-click timing");
+        assert_eq!(
+            tx(crate::Key::CtxTimingHint),
+            "Millisecond log in the Log folder next to the settings file. Files older than 14 days are deleted when Maguro starts."
+        );
+        check("Record right-click timing");
+        check(tx(crate::Key::CtxTimingHint));
+
+        crate::UI.store(1, Ordering::Relaxed);
+        assert_eq!(tx(crate::Key::CtxTiming), "우클릭 시간 기록");
+        assert_eq!(
+            tx(crate::Key::CtxTimingHint),
+            "설정 파일 옆의 Log 폴더에 날짜와 함께 밀리초를 씁니다. 14일이 지난 파일은 Maguro가 시작될 때 지웁니다."
+        );
+        check("우클릭 시간 기록");
+        check(tx(crate::Key::CtxTimingHint));
+
+        crate::UI.store(2, Ordering::Relaxed);
+        assert_eq!(tx(crate::Key::CtxTiming), "右クリックの時間を記録");
+        assert_eq!(
+            tx(crate::Key::CtxTimingHint),
+            "設定ファイルの隣の Log フォルダへ、日付つきでミリ秒を書きます。14日を過ぎたファイルは起動時に消します。"
+        );
+        check("右クリックの時間を記録");
+        check(tx(crate::Key::CtxTimingHint));
     }
 
     struct View(bool);
@@ -1568,6 +1610,7 @@ mod tests {
             Item::CtxNote(r) => Some(*r),
             _ => None,
         }).expect("note");
+        assert_eq!(note.top, g.title.bottom + 16);
         let (classic, win11) = g.items.iter().find_map(|it| match it {
             Item::CtxSeg { classic, win11 } => Some((*classic, *win11)),
             _ => None,
