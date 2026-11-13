@@ -405,7 +405,8 @@ fn choose_face(code: &str, meta_font: &str) -> &'static str {
     }
 }
 
-/// Write the four bundled files when `bundled.ver` is missing or not this version.
+/// Write the four bundled files when `bundled.ver` is missing or not this version,
+/// or when a bundled file no longer matches the copy compiled into this exe.
 /// `*.user.ini` and any other `lang.*.ini` are left as they are.
 pub(crate) fn install_languages() {
     install_into(&crate::store::config_dir());
@@ -416,10 +417,13 @@ pub(crate) fn install_into(cfg: &Path) {
     let _ = std::fs::create_dir_all(&dir);
     let stamp = dir.join("bundled.ver");
     let ver = env!("CARGO_PKG_VERSION");
-    if std::fs::read_to_string(&stamp).ok().as_deref().map(str::trim) == Some(ver) {
+    let files = [("lang.ko.ini", KO_INI), ("lang.ja.ini", JA_INI), ("lang.fr.ini", FR_INI), ("lang.de.ini", DE_INI)];
+    let stamp_ok = std::fs::read_to_string(&stamp).ok().as_deref().map(str::trim) == Some(ver);
+    let files_ok = stamp_ok
+        && files.iter().all(|(name, text)| std::fs::read_to_string(dir.join(name)).ok().as_deref() == Some(*text));
+    if files_ok {
         return;
     }
-    let files = [("lang.ko.ini", KO_INI), ("lang.ja.ini", JA_INI), ("lang.fr.ini", FR_INI), ("lang.de.ini", DE_INI)];
     let mut ok = true;
     for (name, text) in files {
         if std::fs::write(dir.join(name), text).is_err() {
@@ -647,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn install_overwrites_bundled_files_only_when_the_version_changes() {
+    fn install_overwrites_bundled_files_when_the_version_or_contents_change() {
         let cfg = std::env::temp_dir().join(format!("maguro-install-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&cfg);
         let lang = cfg.join("lang");
@@ -667,12 +671,47 @@ mod tests {
         assert!(std::fs::read_to_string(lang.join("lang.ja.ini")).unwrap().contains("font = Yu Gothic UI"));
         assert_eq!(std::fs::read_to_string(lang.join("bundled.ver")).unwrap().trim(), env!("CARGO_PKG_VERSION"));
 
+        // Same package version, older bundled text: refresh the official files, keep user overrides.
         std::fs::write(lang.join("lang.ko.ini"), "close = edited-again\n").unwrap();
         install_into(&cfg);
-        assert_eq!(std::fs::read_to_string(lang.join("lang.ko.ini")).unwrap(), "close = edited-again\n");
+        let ko = std::fs::read_to_string(lang.join("lang.ko.ini")).unwrap();
+        assert_ne!(ko, "close = edited-again\n");
+        assert!(ko.contains("turn_off_before_uninstall"), "{ko}");
+        assert!(ko.contains("이 스위치를 끄고 나서"), "{ko}");
         assert_eq!(std::fs::read_to_string(lang.join("lang.ko.user.ini")).unwrap(), "close = keep-me\n");
         assert_eq!(std::fs::read_to_string(lang.join("lang.es.ini")).unwrap(), "name = Español\nclose = Hola\n");
         let _ = std::fs::remove_dir_all(&cfg);
+    }
+
+    #[test]
+    fn bundled_ko_and_ja_have_the_default_folder_app_strings() {
+        let ids = [
+            "turn_off_before_uninstall",
+            "use_as_default_folder_app",
+            "win_e_and_special_folders_stay_with",
+            "could_not_change_default_folder_app",
+            "open_github",
+        ];
+        for (code, text) in [("ko", KO_INI), ("ja", JA_INI), ("fr", FR_INI), ("de", DE_INI)] {
+            let (_, map) = parse_ini(text);
+            for id in ids {
+                assert!(map.get(id).map(|s| !s.is_empty()).unwrap_or(false), "{code} missing {id}");
+            }
+        }
+        assert_eq!(
+            bundled_slot("ko", Key::TurnOffBeforeUninstall),
+            "Maguro를 완전히 삭제하고 싶을 때는 이 스위치를 끄고 나서 삭제해 주세요."
+        );
+        assert_eq!(bundled_slot("ko", Key::UseAsDefaultFolderApp), "기본 폴더 앱으로 사용");
+        assert_eq!(
+            bundled_slot("ja", Key::TurnOffBeforeUninstall),
+            "Maguroを完全に削除したいときは、このスイッチをオフにしてから削除してください。"
+        );
+        assert_eq!(bundled_slot("ja", Key::UseAsDefaultFolderApp), "既定のフォルダーアプリとして使用");
+        assert_eq!(
+            EN[Key::TurnOffBeforeUninstall as usize],
+            "If you want to remove Maguro completely, turn this switch off first, then delete it."
+        );
     }
 
     #[test]
