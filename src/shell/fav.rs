@@ -1950,6 +1950,9 @@ pub(crate) unsafe fn new_folder(i: usize) {
     let wide: Vec<u16> = full.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
     SHChangeNotify(SHCNE_MKDIR, SHCNF_PATHW, Some(wide.as_ptr() as _), None);
     if let Some(sv) = view_of::<IShellView>(i) {
+        // The shell can echo this Refresh as SHCNE_UPDATEDIR about two seconds later.
+        // Mark it first so that echo does not arm another Refresh over the rename box.
+        crate::shell::listsync::note_own_refresh(&dir);
         _ = sv.Refresh();
     }
     if let Ok(mut p) = PENDING_NEW.lock() {
