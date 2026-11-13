@@ -394,6 +394,8 @@ struct St {
     hot: Option<usize>,
     /// Pointer in client coordinates. Parent-painted segments, checks, and key buttons read it.
     cursor: Option<(i32, i32)>,
+    /// The shared tooltip has a tool for a truncated settings line. Installed is not the same as showing.
+    tip_on: bool,
     /// Last parent-painted hit, so a move inside the same control does not repaint.
     hover: i32,
     font: HFONT,
@@ -428,6 +430,7 @@ impl Default for St {
             keyq: String::new(),
             hot: None,
             cursor: None,
+            tip_on: false,
             hover: 0,
             font: HFONT::default(),
             small: HFONT::default(),
@@ -977,6 +980,216 @@ fn card_item(rect: RECT, spec: Spec, dpi: i32) -> CardItem {
         ctl
     };
     CardItem { spec, rect, ctl, sw, adv }
+}
+
+/// Which face a settings line is drawn with. The hover measure uses the same face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TipFace {
+    Body,
+    Small,
+    Title,
+}
+
+/// `paint_label` or `paint_meta`. Colour only; both are one line with an end ellipsis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TipInk {
+    Text,
+    Sub,
+}
+
+/// One single-line settings string that may end in an ellipsis.
+#[derive(Clone, Debug)]
+struct TipLine {
+    rect: RECT,
+    text: String,
+    face: TipFace,
+    ink: TipInk,
+    /// Intersect with the content viewport before hit-testing. Nav and the footer are not clipped.
+    clip: bool,
+}
+
+/// Strings painted on one card. Rects still come from the control kind, not from wrapping.
+struct CardText {
+    title: String,
+    desc: String,
+    more: String,
+    stack: Vec<String>,
+}
+
+struct TipHit<'a> {
+    line: &'a TipLine,
+    /// Visible part of the line. The bubble anchors here. Truncation uses the full line width.
+    anchor: RECT,
+}
+
+fn intersect_rect(a: RECT, b: RECT) -> Option<RECT> {
+    let r = RECT {
+        left: a.left.max(b.left),
+        top: a.top.max(b.top),
+        right: a.right.min(b.right),
+        bottom: a.bottom.min(b.bottom),
+    };
+    (r.right > r.left && r.bottom > r.top).then_some(r)
+}
+
+/// Full text for a hover tip, or none when `text` is empty or already fits in the box.
+/// Wider than the box is the address bar's single-line rule: that is when the end ellipsis is drawn.
+fn ellipsis_tip<'a>(text: &'a str, text_px: i32, box_px: i32) -> Option<&'a str> {
+    if text.is_empty() || !crate::addr_line_truncated(text_px, box_px) {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn line_tip<'a>(line: &'a TipLine, text_px: i32) -> Option<&'a str> {
+    ellipsis_tip(&line.text, text_px, line.rect.right - line.rect.left)
+}
+
+fn push_tip(out: &mut Vec<TipLine>, rect: RECT, text: &str, face: TipFace, ink: TipInk, clip: bool) {
+    if text.is_empty() || rect.right <= rect.left || rect.bottom <= rect.top {
+        return;
+    }
+    out.push(TipLine { rect, text: text.to_string(), face, ink, clip });
+}
+
+/// Title, description, and the extra line on a card. The card rect is already laid out;
+/// this only names the boxes `draw_card` paints, so a tip can use the same boxes.
+fn card_tip_lines(c: &CardItem, dpi: i32, copy: &CardText) -> Vec<TipLine> {
+    let dpi = dpi.max(96);
+    let mut out = Vec::new();
+    if c.spec.ctl == Ctl::WmPath {
+        let title_r = RECT {
+            left: c.rect.left + sc(dpi, 16),
+            top: c.rect.top + sc(dpi, 12),
+            right: c.adv[0].left - sc(dpi, 12),
+            bottom: c.adv[0].bottom,
+        };
+        push_tip(&mut out, title_r, &copy.title, TipFace::Body, TipInk::Text, true);
+        let desc_r = RECT {
+            left: c.rect.left + sc(dpi, 16),
+            top: c.adv[0].bottom + sc(dpi, 2),
+            right: c.rect.right - sc(dpi, 16),
+            bottom: c.ctl.top - sc(dpi, 4),
+        };
+        push_tip(&mut out, desc_r, &copy.desc, TipFace::Small, TipInk::Sub, true);
+        return out;
+    }
+    if c.spec.ctl == Ctl::About {
+        let text_r = RECT {
+            left: c.rect.left + sc(dpi, 16),
+            top: c.rect.top + sc(dpi, 12),
+            right: c.ctl.left - sc(dpi, 12),
+            bottom: c.rect.bottom - sc(dpi, 12),
+        };
+        let line = sc(dpi, 18);
+        let title_line = RECT { bottom: text_r.top + sc(dpi, 20), ..text_r };
+        push_tip(&mut out, title_line, &copy.title, TipFace::Body, TipInk::Text, true);
+        let mut y = title_line.bottom;
+        for s in &copy.stack {
+            let r = RECT { top: y, bottom: (y + line).min(text_r.bottom), ..text_r };
+            push_tip(&mut out, r, s, TipFace::Small, TipInk::Sub, true);
+            y = r.bottom;
+        }
+        return out;
+    }
+    let text_r = RECT {
+        left: c.rect.left + sc(dpi, 16),
+        top: c.rect.top + sc(dpi, 12),
+        right: c.ctl.left.min(c.sw.first().map(|s| s.left).unwrap_or(i32::MAX)) - sc(dpi, 12),
+        bottom: c.rect.bottom - sc(dpi, 12),
+    };
+    let title_line = if tx(c.spec.desc).is_empty() {
+        text_r
+    } else {
+        RECT { bottom: text_r.top + sc(dpi, 20), ..text_r }
+    };
+    let title_ink = if c.spec.live { TipInk::Text } else { TipInk::Sub };
+    push_tip(&mut out, title_line, &copy.title, TipFace::Body, title_ink, true);
+    if c.spec.ctl == Ctl::EvStatus || c.spec.ctl == Ctl::WmStatus {
+        let line = sc(dpi, 18);
+        let desc_r = RECT { top: title_line.bottom, bottom: title_line.bottom + line, ..text_r };
+        if c.spec.ctl == Ctl::WmStatus {
+            push_tip(&mut out, desc_r, &copy.desc, TipFace::Small, TipInk::Text, true);
+            let more = RECT { top: desc_r.bottom, bottom: (desc_r.bottom + line).min(text_r.bottom), ..text_r };
+            push_tip(&mut out, more, &copy.more, TipFace::Small, TipInk::Sub, true);
+        } else {
+            push_tip(&mut out, desc_r, &copy.desc, TipFace::Small, TipInk::Text, true);
+        }
+    } else if c.spec.ctl == Ctl::EvAct {
+        let line = sc(dpi, 18);
+        let desc_r = RECT { top: title_line.bottom, bottom: (title_line.bottom + line).min(text_r.bottom), ..text_r };
+        push_tip(&mut out, desc_r, &copy.desc, TipFace::Small, TipInk::Sub, true);
+    } else if c.spec.ctl == Ctl::Adv {
+        let line = sc(dpi, 18);
+        let desc_r = RECT { top: title_line.bottom, bottom: title_line.bottom + line, ..text_r };
+        push_tip(&mut out, desc_r, &copy.desc, TipFace::Small, TipInk::Sub, true);
+        let path_r = RECT {
+            left: c.rect.left + sc(dpi, 16),
+            top: desc_r.bottom,
+            right: c.rect.right - sc(dpi, 16),
+            bottom: c.rect.bottom - sc(dpi, 6),
+        };
+        push_tip(&mut out, path_r, &copy.more, TipFace::Small, TipInk::Text, true);
+    } else if c.spec.ctl == Ctl::Toggle(TG_CLIP) || c.spec.ctl == Ctl::Toggle(TG_FOLDER) {
+        let line = sc(dpi, 16);
+        let desc_r = RECT { top: title_line.bottom, bottom: (title_line.bottom + line).min(text_r.bottom), ..text_r };
+        push_tip(&mut out, desc_r, &copy.desc, TipFace::Small, TipInk::Sub, true);
+        let more = RECT { top: desc_r.bottom, bottom: text_r.bottom, ..text_r };
+        push_tip(&mut out, more, &copy.more, TipFace::Small, TipInk::Text, true);
+    } else if !tx(c.spec.desc).is_empty() {
+        push_tip(&mut out, RECT { top: title_line.bottom, ..text_r }, &copy.desc, TipFace::Small, TipInk::Sub, true);
+    }
+    out
+}
+
+/// Nav labels, the page title, section heads, notes, and every card line.
+/// `cards` supplies the strings `draw_card` paints, including live status text.
+fn settings_tip_lines(g: &Geo, page: usize, dpi: i32, mut cards: impl FnMut(&CardItem) -> CardText) -> Vec<TipLine> {
+    let dpi = dpi.max(96);
+    let mut out = Vec::new();
+    if !g.show.iter().any(|s| *s) {
+        let r = RECT {
+            left: sc(dpi, 16),
+            top: g.search.bottom + sc(dpi, 12),
+            right: g.nav_w - sc(dpi, 8),
+            bottom: g.search.bottom + sc(dpi, 40),
+        };
+        push_tip(&mut out, r, tx(NONE), TipFace::Small, TipInk::Sub, false);
+    }
+    for i in 0..PAGE_N {
+        if !g.show[i] {
+            continue;
+        }
+        let r = g.nav[i];
+        push_tip(&mut out, RECT { left: r.left + sc(dpi, 14), ..r }, tx(PAGES[i]), TipFace::Body, TipInk::Text, false);
+    }
+    push_tip(&mut out, g.hint, tx(FOOT), TipFace::Small, TipInk::Sub, false);
+    if page < PAGES.len() {
+        push_tip(&mut out, g.title, tx(PAGES[page]), TipFace::Title, TipInk::Text, true);
+    }
+    for item in &g.items {
+        match item {
+            Item::Card(c) => out.extend(card_tip_lines(c, dpi, &cards(c))),
+            Item::Head(r, key) => push_tip(&mut out, *r, tx(*key), TipFace::Body, TipInk::Text, true),
+            Item::Note(r, key) | Item::CtxEmpty(r, key) => push_tip(&mut out, *r, tx(*key), TipFace::Small, TipInk::Sub, true),
+            Item::Alert(r) => {
+                if let Some(note) = crate::cliphot::registration_notice() {
+                    push_tip(&mut out, *r, &note, TipFace::Small, TipInk::Text, true);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The top-most line under `(x, y)`. Clipped lines only count inside `content`.
+fn tip_hit<'a>(lines: &'a [TipLine], x: i32, y: i32, content: RECT) -> Option<TipHit<'a>> {
+    lines.iter().rev().find_map(|line| {
+        let anchor = if line.clip { intersect_rect(line.rect, content)? } else { line.rect };
+        inside(anchor, x, y).then_some(TipHit { line, anchor })
+    })
 }
 
 /// Stored favourites tree, depth-first, including children of a collapsed group.
@@ -2188,5 +2401,188 @@ mod tests {
         assert!(both.items.iter().any(|it| matches!(it, Item::FavRestore(_))));
         assert_eq!(fav_table(&both).top, both.title.bottom + 16);
         assert!(fav_btn(&both).left > both.title.right);
+    }
+
+    fn card_copy(c: &CardItem) -> CardText {
+        CardText {
+            title: tx(c.spec.title).to_string(),
+            desc: tx(c.spec.desc).to_string(),
+            more: String::new(),
+            stack: Vec::new(),
+        }
+    }
+
+    fn shot_at(page: usize, dpi: i32) -> Snap {
+        let mut sn = shot(page, "");
+        sn.dpi = dpi;
+        sn
+    }
+
+    fn client_at(dpi: i32) -> RECT {
+        RECT { left: 0, top: 0, right: sc(dpi, 1000), bottom: sc(dpi, 700) }
+    }
+
+    fn card_of(g: &Geo, ctl: Ctl) -> &CardItem {
+        g.items.iter().find_map(|it| match it {
+            Item::Card(c) if c.spec.ctl == ctl => Some(c),
+            _ => None,
+        }).expect("card")
+    }
+
+    /// Theme is not an input. The box is already in physical pixels, so every DPI uses this rule.
+    #[test]
+    fn ellipsis_tip_is_the_full_string_only_when_the_line_is_wider_than_the_box() {
+        let text = "The default follows the Windows display language (Korean, Japanese, or English); otherwise English. A change applies right away.";
+        assert!(text.contains("English"));
+        assert_eq!(ellipsis_tip(text, 800, 200), Some(text));
+        assert_eq!(ellipsis_tip(text, 200, 200), None);
+        assert_eq!(ellipsis_tip(text, 199, 200), None);
+        assert_eq!(ellipsis_tip("", 40, 10), None);
+        assert_eq!(ellipsis_tip("Font", 32, 32), None);
+        assert_eq!(ellipsis_tip("Font", 33, 32), Some("Font"));
+        assert_eq!(crate::addr_line_truncated(33, 32), ellipsis_tip("Font", 33, 32).is_some());
+        assert!(!crate::addr_line_truncated(32, 32));
+    }
+
+    #[test]
+    fn card_descriptions_and_labels_tip_only_when_truncated_and_keep_their_box() {
+        let _lock = ui_lock();
+        let _keep = lang(0);
+        for page in [0usize, 1, 2, 3] {
+            let g = geo(client(), &shot(page, ""));
+            for item in &g.items {
+                let Item::Card(c) = item else { continue };
+                assert_eq!(c.rect.bottom - c.rect.top, card_h(&c.spec, 96));
+                let lines = card_tip_lines(c, 96, &card_copy(c));
+                for line in &lines {
+                    assert!(line.rect.bottom <= c.rect.bottom, "a tip line stays inside the card");
+                    assert!(line.rect.right <= c.rect.right);
+                    let box_px = line.rect.right - line.rect.left;
+                    assert!(box_px > 0);
+                    assert_eq!(line_tip(line, box_px), None, "{}", line.text);
+                    assert_eq!(line_tip(line, box_px + 1), Some(line.text.as_str()), "{}", line.text);
+                }
+                let desc = tx(c.spec.desc);
+                if desc.is_empty() {
+                    continue;
+                }
+                let line = lines.iter().find(|l| l.text == desc).expect(desc);
+                let content = RECT { left: 0, top: 0, right: 4000, bottom: 4000 };
+                let x = (line.rect.left + line.rect.right) / 2;
+                let y = (line.rect.top + line.rect.bottom) / 2;
+                let hit = tip_hit(&lines, x, y, content).expect(desc);
+                assert_eq!(hit.line.text, desc);
+                assert_eq!(line_tip(hit.line, 100_000), Some(desc));
+                let cx = (c.ctl.left + c.ctl.right) / 2;
+                let cy = (c.ctl.top + c.ctl.bottom) / 2;
+                assert!(tip_hit(&lines, cx, cy, content).is_none(), "the control is not the description");
+                let above = RECT { bottom: line.rect.top, ..content };
+                assert!(tip_hit(&lines, x, y, above).is_none(), "a line scrolled out of the viewport has no tip");
+            }
+        }
+        let g = geo(client(), &shot(0, ""));
+        assert!(tx(card_of(&g, Ctl::Lang).spec.desc).contains("English"));
+        assert!(tx(card_of(&g, Ctl::Face).spec.desc).contains("whole window"));
+        assert!(tx(card_of(&g, Ctl::Toggle(TG_ONE)).spec.desc).contains("dragging a"));
+    }
+
+    #[test]
+    fn korean_pane_and_file_descriptions_use_the_same_truncation_rule() {
+        let _lock = ui_lock();
+        let _keep = lang(1);
+        for page in [2usize, 3] {
+            let g = geo(client(), &shot(page, ""));
+            let mut saw = false;
+            for item in &g.items {
+                let Item::Card(c) = item else { continue };
+                let desc = tx(c.spec.desc);
+                if desc.is_empty() {
+                    continue;
+                }
+                saw = true;
+                let lines = card_tip_lines(c, 96, &card_copy(c));
+                let line = lines.iter().find(|l| l.text == desc).expect("korean description");
+                let box_px = line.rect.right - line.rect.left;
+                assert_eq!(c.rect.bottom - c.rect.top, card_h(&c.spec, 96));
+                assert_eq!(line_tip(line, box_px), None);
+                assert_eq!(line_tip(line, box_px + 1), Some(desc));
+            }
+            assert!(saw, "page {page} has a description");
+        }
+    }
+
+    #[test]
+    fn description_box_scales_with_dpi_and_the_card_stays_one_line_tall() {
+        let _lock = ui_lock();
+        let _keep = lang(0);
+        let mut widths = Vec::new();
+        for dpi in [96, 144, 192] {
+            let g = geo(client_at(dpi), &shot_at(0, dpi));
+            let c = card_of(&g, Ctl::Lang);
+            assert_eq!(c.rect.bottom - c.rect.top, card_h(&c.spec, dpi));
+            let line = card_tip_lines(c, dpi, &card_copy(c)).into_iter().find(|l| l.text.contains("English")).expect("language description");
+            assert_eq!(line.rect.top, c.rect.top + sc(dpi, 12) + sc(dpi, 20));
+            assert_eq!(line.rect.bottom, c.rect.bottom - sc(dpi, 12));
+            widths.push(line.rect.right - line.rect.left);
+        }
+        assert_eq!(widths[1] * 2, widths[0] * 3, "144 DPI is 1.5× the 96 DPI box");
+        assert_eq!(widths[2], widths[0] * 2, "192 DPI is 2× the 96 DPI box");
+        let text = tx(crate::Key::DefaultFollowsWindowsDisplayLanguageKorea);
+        assert_eq!(ellipsis_tip(text, widths[0] + 1, widths[0]), Some(text));
+        assert_eq!(ellipsis_tip(text, widths[2], widths[2]), None);
+    }
+
+    #[test]
+    fn measured_description_overflows_and_a_short_label_does_not() {
+        let _lock = ui_lock();
+        let _keep = lang(0);
+        let desc = tx(crate::Key::DefaultFollowsWindowsDisplayLanguageKorea);
+        let label = tx(crate::Key::DisplayLanguage);
+        assert!(desc.contains("English"));
+        for dpi in [96, 144, 192] {
+            let g = geo(client_at(dpi), &shot_at(0, dpi));
+            let card = card_of(&g, Ctl::Lang);
+            let lines = card_tip_lines(card, dpi, &card_copy(card));
+            let desc_line = lines.iter().find(|l| l.text == desc).expect("description");
+            let title_line = lines.iter().find(|l| l.text == label).expect("label");
+            assert_eq!(card.rect.bottom - card.rect.top, card_h(&card.spec, dpi));
+            unsafe {
+                let meta = crate::test_meta_font(dpi);
+                let body = crate::test_body_font(dpi);
+                let dc = GetDC(None);
+                let wide = win::text_w(dc, meta, desc);
+                let short = win::text_w(dc, body, label);
+                if !dc.is_invalid() {
+                    let _ = ReleaseDC(None, dc);
+                }
+                crate::delete_font(meta);
+                crate::delete_font(body);
+                let box_px = desc_line.rect.right - desc_line.rect.left;
+                let title_box = title_line.rect.right - title_line.rect.left;
+                assert!(wide > box_px, "dpi {dpi}: description is {wide}px in a {box_px}px box");
+                assert_eq!(line_tip(desc_line, wide), Some(desc));
+                assert_eq!(line_tip(desc_line, box_px), None);
+                assert!(short <= title_box, "dpi {dpi}: label is {short}px in a {title_box}px box");
+                assert_eq!(line_tip(title_line, short), None);
+                assert_eq!(line_tip(title_line, title_box + 1), Some(label));
+            }
+        }
+    }
+
+    #[test]
+    fn nav_label_tips_only_when_it_does_not_fit() {
+        let _lock = ui_lock();
+        let _keep = lang(0);
+        let g = geo(client(), &shot(0, ""));
+        let lines = settings_tip_lines(&g, 0, 96, card_copy);
+        let general = lines.iter().find(|l| l.text == tx(PAGES[0]) && !l.clip).expect("nav label");
+        let box_px = general.rect.right - general.rect.left;
+        assert_eq!(line_tip(general, box_px), None);
+        assert_eq!(line_tip(general, box_px + 1), Some(tx(PAGES[0])));
+        let x = (general.rect.left + general.rect.right) / 2;
+        let y = (general.rect.top + general.rect.bottom) / 2;
+        let hit = tip_hit(&lines, x, y, g.content).expect("nav");
+        assert_eq!(hit.line.text, tx(PAGES[0]));
+        assert!(!hit.line.clip);
     }
 }
