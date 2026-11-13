@@ -75,6 +75,74 @@ unsafe fn reveal(h: HWND) {
     let _ = UpdateWindow(h);
 }
 
+/// Screen origin for a `ww`×`hh` window. Centered on `owner`, then kept inside the
+/// top-level window and that monitor's work area. A rect Win32 does not return stays
+/// empty, and an empty axis is left alone.
+unsafe fn dialog_xy(owner: HWND, ww: i32, hh: i32) -> (i32, i32) {
+    let mut orc = RECT::default();
+    let _ = GetWindowRect(owner, &mut orc);
+    let x = orc.left + (orc.right - orc.left - ww) / 2;
+    let y = orc.top + (orc.bottom - orc.top - hh) / 2;
+    clamp_dialog_xy(ww, hh, x, y, top_level_rect(owner), monitor_work(owner))
+}
+
+unsafe fn top_level_rect(owner: HWND) -> RECT {
+    let root = GetAncestor(owner, GA_ROOT);
+    let mut rc = RECT::default();
+    if root.0.is_null() || GetWindowRect(root, &mut rc).is_err() {
+        RECT::default()
+    } else {
+        rc
+    }
+}
+
+unsafe fn monitor_work(owner: HWND) -> RECT {
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if GetMonitorInfoW(MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+        mi.rcWork
+    } else {
+        RECT::default()
+    }
+}
+
+/// Moves (`x`, `y`) so a `ww`×`hh` dialog lies inside `root`, then inside `work`.
+/// An axis with `right <= left` or `bottom <= top` is left alone. A dialog that does
+/// not fit is pinned to that rect's top-left. The arithmetic stays in `i64` so an
+/// `i32` size or coordinate cannot wrap.
+fn clamp_dialog_xy(ww: i32, hh: i32, x: i32, y: i32, root: RECT, work: RECT) -> (i32, i32) {
+    let (x, y) = clamp_into(ww, hh, x, y, root);
+    clamp_into(ww, hh, x, y, work)
+}
+
+fn clamp_into(ww: i32, hh: i32, x: i32, y: i32, area: RECT) -> (i32, i32) {
+    (clamp_axis(x, ww, area.left, area.right), clamp_axis(y, hh, area.top, area.bottom))
+}
+
+fn clamp_axis(pos: i32, size: i32, lo: i32, hi: i32) -> i32 {
+    if hi <= lo {
+        return pos;
+    }
+    // No extent: keep the point inside the axis. `lo < hi` here, so clamp cannot panic.
+    if size <= 0 {
+        return pos.clamp(lo, hi);
+    }
+    let span = (hi as i64) - (lo as i64);
+    let size = size as i64;
+    if size > span {
+        return lo;
+    }
+    let max_pos = (hi as i64) - size;
+    let pos = pos as i64;
+    let clamped = if pos < lo as i64 {
+        lo as i64
+    } else if pos > max_pos {
+        max_pos
+    } else {
+        pos
+    };
+    clamped as i32
+}
+
 pub unsafe fn open(owner: HWND) {
     ensure_class();
     let h = hwnd();
@@ -86,10 +154,7 @@ pub unsafe fn open(owner: HWND) {
     }
     let dpi = GetDpiForWindow(owner) as i32;
     let (ww, hh) = (sc(dpi.max(96), 1000), sc(dpi.max(96), 640));
-    let mut orc = RECT::default();
-    let _ = GetWindowRect(owner, &mut orc);
-    let x = orc.left + (orc.right - orc.left - ww) / 2;
-    let y = orc.top + (orc.bottom - orc.top - hh) / 2;
+    let (x, y) = dialog_xy(owner, ww, hh);
     // Shown from `reveal`, after the dark caption is set. WS_VISIBLE here is the
     // white first frame: the menu command returns and restores over the client.
     let style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
@@ -2648,10 +2713,7 @@ pub(crate) unsafe fn show_about(owner: HWND) {
     } else {
         (client_w, client_h + sc(dpi, 48))
     };
-    let mut orc = RECT::default();
-    let _ = GetWindowRect(owner, &mut orc);
-    let x = orc.left + (orc.right - orc.left - ww) / 2;
-    let y = orc.top + (orc.bottom - orc.top - hh) / 2;
+    let (x, y) = dialog_xy(owner, ww, hh);
     let title = {
         let base = tx(crate::Key::AboutMaguro);
         let hash = env!("MAGURO_GIT_HASH");
@@ -2980,10 +3042,7 @@ unsafe fn ask_with(owner: HWND, title: &str, initial: &str) -> Option<String> {
     ASK_OUT.with(|o| *o.borrow_mut() = None);
     let dpi = GetDpiForWindow(owner).max(96) as i32;
     let (ww, hh) = ask_outer(dpi);
-    let mut orc = RECT::default();
-    let _ = GetWindowRect(owner, &mut orc);
-    let x = orc.left + (orc.right - orc.left - ww) / 2;
-    let y = orc.top + (orc.bottom - orc.top - hh) / 2;
+    let (x, y) = dialog_xy(owner, ww, hh);
     // Shown only after the dark caption attributes are set, or the first frame stays light.
     let h = CreateWindowExW(WS_EX_DLGMODALFRAME, w!("MaguroAsk"), &HSTRING::from(title), ask_style(), x, y, ww, hh, Some(owner), None, None, None).unwrap_or_default();
     if h.0.is_null() {
@@ -3357,5 +3416,146 @@ mod tests {
         let file_len = ask_utf16_len(file);
         assert_eq!(ask_open_sel(file), (file_len, file_len));
         assert_ne!(ask_open_sel(file).0, 0);
+    }
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT { left, top, right, bottom }
+    }
+
+    /// The old placement: the center of the owner, with no clamp.
+    fn owner_center(owner: RECT, ww: i32, hh: i32) -> (i32, i32) {
+        (owner.left + (owner.right - owner.left - ww) / 2, owner.top + (owner.bottom - owner.top - hh) / 2)
+    }
+
+    fn fits(x: i32, y: i32, ww: i32, hh: i32, area: RECT) -> bool {
+        x as i64 >= area.left as i64
+            && y as i64 >= area.top as i64
+            && x as i64 + ww as i64 <= area.right as i64
+            && y as i64 + hh as i64 <= area.bottom as i64
+    }
+
+    #[test]
+    fn clamp_dialog_pulls_a_narrow_left_panel_inside_the_root() {
+        // Favorites rename: owner is a thin left strip, dialog is 360 DIP wide.
+        let owner = rect(0, 0, 200, 1080);
+        let root = rect(0, 0, 1920, 1080);
+        let work = root;
+        let (ww, hh) = (360, 200);
+        let (x0, y0) = owner_center(owner, ww, hh);
+        assert!(x0 < 0, "unclamped center is the bug, x={x0}");
+        let (x, y) = clamp_dialog_xy(ww, hh, x0, y0, root, work);
+        assert!(fits(x, y, ww, hh, root));
+        assert!(fits(x, y, ww, hh, work));
+        assert_eq!(x, root.left);
+        assert_eq!(y, y0);
+    }
+
+    #[test]
+    fn clamp_dialog_keeps_a_center_that_already_fits() {
+        let owner = rect(100, 80, 1400, 900);
+        let root = owner;
+        let work = rect(0, 0, 1920, 1040);
+        let (ww, hh) = (360, 200);
+        let (x0, y0) = owner_center(owner, ww, hh);
+        assert!(fits(x0, y0, ww, hh, root));
+        assert!(fits(x0, y0, ww, hh, work));
+        assert_eq!(clamp_dialog_xy(ww, hh, x0, y0, root, work), (x0, y0));
+    }
+
+    #[test]
+    fn clamp_dialog_pins_an_oversized_dialog_to_the_top_left() {
+        let root = rect(40, 50, 200, 180);
+        let work = rect(0, 0, 1920, 1080);
+        let (ww, hh) = (360, 200);
+        // Larger than the app window, still inside the work area at the window's corner.
+        assert_eq!(clamp_dialog_xy(ww, hh, 80, 90, root, work), (root.left, root.top));
+        // Larger than the work area too: pin to the work area's corner, not the center.
+        let tight = rect(10, 20, 100, 80);
+        assert_eq!(clamp_dialog_xy(ww, hh, 80, 90, root, tight), (tight.left, tight.top));
+        // Root corner sits outside the work area, and the dialog does fit in the work area.
+        let off = rect(-100, -100, 50, 50);
+        assert_eq!(clamp_dialog_xy(ww, hh, 0, 0, off, work), (work.left, work.top));
+    }
+
+    #[test]
+    fn clamp_dialog_pulls_the_right_and_bottom_edges_inside() {
+        let root = rect(0, 0, 1920, 1080);
+        let work = root;
+        let (ww, hh) = (360, 200);
+        let owner = rect(1800, 980, 1920, 1080);
+        let (x0, y0) = owner_center(owner, ww, hh);
+        assert!(x0 as i64 + ww as i64 > root.right as i64);
+        assert!(y0 as i64 + hh as i64 > root.bottom as i64);
+        let (x, y) = clamp_dialog_xy(ww, hh, x0, y0, root, work);
+        assert_eq!((x, y), (root.right - ww, root.bottom - hh));
+        assert!(fits(x, y, ww, hh, root));
+    }
+
+    #[test]
+    fn clamp_dialog_does_not_pull_a_second_monitor_back_to_zero() {
+        let (ww, hh) = (360, 200);
+        let root = rect(1920, 0, 3840, 1080);
+        let work = root;
+        let (x0, y0) = owner_center(rect(1920, 0, 2120, 1080), ww, hh);
+        assert!(x0 < root.left);
+        let (x, y) = clamp_dialog_xy(ww, hh, x0, y0, root, work);
+        assert_eq!(x, 1920);
+        assert_eq!(y, y0);
+        assert!(fits(x, y, ww, hh, work));
+
+        let (cx, cy) = owner_center(root, ww, hh);
+        assert_eq!(clamp_dialog_xy(ww, hh, cx, cy, root, work), (cx, cy));
+        assert!(cx > 1920);
+
+        let neg = rect(-1920, 0, 0, 1080);
+        let (nx, ny) = owner_center(rect(-1920, 0, -1720, 1080), ww, hh);
+        assert!(nx < neg.left);
+        let (x, y) = clamp_dialog_xy(ww, hh, nx, ny, neg, neg);
+        assert_eq!(x, -1920);
+        assert_eq!(y, ny);
+        assert!(fits(x, y, ww, hh, neg));
+    }
+
+    #[test]
+    fn clamp_dialog_stays_above_the_taskbar_after_the_root_clamp() {
+        let root = rect(0, 0, 1920, 1080);
+        let work = rect(0, 0, 1920, 1040);
+        let (ww, hh) = (360, 200);
+        let (x0, y0) = owner_center(rect(0, 900, 1920, 1080), ww, hh);
+        let (x, y) = clamp_dialog_xy(ww, hh, x0, y0, root, work);
+        assert!(fits(x, y, ww, hh, work));
+        assert_eq!(y + hh, work.bottom);
+        assert!(y + hh < root.bottom);
+
+        // Root is applied before work. A point inside the work area is still
+        // moved onto the app window, then pulled back if that misses the work area.
+        let narrow = rect(2000, 0, 2500, 1080);
+        let wide = rect(0, 0, 1920, 1080);
+        assert_eq!(clamp_dialog_xy(ww, hh, 100, 100, narrow, wide), (wide.right - ww, 100));
+    }
+
+    #[test]
+    fn clamp_dialog_skips_empty_rects_and_does_not_overflow() {
+        assert_eq!(clamp_dialog_xy(360, 200, -80, 440, RECT::default(), RECT::default()), (-80, 440));
+        let flipped = rect(100, 80, 40, 10);
+        assert_eq!(clamp_dialog_xy(360, 200, -80, 440, flipped, RECT::default()), (-80, 440));
+        // Only the rect that was actually fetched is applied.
+        let work = rect(0, 0, 1920, 1040);
+        let (x, y) = clamp_dialog_xy(360, 200, -80, 900, RECT::default(), work);
+        assert_eq!(x, 0);
+        assert!(fits(x, y, 360, 200, work));
+
+        let huge = rect(5, 6, 50, 60);
+        assert_eq!(clamp_dialog_xy(i32::MAX, i32::MAX, i32::MAX, i32::MAX, huge, RECT::default()), (5, 6));
+        assert_eq!(clamp_dialog_xy(i32::MAX, i32::MAX, i32::MIN, i32::MIN, RECT::default(), RECT::default()), (i32::MIN, i32::MIN));
+
+        let edge = rect(i32::MAX - 10, i32::MAX - 10, i32::MAX, i32::MAX);
+        assert_eq!(clamp_dialog_xy(4, 4, i32::MAX, i32::MAX, edge, RECT::default()), (i32::MAX - 4, i32::MAX - 4));
+
+        let (x, y) = clamp_dialog_xy(i32::MIN, -5, -1000, 5_000, rect(0, 0, 100, 80), RECT::default());
+        assert_eq!((x, y), (0, 80));
+        // No extent: the point is clamped on each valid axis. The work rect's width is empty, so x is left alone.
+        let (x, y) = clamp_dialog_xy(0, 0, 40, -3, rect(0, 0, 100, 80), rect(10, 10, 10, 90));
+        assert_eq!((x, y), (40, 10));
     }
 }
