@@ -33,7 +33,7 @@
 <br>
 
 <p align="center">
-  <a href="https://samek86.github.io/maguro/demo-en.mp4"><img src="docs/demo-en.gif" width="320" alt="Maguro in motion"></a>
+  <a href="https://samek86.github.io/maguro/demo-en.mp4"><img src="docs/demo-en.gif" width="360" alt="Maguro in motion"></a>
 </p>
 
 <p align="center">▶ <a href="https://samek86.github.io/maguro/demo-en.mp4">Watch the full video</a> (60 s)</p>
