@@ -1,4 +1,5 @@
 //! Add or edit a favourite. Kind, name, and icon are shared.
+//! The automatic / custom row keeps a live preview of the chosen icon, or the kind's default.
 //! Folder and file keep the path they have always stored. A password stays in the
 //! edit and in Credential Manager; the favourites file only records that one exists.
 //! An older memo or RDP extra block is kept on the leaf and written back. It is not shown.
@@ -12,13 +13,14 @@ use crate::app::{app, text_of};
 use crate::i18n::tr;
 use crate::imports::*;
 use crate::session::{
-    node_from_draft, node_ref, shell_places, stored_has_password, write_leaf, Draft, ItemIcon, ItemKind, RdpScreen, SecretPlan, KINDS, RDP_WINDOWS,
+    fav_glyph, node_from_draft, node_ref, shell_places, stored_has_password, write_leaf, Draft, FavGlyph, ItemIcon, ItemKind, RdpScreen, SecretPlan, KINDS, RDP_WINDOWS,
 };
 use crate::shell::{forget_hosts, stage_secret};
 
 use super::{
-    body_font, bold_ui_font, buffered, color_field_edit, field_edit_rect, paint_button, paint_check, paint_field, paint_label, paint_meta, paint_section_header,
-    paint_segment_group, paint_window, segment_row, segment_widths, style_popup_chrome, visual_from_pointer, wrap_text, ButtonKind, FocusRing, SegmentCell, BTN_GAP, BTN_H_FOOTER, BTN_MIN_W, FIELD_H, FIELD_PAD_X,
+    body_font, bold_ui_font, buffered, color_field_edit, draw_fav_icon, field_edit_rect, icon_font, paint_button, paint_card_fill, paint_check, paint_field, paint_label, paint_leaf_icon, paint_meta,
+    paint_section_header, paint_segment_group, paint_window, pal, segment_row, segment_widths, shell_icon, style_popup_chrome, text, visual_from_pointer, wrap_text, ButtonKind, FocusRing, SegmentCell,
+    BTN_GAP, BTN_H_FOOTER, BTN_MIN_W, FIELD_H, FIELD_PAD_X,
     FONT_PX, PAD_BODY_X, PAD_BODY_Y, SPACE_4, SPACE_8, px,
 };
 
@@ -52,6 +54,8 @@ const HIT_BROWSE_ICON: i32 = 30;
 const HIT_OK: i32 = 31;
 const HIT_CANCEL: i32 = 32;
 const HIT_ICON_LIST: i32 = 33;
+/// Side of the icon preview, DIP. It shares the automatic / custom row.
+const ICON_PREVIEW_DIP: i32 = 32;
 
 static EDIT_PROC: AtomicIsize = AtomicIsize::new(0);
 
@@ -81,6 +85,8 @@ pub(crate) struct Geom {
     pub(crate) admin: RECT,
     pub(crate) icon_auto: RECT,
     pub(crate) icon_custom: RECT,
+    /// Chosen icon, or the kind's default. Same place in automatic and custom. Not a tab stop.
+    pub(crate) icon_preview: RECT,
     pub(crate) index: RECT,
     pub(crate) icon_list: RECT,
     pub(crate) note: RECT,
@@ -179,6 +185,7 @@ pub(crate) unsafe fn open_item_dialog(owner: HWND, parent: &[usize], edit: Optio
     };
     let ptr = Box::into_raw(Box::new(dlg));
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
+    super::note_side(hwnd);
     let font = body_font();
     let specs = [
         (ID_NAME, 0u32),
@@ -374,10 +381,15 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
     y = icon_lab.bottom + gap4;
     let auto_label = tr(crate::Key::Automatic);
     let custom_label = tr(crate::Key::IconCustom);
-    let icon_w = segment_widths(&[auto_label, custom_label], inner, dpi);
+    // Preview stays on this row in both modes. The segment gives up the square and one gap.
+    let preview_side = s(ICON_PREVIEW_DIP);
+    let seg_right = (right - preview_side - gap).max(pad);
+    let seg_inner = (seg_right - pad).max(1);
+    let icon_w = segment_widths(&[auto_label, custom_label], seg_inner, dpi);
     let icon_row = segment_row(pad, y, seg_h, &icon_w);
     let icon_auto = icon_row[0];
     let icon_custom = icon_row[1];
+    let icon_preview = icon_preview_rect(y, seg_h, right, preview_side, gap4, gap);
     y = icon_custom.bottom + gap;
     let (index, icon_list) = if custom_icon {
         let list_w = s(BTN_MIN_W);
@@ -409,6 +421,7 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
         admin,
         icon_auto,
         icon_custom,
+        icon_preview,
         index,
         icon_list,
         note,
@@ -418,6 +431,34 @@ pub(crate) fn form_geom(dpi: i32, width: i32, kind: ItemKind, custom_icon: bool,
         cancel,
         height: y,
     }
+}
+
+/// Square on the icon-source row, centered on the segment and kept inside the gaps around it.
+fn icon_preview_rect(row_top: i32, row_h: i32, right: i32, side: i32, gap_above: i32, gap_below: i32) -> RECT {
+    let min_top = row_top - gap_above;
+    let max_top = row_top + row_h + gap_below - side;
+    let top = (row_top + (row_h - side) / 2).clamp(min_top, max_top.max(min_top));
+    RECT { left: right - side, top, right, bottom: top + side }
+}
+
+/// What the preview draws. An empty custom path, and automatic mode, use the kind's default.
+fn icon_preview_input(kind: ItemKind, target: &str, custom: bool, icon_path: &str, icon_index_text: &str) -> FavGlyph {
+    icon_preview_glyph(kind, target, custom, icon_path, parse_icon_index(icon_index_text))
+}
+
+fn icon_preview_glyph(kind: ItemKind, target: &str, custom: bool, icon_path: &str, icon_index: i32) -> FavGlyph {
+    let chosen = (custom && !icon_path.trim().is_empty()).then(|| ItemIcon { path: icon_path.to_string(), index: icon_index });
+    fav_glyph(kind, target, chosen.as_ref())
+}
+
+fn parse_icon_index(text: &str) -> i32 {
+    text.trim().parse().unwrap_or(0)
+}
+
+/// Card fill and hairline. `paint_card_fill` paints this fill; its border is the token line.
+fn icon_preview_frame(dark: bool) -> (u32, u32) {
+    let t = super::tokens_for(dark);
+    (t.card, t.line)
 }
 
 fn slot_rect(g: &Geom, slot: Slot) -> Option<RECT> {
@@ -794,6 +835,11 @@ unsafe extern "system" fn item_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             paint(h);
             LRESULT(0)
         }
+        super::WM_FAV_ICON => {
+            super::clear_icon_refresh();
+            let _ = InvalidateRect(Some(h), None, false);
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
             hit(h, lp, false, false);
             arm_leave(h);
@@ -927,10 +973,37 @@ unsafe fn paint(h: HWND) {
             _ => None,
         };
         paint_segment_group(dc, &icon_cells, Some(if custom { 1 } else { 0 }), icon_index(hot), icon_index(down), None, dpi, ground, FocusRing::Outside);
+        let glyph = icon_preview_input(kind, &text_of(edits[1]), custom, &text_of(edits[7]), &text_of(edits[8]));
+        paint_icon_preview(dc, g.icon_preview, dpi, &glyph);
         let ok = if editing { tr(crate::Key::Save) } else { tr(crate::Key::ItemAdd) };
         paint_button(dc, g.ok, ButtonKind::Primary, visual_from_pointer(HIT_OK, hot_id, down_id), ok, bold, dpi, ground, FocusRing::Outside);
         paint_button(dc, g.cancel, ButtonKind::Secondary, visual_from_pointer(HIT_CANCEL, hot_id, down_id), tr(crate::Key::Cancel), body, dpi, ground, FocusRing::Outside);
     });
+}
+
+/// Shared card around the icon. The glyph is [`paint_leaf_icon`], then the shell list for an empty target.
+unsafe fn paint_icon_preview(dc: HDC, r: RECT, dpi: i32, g: &FavGlyph) {
+    if r.right <= r.left || r.bottom <= r.top {
+        return;
+    }
+    let (fill, _) = icon_preview_frame(super::ui_tokens().dark);
+    paint_card_fill(dc, r, dpi, fill);
+    let inset = px(dpi, SPACE_4);
+    let slot = (r.right - r.left - inset * 2).min(r.bottom - r.top - inset * 2).max(0);
+    if slot <= 0 {
+        return;
+    }
+    let x = r.left + (r.right - r.left - slot) / 2;
+    let y = r.top + (r.bottom - r.top - slot) / 2;
+    if !g.path.is_empty() && paint_leaf_icon(dc, x, y, slot, g) {
+        return;
+    }
+    if let Some((list, index, dim)) = shell_icon(&g.path, g.file) {
+        draw_fav_icon(dc, list, index, x, y, slot, dim && g.track_missing);
+        return;
+    }
+    let mark = if g.file { "\u{E8A5}" } else { "\u{E8B7}" };
+    text(dc, r, mark, icon_font(), pal().sub, DT_CENTER);
 }
 
 fn browse_hit(r: RECT, g: &Geom) -> i32 {
@@ -1185,7 +1258,7 @@ fn read_draft(v: *mut Dlg) -> Draft {
         d.screen = (*v).screen;
         if (*v).custom_icon {
             let path = text_of((*v).edits[7]);
-            let index = text_of((*v).edits[8]).trim().parse().unwrap_or(0);
+            let index = parse_icon_index(&text_of((*v).edits[8]));
             d.icon = Some(ItemIcon { path, index });
         }
         d
@@ -1231,6 +1304,7 @@ fn round_window(hwnd: HWND) {
 }
 
 unsafe fn drop_view(h: HWND) {
+    super::drop_side(h);
     let p = GetWindowLongPtrW(h, GWLP_USERDATA) as *mut Dlg;
     SetWindowLongPtrW(h, GWLP_USERDATA, 0);
     if p.is_null() {
@@ -1321,7 +1395,7 @@ mod tests {
         v.extend(g.labels.iter().map(|(_, r)| *r));
         v.extend(g.slots.iter().map(|(_, r)| *r));
         v.extend(g.browse.iter().map(|(_, r)| *r));
-        for r in [g.admin, g.icon_auto, g.icon_custom, g.index, g.icon_list, g.note, g.saved, g.clear_pass, g.ok, g.cancel] {
+        for r in [g.admin, g.icon_auto, g.icon_custom, g.icon_preview, g.index, g.icon_list, g.note, g.saved, g.clear_pass, g.ok, g.cancel] {
             if r.bottom > r.top && r.right > r.left {
                 v.push(r);
             }
@@ -1367,7 +1441,10 @@ mod tests {
                         assert_eq!(g.icon_auto.top, g.icon_custom.top);
                         assert_eq!(g.icon_auto.right, g.icon_custom.left);
                         assert_eq!(g.icon_auto.left, g.kinds[0].left);
-                        assert_eq!(g.icon_custom.right, g.kinds[5].right);
+                        assert_eq!(g.icon_preview.right, g.kinds[5].right);
+                        assert_eq!(g.icon_preview.left - g.icon_custom.right, px(dpi, SPACE_8));
+                        assert_eq!(g.icon_preview.right - g.icon_preview.left, px(dpi, 32));
+                        assert_eq!(g.icon_preview.bottom - g.icon_preview.top, px(dpi, 32));
                         assert!(g.name.right >= width - 16 * dpi / 96);
                         for (_, r) in &g.slots {
                             assert_eq!(r.bottom - r.top, px(dpi, FIELD_H), "{kind:?} {dpi} tall memo or extra");
@@ -1520,6 +1597,108 @@ mod tests {
             let dark_g = form_geom(dpi, 520 * dpi / 96, ItemKind::Folder, false, false);
             assert_eq!(light_g.height, dark_g.height);
             assert_eq!(light_g.kinds, dark_g.kinds);
+            assert_eq!(light_g.icon_preview, dark_g.icon_preview);
+        }
+    }
+
+    #[test]
+    fn icon_preview_sits_on_the_segment_row_at_96_144_and_192() {
+        // Automatic already has the icon label and the segment. Custom only adds the path row.
+        let path_row = |dpi| px(dpi, FIELD_H) + px(dpi, SPACE_8);
+        let folder_h = [(96, 307), (144, 458), (192, 614)];
+        for dpi in [96, 144, 192] {
+            let width = 520 * dpi / 96;
+            for kind in KINDS {
+                for clear in [false, true] {
+                    let auto = form_geom(dpi, width, kind, false, clear);
+                    let custom = form_geom(dpi, width, kind, true, clear);
+                    assert_eq!(auto.icon_preview, custom.icon_preview, "{kind:?} {dpi} clear {clear}");
+                    assert!(auto.icon_preview.right > auto.icon_preview.left, "{kind:?} {dpi}");
+                    assert_eq!(auto.icon_preview.right - auto.icon_preview.left, px(dpi, 32));
+                    assert_eq!(auto.icon_preview.bottom - auto.icon_preview.top, px(dpi, 32));
+                    assert_eq!(auto.icon_preview.right, auto.kinds[5].right);
+                    assert_eq!(auto.icon_preview.left - auto.icon_custom.right, px(dpi, SPACE_8));
+                    assert!(auto.icon_preview.bottom > auto.icon_auto.top && auto.icon_preview.top < auto.icon_auto.bottom, "same row");
+                    let label = auto.labels.iter().find(|(s, _)| *s == Slot::IconPath).unwrap().1;
+                    assert!(auto.icon_preview.top >= label.bottom, "preview overlaps the icon label");
+                    assert!(auto.icon_preview.bottom <= auto.ok.top, "preview overlaps the buttons");
+                    let path = custom.slots.iter().find(|(s, _)| *s == Slot::IconPath).unwrap().1;
+                    assert!(custom.icon_preview.bottom <= path.top, "preview overlaps the icon path");
+                    assert_eq!(custom.height - auto.height, path_row(dpi), "{kind:?} {dpi} grew by more than the path row");
+                    let all = boxes(&auto);
+                    for i in 0..all.len() {
+                        for j in (i + 1)..all.len() {
+                            assert!(!overlap(all[i], all[j]), "{kind:?} dpi {dpi} {:?} vs {:?}", all[i], all[j]);
+                        }
+                    }
+                }
+            }
+            let folder = form_geom(dpi, width, ItemKind::Folder, false, false);
+            let expect = folder_h.iter().find(|(d, _)| *d == dpi).unwrap().1;
+            assert_eq!(folder.height, expect, "preview added a row at {dpi}");
+        }
+    }
+
+    #[test]
+    fn icon_preview_input_follows_path_index_kind_and_target() {
+        let folder = r"C:\Windows";
+        let auto = icon_preview_input(ItemKind::Folder, folder, false, r"C:\Windows\System32\shell32.dll", "4");
+        assert_eq!(auto, fav_glyph(ItemKind::Folder, folder, None));
+        assert_eq!(auto.path, folder);
+        assert_eq!(auto.index, -1);
+
+        let empty_path = icon_preview_input(ItemKind::Folder, folder, true, "  ", "4");
+        assert_eq!(empty_path, auto, "a blank custom path uses the kind default");
+        let empty_target = icon_preview_input(ItemKind::Folder, "", false, "", "0");
+        assert_eq!(empty_target, fav_glyph(ItemKind::Folder, "", None));
+        assert!(empty_target.path.is_empty());
+
+        let shell = icon_preview_input(ItemKind::Folder, folder, true, r"C:\Windows\System32\shell32.dll", "4");
+        assert_eq!(shell.path, r"C:\Windows\System32\shell32.dll");
+        assert_eq!(shell.index, 4);
+        let other_path = icon_preview_input(ItemKind::Folder, folder, true, r"C:\Windows\System32\imageres.dll", "4");
+        assert_ne!(shell.path, other_path.path);
+        let other_index = icon_preview_input(ItemKind::Folder, folder, true, r"C:\Windows\System32\shell32.dll", "12");
+        assert_eq!(other_index.index, 12);
+        assert_ne!(shell.index, other_index.index);
+        let blank_index = icon_preview_input(ItemKind::File, folder, true, r"C:\Windows\System32\shell32.dll", "");
+        assert_eq!(blank_index.index, 0);
+        assert_eq!(parse_icon_index(" 7 "), 7);
+        assert_eq!(parse_icon_index("nope"), 0);
+
+        let file = icon_preview_input(ItemKind::File, r"C:\a.txt", false, "", "0");
+        let moved = icon_preview_input(ItemKind::File, r"C:\b.txt", false, "", "0");
+        assert_ne!(file.path, moved.path);
+        let command = icon_preview_input(ItemKind::Command, "notepad.exe", false, "", "0");
+        assert_ne!(file, command);
+        assert_eq!(command, fav_glyph(ItemKind::Command, "notepad.exe", None));
+
+        let rdp = icon_preview_input(ItemKind::Rdp, "desk.local", false, "", "0");
+        let rdp_other = icon_preview_input(ItemKind::Rdp, "other.local", false, "", "0");
+        assert_eq!(rdp.path, rdp_other.path, "an RDP row borrows mstsc, not the host");
+        assert!(rdp.path.to_ascii_lowercase().ends_with("mstsc.exe"), "{}", rdp.path);
+        let url = icon_preview_input(ItemKind::Url, "", true, "", "0");
+        assert_eq!(url, fav_glyph(ItemKind::Url, "", None));
+    }
+
+    #[test]
+    fn icon_preview_frame_follows_light_and_dark_tokens() {
+        let light = crate::tokens_for(false);
+        let dark = crate::tokens_for(true);
+        assert_ne!(light.card, dark.card);
+        assert_ne!(light.line, dark.line);
+        assert_eq!(icon_preview_frame(false), (light.card, light.line));
+        assert_eq!(icon_preview_frame(true), (dark.card, dark.line));
+        assert_eq!(light.card, crate::CARD_LIGHT);
+        assert_eq!(dark.card, crate::CARD_DARK);
+        assert_eq!(light.line, crate::LINE_LIGHT);
+        assert_eq!(dark.line, crate::LINE_DARK);
+        for dpi in [96, 144, 192] {
+            let width = 520 * dpi / 96;
+            let light_g = form_geom(dpi, width, ItemKind::Folder, true, false);
+            let dark_g = form_geom(dpi, width, ItemKind::Folder, true, false);
+            assert_eq!(light_g.icon_preview, dark_g.icon_preview);
+            assert_eq!(light_g.height, dark_g.height);
         }
     }
 }
