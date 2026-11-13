@@ -32,11 +32,7 @@
 
 <br>
 
-<p align="center">
-  <a href="docs/demo-en.mp4"><img src="docs/demo-en.gif" width="320" alt="Maguro in motion"></a>
-</p>
-
-<p align="center">▶ <a href="docs/demo-en.mp4">Watch the full video</a> (60 s)</p>
+https://github.com/user-attachments/assets/d77e9913-3742-4f9c-803b-e78a431a25d3
 
 <br>
 
