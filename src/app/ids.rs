@@ -37,6 +37,7 @@ pub(crate) const ID_FOLLOW: usize = 1118; // follow Windows light / dark
 pub(crate) const ID_THEME: usize = 1122; // gear → Appearance: switch to the other of light / dark
 pub(crate) const ID_BASKET: usize = 1125; // gear: file basket tool window
 pub(crate) const ID_HOTKEY: usize = 1119; // global hotkey, checked only while it is registered
+pub(crate) const ID_FOLDER_APP: usize = 1129; // gear → Behavior: use as default folder app
 pub(crate) const ID_GATHER: usize = 1120; // folders from open Explorer windows and tabs
 pub(crate) const ID_RECENT: usize = 1121; // gear: open the Windows Recent folder in this pane
 pub(crate) const ID_REVEAL: usize = 1123; // show the selected recent file in its folder (recent-files menu and Ctrl+Enter, not the gear menu)

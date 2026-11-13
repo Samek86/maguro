@@ -351,6 +351,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     crate::pane::recent::show_selection(i);
                 }
                 ID_HOTKEY => toggle_hotkey(),
+                ID_FOLDER_APP => settings::toggle_default_folder_app(h),
                 ID_FOLLOW => {
                     let follow = app(|a| {
                         if a.s.theme == 0 {
@@ -461,6 +462,9 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     _ = ModifyMenuW(menu, ID_WATCH as u32, MF_BYCOMMAND | MF_STRING, ID_WATCH, &HSTRING::from(label));
                 }
                 check(ID_DBLUP, dblup);
+                // Same cache as Settings → General. Reload first so a change made outside this menu still checks.
+                crate::folderapp::reload_shown();
+                sync_default_folder_menu(menu);
                 check(ID_LANG_AUTO, lang == Lang::Auto);
                 for (i, (choice, _)) in language_choices().into_iter().enumerate() {
                     check(ID_LANG_FIRST + i, lang == choice);
@@ -1302,6 +1306,13 @@ pub(crate) unsafe fn set_language(lang: Lang) {
     save_session();
 }
 
+/// Check mark for gear → Behavior. Reads `shown_on` only, so a test can set the cache
+/// without touching the registry. The menu handler reloads that cache first.
+pub(crate) unsafe fn sync_default_folder_menu(menu: HMENU) {
+    let on = crate::folderapp::shown_on();
+    let _ = CheckMenuItem(menu, ID_FOLDER_APP as u32, (MF_BYCOMMAND | if on { MF_CHECKED } else { MF_UNCHECKED }).0);
+}
+
 // The popup opened from the gear on the tab row (no classic menu bar).
 // Show in folder is not here. It stays on the recent-files menu and on Ctrl+Enter.
 pub(crate) unsafe fn make_menus() -> Result<HMENU> {
@@ -1369,6 +1380,7 @@ pub(crate) unsafe fn make_menus() -> Result<HMENU> {
             crate::keys::chord_text(crate::keys::index("app.front").unwrap_or(0))
         ),
     )?;
+    item(sub, MF_STRING, ID_FOLDER_APP, tr(crate::Key::UseAsDefaultFolderApp))?;
     item(view, MF_POPUP, sub.0 as usize, tr(crate::Key::Behavior))?;
     sep(view)?;
 
@@ -1378,5 +1390,194 @@ pub(crate) unsafe fn make_menus() -> Result<HMENU> {
     item(view, MF_STRING, ID_ABOUT, tr(crate::Key::AboutMaguro))?;
     crate::winmerge::sync_gear(view);
     Ok(view)
+}
+
+#[cfg(test)]
+mod gear_menu_tests {
+    use super::*;
+
+    struct Ui(u8);
+    impl Drop for Ui {
+        fn drop(&mut self) {
+            crate::UI.store(self.0, Ordering::Relaxed);
+        }
+    }
+
+    fn ui(v: u8) -> Ui {
+        let prev = crate::UI.load(Ordering::Relaxed);
+        crate::UI.store(v, Ordering::Relaxed);
+        Ui(prev)
+    }
+
+    struct Shown(bool);
+    impl Drop for Shown {
+        fn drop(&mut self) {
+            crate::folderapp::set_shown_for_test(self.0);
+        }
+    }
+
+    struct Menu(HMENU);
+    impl Drop for Menu {
+        fn drop(&mut self) {
+            if !self.0.0.is_null() {
+                unsafe {
+                    let _ = DestroyMenu(self.0);
+                }
+            }
+        }
+    }
+
+    unsafe fn submenu_by_label(menu: HMENU, label: &str) -> HMENU {
+        let n = GetMenuItemCount(Some(menu)).max(0) as u32;
+        for i in 0..n {
+            if crate::shell::ctxmenu::item_text(menu, i) == label {
+                let mut info = MENUITEMINFOW {
+                    cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                    fMask: MIIM_SUBMENU,
+                    ..Default::default()
+                };
+                assert!(GetMenuItemInfoW(menu, i, true, &mut info).is_ok(), "submenu info {label}");
+                assert!(!info.hSubMenu.0.is_null(), "missing submenu {label}");
+                return info.hSubMenu;
+            }
+        }
+        panic!("missing submenu {label}");
+    }
+
+    unsafe fn row_text(menu: HMENU, pos: u32) -> String {
+        crate::shell::ctxmenu::item_text(menu, pos)
+    }
+
+    unsafe fn checked_at(menu: HMENU, pos: u32) -> bool {
+        let mut info = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_STATE | MIIM_ID,
+            ..Default::default()
+        };
+        assert!(GetMenuItemInfoW(menu, pos, true, &mut info).is_ok());
+        assert_eq!(info.wID as usize, ID_FOLDER_APP);
+        info.fState.0 & MFS_CHECKED.0 != 0
+    }
+
+    #[test]
+    fn behavior_menu_ends_with_default_folder_app_in_each_language() {
+        let _ui = ui(0);
+        let cases = [
+            (0u8, "Behavior", "Double-click empty space: parent folder", "Bring Maguro to front from anywhere", "Use as default folder app"),
+            (1, "동작", "빈 곳 더블클릭: 위 폴더로", "어디서나 Maguro 불러오기", "기본 폴더 앱으로 사용"),
+            (2, "動作", "空白をダブルクリック: 上のフォルダー", "どこからでも Maguro を前面に", "既定のフォルダーアプリとして使用"),
+        ];
+        for (slot, behavior, dbl, hot, folder) in cases {
+            crate::UI.store(slot, Ordering::Relaxed);
+            assert_eq!(tr(crate::Key::Behavior), behavior);
+            assert_eq!(tr(crate::Key::DoubleClickEmptySpaceParentFolder), dbl);
+            assert_eq!(tr(crate::Key::BringMaguroFrontFromAnywhere), hot);
+            assert_eq!(tr(crate::Key::UseAsDefaultFolderApp), folder);
+            unsafe {
+                let menu = Menu(make_menus().expect("gear menu"));
+                let sub = submenu_by_label(menu.0, behavior);
+                let n = GetMenuItemCount(Some(sub)).max(0);
+                assert_eq!(n, 3, "Behavior has the two existing rows, then the folder app");
+                assert_eq!(GetMenuItemID(sub, 0) as usize, ID_DBLUP);
+                assert_eq!(GetMenuItemID(sub, 1) as usize, ID_HOTKEY);
+                assert_eq!(GetMenuItemID(sub, 2) as usize, ID_FOLDER_APP);
+                assert_eq!(row_text(sub, 0), dbl);
+                let hot_row = row_text(sub, 1);
+                assert!(hot_row.starts_with(hot), "{hot_row}");
+                assert!(hot_row.contains('\t'), "{hot_row}");
+                assert_eq!(row_text(sub, 2), folder);
+            }
+        }
+    }
+
+    #[test]
+    fn behavior_default_folder_check_follows_shown_on() {
+        let _shown = Shown(crate::folderapp::shown_on());
+        let _ui = ui(0);
+        unsafe {
+            let menu = Menu(make_menus().expect("gear menu"));
+            let sub = submenu_by_label(menu.0, tr(crate::Key::Behavior));
+            crate::folderapp::set_shown_for_test(false);
+            sync_default_folder_menu(menu.0);
+            assert!(!checked_at(sub, 2));
+            crate::folderapp::set_shown_for_test(true);
+            sync_default_folder_menu(menu.0);
+            assert!(checked_at(sub, 2));
+            crate::folderapp::set_shown_for_test(false);
+            sync_default_folder_menu(menu.0);
+            assert!(!checked_at(sub, 2));
+        }
+    }
+
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for ent in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = ent.path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    fn call_lines(name: &str) -> Vec<String> {
+        let needle = [name, "("].concat();
+        let mut files = Vec::new();
+        rust_files(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(), &mut files);
+        let mut hits = Vec::new();
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let t = line.trim();
+                if t.starts_with("//") || t.contains("fn ") || !t.contains(&needle) {
+                    continue;
+                }
+                let file = path.file_name().unwrap().to_string_lossy();
+                hits.push(format!("{file}:{}: {t}", n + 1));
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn default_folder_app_turns_on_only_from_the_two_user_switches() {
+        let src = include_str!("wnd.rs");
+        let prod = src.split("mod gear_menu_tests").next().unwrap();
+        let popup = prod.find("WM_INITMENUPOPUP =>").expect("popup");
+        let popup_tail = &prod[popup..];
+        let popup_end = popup_tail.find("WM_COPYDATA =>").expect("copydata");
+        let popup_body = &popup_tail[..popup_end];
+        let reload = popup_body.find("reload_shown()").expect("reload before the check");
+        let sync_at = popup_body.find("sync_default_folder_menu(").expect("check");
+        assert!(reload < sync_at);
+
+        let fn_at = prod.find("fn sync_default_folder_menu").expect("sync fn");
+        let fn_tail = &prod[fn_at..];
+        let fn_end = fn_tail.find("\n}").expect("end of sync");
+        let sync_fn = &fn_tail[..fn_end];
+        assert!(sync_fn.contains("shown_on()"));
+        assert!(!sync_fn.contains("reload_shown"));
+        assert!(!sync_fn.contains(&["set_registered", "("].concat()));
+
+        let click = ["ID_FOLDER_APP => settings::toggle_default_folder_app", "(h)"].concat();
+        assert!(prod.contains(&click));
+        let settings = include_str!("../settings/win.rs");
+        let flip = ["toggle_default_folder_app", "(hwnd())"].concat();
+        assert!(settings.contains("fn toggle_default_folder_app"));
+        assert!(settings.contains(&flip));
+
+        let regs = call_lines("set_registered");
+        let want = ["set_registered", "(want)"].concat();
+        let off = ["set_registered", "(false)"].concat();
+        let on = ["set_registered", "(true)"].concat();
+        assert_eq!(regs.len(), 2, "{regs:?}");
+        assert!(regs.iter().any(|l| l.contains("win.rs") && l.contains(&want)));
+        assert!(regs.iter().any(|l| l.contains("fileop.rs") && l.contains(&off)));
+        assert!(regs.iter().all(|l| !l.contains(&on)));
+        let toggles = call_lines("toggle_default_folder_app");
+        assert_eq!(toggles.len(), 2, "{toggles:?}");
+        assert!(toggles.iter().any(|l| l.contains("win.rs") && l.contains("hwnd()")));
+        assert!(toggles.iter().any(|l| l.contains("wnd.rs") && l.contains("ID_FOLDER_APP")));
+    }
 }
 

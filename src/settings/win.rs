@@ -1378,6 +1378,18 @@ fn ev_activity_line() -> String {
     }
 }
 
+/// User turned "use as default folder app" on or off.
+/// Settings and the gear menu both call this, so the registry write, the warning, and the settings redraw stay the same.
+pub(crate) unsafe fn toggle_default_folder_app(owner: HWND) {
+    let want = !crate::folderapp::shown_on();
+    crate::folderapp::set_registered(want);
+    if crate::folderapp::shown_on() != want {
+        let q = tx(crate::Key::CouldNotChangeDefaultFolderApp);
+        let _ = MessageBoxW(Some(owner), &HSTRING::from(q), w!("Maguro"), MB_ICONWARNING);
+    }
+    redraw();
+}
+
 fn flip(id: u8) {
     match id {
         TG_SINGLE => app(|a| a.s.single ^= true),
@@ -1537,15 +1549,7 @@ fn flip(id: u8) {
             crate::publish_shared();
         }
         TG_FOLDER => {
-            let want = !crate::folderapp::shown_on();
-            crate::folderapp::set_registered(want);
-            unsafe {
-                if crate::folderapp::shown_on() != want {
-                    let q = tx(crate::Key::CouldNotChangeDefaultFolderApp);
-                    let _ = MessageBoxW(Some(hwnd()), &HSTRING::from(q), w!("Maguro"), MB_ICONWARNING);
-                }
-                redraw();
-            }
+            unsafe { toggle_default_folder_app(hwnd()) };
             return;
         }
         _ => return,
