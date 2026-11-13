@@ -215,6 +215,75 @@ pub(crate) unsafe fn text_visible(dc: HDC, r: RECT, s: &str, font: HFONT, rgb: u
     }
 }
 
+/// Pane-number digit. [`text`] centers the em box, so the figure sits high in this
+/// 22 DIP pill. The black box is centered instead. An odd leftover pixel stays below the ink.
+pub(crate) unsafe fn paint_pane_num_digit(dc: HDC, r: RECT, s: &str, font: HFONT, rgb: u32) {
+    let mut w: Vec<u16> = s.encode_utf16().collect();
+    if w.is_empty() || r.bottom <= r.top {
+        return;
+    }
+    let old = SelectObject(dc, font.into());
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, cref(rgb));
+    let m = line_metrics(dc, font);
+    let cell_h = r.bottom - r.top;
+    let top = match digit_black_box(dc, &w, m.ascent) {
+        Some((from_em, ink_h)) => pane_num_draw_top(r.top, cell_h, from_em, ink_h),
+        None => visible_ink_top(r.top, cell_h, m, InkKind::Latin),
+    };
+    let mut placed = RECT { top, bottom: top.saturating_add(m.height().max(1)), ..r };
+    let saved = SaveDC(dc);
+    if saved != 0 {
+        IntersectClipRect(dc, r.left, r.top, r.right, r.bottom);
+    }
+    DrawTextW(dc, &mut w, &mut placed, DT_CENTER | DT_END_ELLIPSIS | DT_SINGLELINE | DT_NOPREFIX | DT_TOP);
+    if saved != 0 {
+        let _ = RestoreDC(dc, saved);
+    }
+    if !old.is_invalid() {
+        SelectObject(dc, old);
+    }
+}
+
+/// `DT_TOP` y that centers `ink_h` pixels whose first row is `ink_from_em` below the em top.
+/// The extra pixel of an odd split stays under the ink.
+pub(crate) fn pane_num_draw_top(cell_top: i32, cell_h: i32, ink_from_em: i32, ink_h: i32) -> i32 {
+    if cell_h <= 0 || ink_h <= 0 {
+        return cell_top;
+    }
+    cell_top + (cell_h - ink_h) / 2 - ink_from_em
+}
+
+fn outline_matrix() -> MAT2 {
+    MAT2 {
+        eM11: FIXED { value: 1, fract: 0 },
+        eM12: FIXED::default(),
+        eM21: FIXED::default(),
+        eM22: FIXED { value: 1, fract: 0 },
+    }
+}
+
+/// Union of the glyph black boxes. `(pixels from the em top to the ink, ink height)`.
+/// The font is already selected on `dc`.
+unsafe fn digit_black_box(dc: HDC, words: &[u16], ascent: i32) -> Option<(i32, i32)> {
+    if ascent <= 0 || words.is_empty() {
+        return None;
+    }
+    let mat = outline_matrix();
+    let mut top = i32::MAX;
+    let mut bot = i32::MIN;
+    for &ch in words {
+        let mut gm = GLYPHMETRICS::default();
+        if GetGlyphOutlineW(dc, ch as u32, GGO_METRICS, &mut gm, 0, None, &mat) == u32::MAX || gm.gmBlackBoxY == 0 {
+            continue;
+        }
+        let y = ascent - gm.gmptGlyphOrigin.y;
+        top = top.min(y);
+        bot = bot.max(y + gm.gmBlackBoxY as i32);
+    }
+    (bot > top).then_some((top, bot - top))
+}
+
 /// Half of `descent / 2`, kept only when the tm box is off by more than that.
 /// The centered gap error is 0 or 1, so this is 0 whenever the line fits.
 fn cjk_nudge(descent: i32, cell_h: i32, tm_h: i32) -> i32 {
@@ -1631,7 +1700,7 @@ pub(crate) unsafe fn paint_pane(h: HWND) {
             let num_ink = if tint.is_some() || active { ink } else { pal().sub };
             let (fill_c, edge_c) = pane_num_face(head, num_ink, num_hot);
             aa_rfill(dc, pg.num, pane_num_radius(pg.num), fill_c, Some(edge_c), head);
-            text(dc, pg.num, &(i + 1).to_string(), small_font, num_ink, DT_CENTER);
+            paint_pane_num_digit(dc, pg.num, &(i + 1).to_string(), small_font, num_ink);
         }
         for (p, on) in [(pg.addr, addr_on), (pg.filt, filt_on)] {
             fill(dc, p, pal().pill);
@@ -1965,6 +2034,115 @@ mod chevron_tests {
         assert_eq!(chevron_row(10, true, 4, 4), 14);
         assert_eq!(chevron_row(10, false, 4, 0), 14);
         assert_eq!(chevron_row(10, false, 4, 4), 10);
+    }
+}
+
+#[cfg(test)]
+mod pane_num_digit_tests {
+    use super::*;
+    use crate::{delete_font, logfont, tier_heights, FONT_BODY_BASE};
+
+    /// Same small face `apply_font` builds: message font, named face, then the 85% tier.
+    unsafe fn small_font(dpi: i32, face_name: &str) -> HFONT {
+        let mut ncm = NONCLIENTMETRICSW { cbSize: size_of::<NONCLIENTMETRICSW>() as u32, ..Default::default() };
+        let sys = SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS.0, ncm.cbSize, Some(&mut ncm as *mut _ as _), 0, dpi as u32);
+        let mut lf = if sys.is_ok() { ncm.lfMessageFont } else { logfont(face_name, FONT_BODY_BASE * dpi / 96) };
+        lf.lfFaceName = logfont(face_name, 0).lfFaceName;
+        let (_, small_h) = tier_heights(lf.lfHeight, dpi);
+        CreateFontIndirectW(&LOGFONTW { lfHeight: small_h, ..lf })
+    }
+
+    fn badge_cell(dpi: i32) -> RECT {
+        let num = pane_geo(800, 500, dpi, false).num;
+        RECT { left: 0, top: 0, right: num.right - num.left, bottom: num.bottom - num.top }
+    }
+
+    /// Gaps above and below the rasterized digit. A channel 30 away from white counts as ink.
+    unsafe fn ink_gaps(font: HFONT, cell: RECT, s: &str) -> (i32, i32) {
+        let (w, h) = (cell.right - cell.left, cell.bottom - cell.top);
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let screen = GetDC(None);
+        let mut bits_ptr = std::ptr::null_mut();
+        let bmp = CreateDIBSection(Some(screen), &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0).expect("dib");
+        let mem = CreateCompatibleDC(Some(screen));
+        ReleaseDC(None, screen);
+        let old = SelectObject(mem, bmp.into());
+        fill(mem, cell, 0xFFFFFF);
+        paint_pane_num_digit(mem, cell, s, font, 0);
+        _ = GdiFlush();
+        let bits = std::slice::from_raw_parts(bits_ptr as *const u8, (w * h * 4) as usize);
+        let mut first = None;
+        let mut last = 0;
+        for y in 0..h {
+            let row = (y * w * 4) as usize;
+            let ink = bits[row..row + (w * 4) as usize].chunks_exact(4).any(|p| {
+                p[0].abs_diff(255).max(p[1].abs_diff(255)).max(p[2].abs_diff(255)) >= 30
+            });
+            if ink {
+                if first.is_none() {
+                    first = Some(y);
+                }
+                last = y;
+            }
+        }
+        SelectObject(mem, old);
+        _ = DeleteDC(mem);
+        _ = DeleteObject(bmp.into());
+        let top = first.expect("digit ink");
+        (top - cell.top, cell.bottom - (last + 1))
+    }
+
+    #[test]
+    fn odd_ink_keeps_the_extra_pixel_under_the_digit() {
+        // 15px figure whose ink starts 9px below the em top, in a 44px pill (22 DIP at 192).
+        let draw = pane_num_draw_top(0, 44, 9, 15);
+        let above = draw + 9;
+        assert_eq!((above, 44 - (above + 15)), (14, 15));
+        let even = pane_num_draw_top(0, 22, 3, 8);
+        assert_eq!((even + 3, 22 - (even + 3 + 8)), (7, 7));
+    }
+
+    #[test]
+    fn pane_number_digit_is_centered_at_each_dpi() {
+        // `text` / ink_line_top centered the em box. Segoe UI "1" in the 22 DIP pill was
+        // 96 DPI 6/8, 144 DPI 10/12, 192 DPI 11/17. The black box is centered now.
+        // An odd leftover stays under the ink (Malgun at 144, Yu Gothic at 192).
+        let expect = [
+            ("Segoe UI", 96, (7, 7)),
+            ("Segoe UI", 144, (11, 11)),
+            ("Segoe UI", 192, (14, 14)),
+            ("Malgun Gothic", 96, (7, 7)),
+            ("Malgun Gothic", 144, (10, 11)),
+            ("Malgun Gothic", 192, (14, 14)),
+            ("Yu Gothic UI", 96, (7, 7)),
+            ("Yu Gothic UI", 144, (11, 11)),
+            ("Yu Gothic UI", 192, (14, 15)),
+        ];
+        unsafe {
+            for (face, dpi, want) in expect {
+                let font = small_font(dpi, face);
+                let cell = badge_cell(dpi);
+                assert_eq!(cell.bottom - cell.top, 22 * dpi / 96, "{dpi}");
+                assert_eq!(cell.right - cell.left, 30 * dpi / 96, "{dpi}");
+                for sample in ["1", "8", "10"] {
+                    let (above, below) = ink_gaps(font, cell, sample);
+                    assert!(below >= above && below - above <= 1, "{face} {dpi} '{sample}' {above}/{below}");
+                    assert_eq!((above, below), want, "{face} {dpi} '{sample}'");
+                }
+                delete_font(font);
+            }
+        }
     }
 }
 
