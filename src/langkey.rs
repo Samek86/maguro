@@ -1029,7 +1029,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Default delete",
     "Default drag and drop",
     "Default follows the display language. A chosen face applies to the whole window right away.",
-    "The default follows the Windows display language (Korean, Japanese, or English); otherwise English. A change applies right away.",
+    "The default follows the Windows display language (Korean, Japanese, German, French, or English); otherwise English. A change applies right away.",
     "Default layout",
     "Default view for every folder",
     "Default view for a new pane",

@@ -221,14 +221,10 @@ fn inside(r: RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
-/// Columns × rows when every column is the same height (`[2, 2]` is `2×2`). Uneven layouts keep the column heights.
+/// Rows × columns, the same text as the toolbar (`[1, 1]` is `1 × 2`).
+/// Uneven layouts keep each column's row count.
 pub(crate) fn grid_label(heights: &[usize]) -> String {
-    let Some(&first) = heights.first() else { return String::new() };
-    if heights.iter().all(|&n| n == first) {
-        format!("{}×{}", heights.len(), first)
-    } else {
-        heights.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" | ")
-    }
+    layout_label(heights)
 }
 
 /// Folder name on a chip. Same label as a tab, including the OS name of a shell place.
@@ -2504,15 +2500,16 @@ mod tests {
     }
 
     #[test]
-    fn grid_label_is_columns_by_rows_without_spaces() {
-        assert_eq!(grid_label(&[2, 2]), "2×2");
-        assert_eq!(grid_label(&[2]), "1×2");
-        assert_eq!(grid_label(&[1, 1]), "2×1");
-        assert_eq!(grid_label(&[1, 1, 1]), "3×1");
-        assert_eq!(grid_label(&[1]), "1×1");
-        assert_eq!(grid_label(&[3]), "1×3");
-        assert_eq!(grid_label(&[3, 3]), "2×3");
-        assert_eq!(grid_label(&[2, 2, 2]), "3×2");
+    fn grid_label_matches_the_toolbar_rows_by_columns() {
+        // Same text as layout_label: rows × columns, with spaces. [1, 1] is side by side.
+        assert_eq!(grid_label(&[2, 2]), "2 × 2");
+        assert_eq!(grid_label(&[2]), "2 × 1");
+        assert_eq!(grid_label(&[1, 1]), "1 × 2");
+        assert_eq!(grid_label(&[1, 1, 1]), "1 × 3");
+        assert_eq!(grid_label(&[1]), "1 × 1");
+        assert_eq!(grid_label(&[3]), "3 × 1");
+        assert_eq!(grid_label(&[3, 3]), "3 × 2");
+        assert_eq!(grid_label(&[2, 2, 2]), "2 × 3");
         assert_eq!(grid_label(&[1, 3]), "1 | 3");
         assert_eq!(grid_label(&[]), "");
     }
@@ -2547,7 +2544,7 @@ mod tests {
             locked: false,
             color: None,
             heights: vec![2],
-            grid: "1×2".into(),
+            grid: "2 × 1".into(),
             panes: 2,
             chips: vec![Chip {
                 pane: 0,
