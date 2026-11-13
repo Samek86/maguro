@@ -859,9 +859,6 @@ unsafe fn draw(dc: HDC, rc: RECT, g: &Geo, sn: &Snap, h: HWND) {
                     crate::paint_label(dc, *r, &note, sn.small);
                 }
             }
-            Item::CtxNote(r) => {
-                let _ = crate::wrap_text(dc, *r, tx(ctx_note_key()), sn.small, t.sub, false);
-            }
             Item::CtxSeg { classic, win11 } => {
                 let on_win = app(|a| a.s.ctx_win11_view);
                 let cells = [

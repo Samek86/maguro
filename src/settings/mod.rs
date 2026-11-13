@@ -102,11 +102,6 @@ fn tx(t: crate::Key) -> &'static str {
     tr(t)
 }
 
-/// Classic handlers start on. Windows 11 packaged apps start off, so that view uses its own note.
-fn ctx_note_key() -> crate::Key {
-    if app(|a| a.s.ctx_win11_view) { CTX_WIN11_NOTE } else { CTX_NOTE }
-}
-
 const CHROME_LIGHT: u32 = 0x0067C0;
 const CHROME_DARK: u32 = 0x4CC2FF;
 const WHITE: u32 = 0xFFFFFF;
@@ -158,13 +153,16 @@ const PAGES: [crate::Key; PAGE_N] = [
     crate::Key::About,
 ];
 
-const CTX_NOTE: crate::Key = crate::Key::TheseItemsAppearInMaguroSRight;
 const CTX_RESET_L: crate::Key = crate::Key::ResetAllEnabled;
 const CTX_REFRESH_L: crate::Key = crate::Key::Refresh;
 const CTX_EMPTY: crate::Key = crate::Key::NoThirdPartyMenuItems;
 const CTX_CLASSIC: crate::Key = crate::Key::ClassicMenu;
 const CTX_WIN11: crate::Key = crate::Key::Windows11Menu;
 const CTX_WIN11_EMPTY: crate::Key = crate::Key::CtxWin11Empty;
+/// Page copy is gone. The strings stay so the language checks still have a key.
+#[cfg_attr(not(test), allow(dead_code))]
+const CTX_NOTE: crate::Key = crate::Key::TheseItemsAppearInMaguroSRight;
+#[cfg_attr(not(test), allow(dead_code))]
 const CTX_WIN11_NOTE: crate::Key = crate::Key::CtxWin11Note;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -331,9 +329,7 @@ fn page_match(q: &str, page: usize) -> bool {
         return (0..crate::keys::len()).any(|i| key_hit_i(i, q)) || has(tx(KEY_NOTE), q);
     }
     if page == CTX_PAGE {
-        return has(tx(CTX_NOTE), q)
-            || has(tx(CTX_WIN11_NOTE), q)
-            || has(tx(CTX_RESET_L), q)
+        return has(tx(CTX_RESET_L), q)
             || has(tx(CTX_REFRESH_L), q)
             || has(tx(CTX_EMPTY), q)
             || has(tx(CTX_CLASSIC), q)
@@ -510,7 +506,6 @@ enum Item {
     Note(RECT, crate::Key),
     /// Registration failed for the clipboard hotkey. The text is read at paint time.
     Alert(RECT),
-    CtxNote(RECT),
     /// Classic | Windows 11. One list is visible. The active pill is filled in paint.
     CtxSeg { classic: RECT, win11: RECT },
     CtxBar { reset: RECT, refresh: RECT },
@@ -742,11 +737,6 @@ fn seg_w(label: &str, dpi: i32) -> i32 {
 
 fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str) -> i32 {
     let dpi = sn.dpi.max(96);
-    if rq.is_empty() || has(tx(CTX_NOTE), rq) || has(tx(CTX_WIN11_NOTE), rq) {
-        let h = sc(dpi, 72);
-        g.items.push(Item::CtxNote(RECT { left, top: y, right, bottom: y + h }));
-        y += h + sc(dpi, 8);
-    }
     let sh = sc(dpi, 32);
     let gap = sc(dpi, 8);
     let classic = RECT { left, top: y, right: left + seg_w(tx(CTX_CLASSIC), dpi), bottom: y + sh };
@@ -1484,8 +1474,7 @@ mod tests {
         let g = geo(client(), &shot(page, "Right-click menu"));
         assert!(g.show[CTX_PAGE]);
         assert!(g.items.iter().all(|it| !matches!(it, Item::Card(c) if c.spec.ctl == Ctl::Toggle(TG_CTX_LOG))));
-        assert!(matches!(g.items.first(), Some(Item::CtxNote(_))));
-        assert!(g.items.iter().any(|it| matches!(it, Item::CtxNote(_))));
+        assert!(matches!(g.items.first(), Some(Item::CtxSeg { .. })));
         let (reset, refresh) = g.items.iter().find_map(|it| match it {
             Item::CtxBar { reset, refresh } => Some((*reset, *refresh)),
             _ => None,
@@ -1522,7 +1511,7 @@ mod tests {
         assert_eq!(page, CTX_PAGE);
         let g = geo(client(), &shot(page, "右クリック"));
         assert!(g.show[CTX_PAGE]);
-        assert!(g.items.iter().any(|it| matches!(it, Item::CtxNote(_))));
+        assert!(matches!(g.items.first(), Some(Item::CtxSeg { .. })));
     }
 
     #[test]
@@ -1600,17 +1589,11 @@ mod tests {
         let _lock = ui_lock();
         let _keep = lang(0);
         let _view = pin_view(false);
-        assert_eq!(ctx_note_key(), CTX_NOTE);
         assert!(page_match("Classic menu", CTX_PAGE));
         assert!(page_match("Windows 11 menu", CTX_PAGE));
         assert_eq!(tx(CTX_CLASSIC), "Classic menu");
         assert_eq!(tx(CTX_WIN11), "Windows 11 menu");
         let g = geo(client(), &shot(CTX_PAGE, "Right-click menu"));
-        let note = g.items.iter().find_map(|it| match it {
-            Item::CtxNote(r) => Some(*r),
-            _ => None,
-        }).expect("note");
-        assert_eq!(note.top, g.title.bottom + 16);
         let (classic, win11) = g.items.iter().find_map(|it| match it {
             Item::CtxSeg { classic, win11 } => Some((*classic, *win11)),
             _ => None,
@@ -1619,11 +1602,12 @@ mod tests {
             Item::CtxBar { reset, refresh } => Some((*reset, *refresh)),
             _ => None,
         }).expect("ctx bar");
+        assert_eq!(classic.top, g.title.bottom + 16);
+        assert_eq!(classic.left, g.title.left);
         assert_eq!(classic.bottom - classic.top, 32);
         assert_eq!(win11.bottom - win11.top, 32);
         assert_eq!(classic.top, win11.top);
         assert_eq!(win11.left, classic.right);
-        assert_eq!(classic.left, note.left);
         assert_eq!(classic.right - classic.left, 116);
         assert_eq!(win11.right - win11.left, 137);
         assert_eq!(refresh.top - classic.bottom, 8);
@@ -1631,6 +1615,14 @@ mod tests {
         assert_eq!(refresh.right - refresh.left, 140);
         assert_eq!(reset.right - reset.left, 220);
         assert_eq!(reset.left - refresh.right, 8);
+        let row_top = g.items.iter().find_map(|it| match it {
+            Item::CtxRow { rect, .. } => Some(rect.top),
+            _ => None,
+        }).expect("first ctx row");
+        assert_eq!(row_top, refresh.bottom + 12);
+        // The note was 72 DIP tall plus an 8 DIP gap. At 96 DPI the list starts 80 DIP higher.
+        let old_row = classic.top + 72 + 8 + (classic.bottom - classic.top) + (refresh.top - classic.bottom) + (refresh.bottom - refresh.top) + 12;
+        assert_eq!(old_row - row_top, 80);
     }
 
     #[test]
@@ -1640,16 +1632,14 @@ mod tests {
         let _view = pin_view(true);
         crate::shell::ctxpack::set_test_rows(Some(Vec::new()));
         assert_eq!(tx(CTX_WIN11_EMPTY), "No Windows 11 packaged context-menu apps found on this PC.");
-        assert_eq!(ctx_note_key(), crate::Key::CtxWin11Note);
         let g = geo(client(), &shot(CTX_PAGE, "Right-click menu"));
         let key = g.items.iter().find_map(|it| match it {
             Item::CtxEmpty(_, k) => Some(*k),
             _ => None,
         }).expect("empty state");
         assert_eq!(key, crate::Key::CtxWin11Empty);
-        assert!(g.items.iter().any(|it| matches!(it, Item::CtxSeg { .. })));
+        assert!(matches!(g.items.first(), Some(Item::CtxSeg { .. })));
         assert!(g.items.iter().any(|it| matches!(it, Item::CtxBar { .. })));
-        assert!(g.items.iter().any(|it| matches!(it, Item::CtxNote(_))));
     }
 
     #[test]
