@@ -1,7 +1,9 @@
 //! Open a favourite that is not a plain folder or file.
 //!
 //! A special folder is browsed in the active pane when the shell namespace parses.
-//! Otherwise Explorer opens it. A command and a URL go through ShellExecuteExW.
+//! Control Panel is the exception: this browser cannot list its applets, so Explorer
+//! opens it and the pane stays where it was. Otherwise Explorer opens a name that
+//! does not parse. A command and a URL go through ShellExecuteExW.
 //! An RDP item writes a temporary .rdp file and, when a password is saved, plants
 //! TERMSRV/<host> for mstsc, then removes that credential after the chosen delay.
 //! The password itself stays in the Maguro credential (`Maguro:rdp/<host>` is not
@@ -16,8 +18,8 @@ use windows::Win32::Security::Credentials::{
 use crate::imports::*;
 use crate::remote::{delete_secret, read_secret, write_secret};
 use crate::session::{
-    command_launch, cred_hold_secs, explorer_launch, rdp_bytes, rdp_launch, rdp_text, rdp_host_used, store_target, termsrv_target, url_launch, FavNode, ItemKind,
-    SecretPlan,
+    command_launch, control_panel_path, cred_hold_secs, explorer_launch, rdp_bytes, rdp_launch, rdp_text, rdp_host_used, store_target, termsrv_target, url_launch,
+    FavNode, ItemKind, SecretPlan,
 };
 
 /// A command, URL, special folder, or remote desktop item. Folders and files stay on the old path.
@@ -45,6 +47,10 @@ unsafe fn open_special(owner: HWND, path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
+    // navigate() would replace this pane with an empty list. Explorer owns the folder.
+    if control_panel_path(path) {
+        return launch_explorer(owner, path);
+    }
     let i = crate::active_pane();
     if crate::navigate(i, path) {
         if !crate::net_failed(i) {
@@ -52,6 +58,11 @@ unsafe fn open_special(owner: HWND, path: &str) -> bool {
         }
         return true;
     }
+    shell_exec(owner, &explorer_launch(path), false)
+}
+
+/// `explorer.exe` for a shell place the pane must not browse. The current folder stays.
+pub(crate) unsafe fn launch_explorer(owner: HWND, path: &str) -> bool {
     shell_exec(owner, &explorer_launch(path), false)
 }
 

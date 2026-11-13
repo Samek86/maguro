@@ -1322,6 +1322,10 @@ unsafe fn browse_id(eb: &IExplorerBrowser, pidl: *mut ITEMIDLIST, flags: u32) ->
 }
 
 pub(crate) unsafe fn try_nav(i: usize, path: &str) -> Result<()> {
+    // Control Panel applets do not enumerate here. BrowseToIDList would leave an empty list.
+    if control_panel_path(path) {
+        return Err(Error::from(E_FAIL));
+    }
     if share_path(path) {
         // Accepted: BrowseToIDList runs on WM_NET, after the worker has a PIDL or the wait ends.
         return if start_share(i, path, false, None, None, false, None) { Ok(()) } else { Err(Error::from(E_FAIL)) };
@@ -1389,6 +1393,11 @@ pub(crate) fn rec_step(rec: &mut Option<(String, String)>, ev: Nav, path: &str) 
 /// The status line says so once that parent has opened. A share returns as soon as the
 /// off-thread resolve has started; this thread does not stat it or walk its parents.
 pub(crate) unsafe fn go_near(i: usize, path: &str) -> bool {
+    // Same refusal as try_nav. A missing-folder recovery must not run either: there is
+    // no parent to open, and clearing the pane path would paint an empty name.
+    if control_panel_path(path) {
+        return false;
+    }
     let Err(e) = try_nav(i, path) else { return true };
     if !gone(e.code()) {
         return false;
@@ -1487,6 +1496,11 @@ pub(crate) unsafe fn browse(i: usize, flags: u32) {
 
 pub(crate) unsafe fn browse_item(i: usize, si: &IShellItem) {
     let path = shell_parse(si);
+    if control_panel_path(&path) {
+        let owner = app(|a| a.main);
+        let _ = launch_explorer(owner, &path);
+        return;
+    }
     // A deleted folder still sitting in the tree must not be handed to the shell view.
     if local_path_gone(&path) {
         _ = go_near(i, &path);
@@ -1690,6 +1704,13 @@ pub(crate) unsafe fn go_edit(i: usize) {
                 if let Some(dir) = folder_link_target(&target) {
                     target = dir;
                 }
+            }
+            // Enter on Control Panel opens Explorer. The pane, and its address, stay.
+            if control_panel_path(&target) {
+                let owner = app(|a| a.main);
+                let ok = launch_explorer(owner, &target);
+                resolved = true;
+                break 'go ok.then_some(false);
             }
             if share_path(&target) {
                 if let Some(link) = app(|a| crate::remote::server_for_unc(&a.s.tree, &target)) {
@@ -3441,12 +3462,24 @@ impl IExplorerBrowserEvents_Impl for Events_Impl {
         if pidl.is_null() {
             return Err(E_INVALIDARG.into());
         }
+        // History and any other BrowseToIDList still land here. Cancel before the view
+        // binds an empty Control Panel. A theme rebuild must not also start Explorer.
+        let path = unsafe { name(pidl, SIGDN_DESKTOPABSOLUTEPARSING) };
+        if control_panel_path(&path) {
+            let i = self.0.load(Ordering::SeqCst);
+            let refreshing = theme_keep_path(i).is_some_and(|kept| kept.eq_ignore_ascii_case(&path));
+            clear_theme_keep(i);
+            if !refreshing {
+                let owner = app(|a| a.main);
+                unsafe { let _ = launch_explorer(owner, &path); }
+            }
+            return Err(Error::from(HRESULT::from_win32(ERROR_CANCELLED.0)));
+        }
         let i = self.0.load(Ordering::SeqCst);
         // Rebuilding the shell view for a theme change browses the folder it already shows.
         // That is not a visit: keep history, the filter, and the saved view, and do not
         // drop the folder-size walk as if the pane had left.
         let refreshing = unsafe {
-            let path = name(pidl, SIGDN_DESKTOPABSOLUTEPARSING);
             match theme_keep_path(i) {
                 Some(kept) if kept.eq_ignore_ascii_case(&path) => {
                     if local_path_gone(&path) {
@@ -3480,7 +3513,6 @@ impl IExplorerBrowserEvents_Impl for Events_Impl {
             if let Some(h) = pane_hwnd(i) {
                 end_share(i, h);
             }
-            let path = name(pidl, SIGDN_DESKTOPABSOLUTEPARSING);
             // Cancel before explorerframe binds a folder that is already gone (back, forward,
             // the tree, session restore). A share is not stat'd here.
             if local_path_gone(&path) {

@@ -226,6 +226,45 @@ pub(crate) fn shell_places() -> &'static [ShellPlace] {
     ]
 }
 
+/// Parsing names of Control Panel. `IExplorerBrowser` with `FWF_NOWEBVIEW` cannot
+/// enumerate its applets, so browsing one leaves the pane empty. These open in Explorer
+/// instead. Case and surrounding space are ignored. A child under one of these names
+/// matches too. Network, Quick access, and the other shell places do not.
+pub(crate) fn control_panel_path(path: &str) -> bool {
+    let path = path.trim();
+    if path.is_empty() {
+        return false;
+    }
+    if eq_or_below(path, "shell:ControlPanelFolder") {
+        return true;
+    }
+    // `shell:::{clsid}` is the `shell:` scheme plus the `::{clsid}` parsing name.
+    let body = strip_prefix_ignore_ascii(path, "shell:").unwrap_or(path);
+    const CLSIDS: &[&str] = &[
+        "::{26EE0668-A00A-44D7-9371-BEB064C98683}",
+        "::{21EC2020-3AEA-1069-A2DD-08002B30309D}",
+        "::{82A74AEB-AEB4-465C-A014-D097EE346D63}",
+    ];
+    CLSIDS.iter().any(|id| eq_or_below(body, id))
+}
+
+/// `path` is `root`, or a child of it. The next character must be a separator so a
+/// longer unrelated name does not match.
+fn eq_or_below(path: &str, root: &str) -> bool {
+    let pb = path.as_bytes();
+    let rb = root.as_bytes();
+    if pb.len() < rb.len() || !pb[..rb.len()].eq_ignore_ascii_case(rb) {
+        return false;
+    }
+    pb.len() == rb.len() || pb[rb.len()] == b'\\' || pb[rb.len()] == b'/'
+}
+
+fn strip_prefix_ignore_ascii<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let pb = path.as_bytes();
+    let xb = prefix.as_bytes();
+    (pb.len() >= xb.len() && pb[..xb.len()].eq_ignore_ascii_case(xb)).then(|| &path[xb.len()..])
+}
+
 pub(crate) fn shell_place_label(path: &str) -> Option<Key> {
     let key = path.trim();
     shell_places().iter().find(|p| p.path.eq_ignore_ascii_case(key)).map(|p| p.label)
@@ -1348,9 +1387,44 @@ mod tests {
         assert!(shell_places().iter().any(|p| p.path.contains("645FF040")));
         assert!(shell_places().iter().any(|p| p.path.contains("20D04FE0")));
         assert_eq!(shell_place_label("shell:Downloads"), Some(Key::DownloadsFolder));
+        assert!(shell_places().iter().any(|p| p.path == "shell:ControlPanelFolder"));
+        assert!(shell_places().iter().any(|p| p.path == "shell:NetworkPlacesFolder"));
         assert!(ItemKind::Special.navigable());
         assert!(!ItemKind::Rdp.navigable());
         assert!(ItemKind::Command.launches());
+    }
+
+    #[test]
+    fn control_panel_parsing_names_are_not_pane_folders() {
+        let yes = [
+            "shell:ControlPanelFolder",
+            "  SHELL:controlpanelfolder  ",
+            "::{26EE0668-A00A-44D7-9371-BEB064C98683}",
+            "shell:::{26EE0668-A00A-44D7-9371-BEB064C98683}",
+            "::{21EC2020-3AEA-1069-A2DD-08002B30309D}",
+            "::{21ec2020-3aea-1069-a2dd-08002b30309d}",
+            "::{82A74AEB-AEB4-465C-A014-D097EE346D63}",
+            "  shell:::{82A74AEB-AEB4-465C-A014-D097EE346D63}  ",
+            "::{26EE0668-A00A-44D7-9371-BEB064C98683}\\0",
+        ];
+        for path in yes {
+            assert!(control_panel_path(path), "{path}");
+        }
+        let no = [
+            "shell:Downloads",
+            "shell:NetworkPlacesFolder",
+            "shell:Desktop",
+            "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}",
+            "::{645FF040-5081-101B-9F08-00AA002F954E}",
+            "shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}",
+            r"C:\Windows",
+            "",
+            "   ",
+            "ControlPanelFolder",
+        ];
+        for path in no {
+            assert!(!control_panel_path(path), "{path}");
+        }
     }
 
     #[test]
