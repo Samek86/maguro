@@ -113,10 +113,17 @@ unsafe fn paint_pin_note(dc: HDC, rc: RECT, font: HFONT, dpi: i32) {
     wrap_text(dc, RECT { left: s(8), top: top + s(4), right: rc.right - s(8), bottom: rc.bottom - s(2) }, &note, font, ink, false);
 }
 
-/// Largest vertical scroll offset: total row height minus what the panel shows.
+/// Rows plus the trailing root-end gap. An empty list stays empty.
+fn list_extent() -> i32 {
+    let n = rows().len();
+    let gap = if n == 0 { 0 } else { fav_end_gap_px(app(|a| a.dpi)) };
+    fav_list_extent(n, row_h(), gap)
+}
+
+/// Largest vertical scroll offset: content height minus what the panel shows.
+/// The trailing gap stays reachable, so the last row does not sit flush with the bottom.
 fn max_side_scroll() -> i32 {
-    let total = rows().len() as i32 * row_h();
-    (total - list_page()).max(0)
+    fav_list_max_scroll(list_extent(), list_page())
 }
 
 /// Mirror the scroll state into the native vertical scrollbar (hidden while everything fits).
@@ -125,7 +132,7 @@ pub(crate) fn sync_side_scrollbar() {
     if h.0.is_null() {
         return;
     }
-    let total = rows().len() as i32 * row_h();
+    let total = list_extent();
     let (page, pos) = (list_page(), app(|a| a.side_scroll));
     let si = SCROLLINFO {
         cbSize: size_of::<SCROLLINFO>() as u32,
@@ -704,7 +711,7 @@ pub(crate) unsafe fn paint_side(h: HWND) {
                 continue;
             }
             let r = RECT { left: 0, top: y, right: rc.right, bottom: y + rh };
-            let into = drop.is_some_and(|(row, zone)| row == i && zone == 1);
+            let into = matches!(drop, Some(DropLine::At { index, zone: 1 }) if index == i);
             if f.group && !wash.is_invalid() {
                 FillRect(dc, &r, wash);
             }
@@ -749,11 +756,11 @@ pub(crate) unsafe fn paint_side(h: HWND) {
             text(dc, RECT { left: s(12), top: y, right: rc.right - s(8), bottom: y + s(22) }, tr(crate::Key::NoFavouritesYet), font, pal().sub, DT_LEFT);
             text(dc, RECT { left: s(12), top: y + s(20), right: rc.right - s(8), bottom: y + s(44) }, tr(crate::Key::RightClickAddGroup), font, pal().sub, DT_LEFT);
         }
-        if let Some((row, zone)) = drop {
-            if zone != 1 {
-                if let Some(f) = list.get(row) {
-                    let at = if zone == 0 { row } else { after_row(&list, row) };
-                    let line_y = if zone == 0 { row as i32 * rh - scroll } else { at as i32 * rh - scroll + rh - s(2) };
+        match drop {
+            Some(DropLine::At { index, zone }) if zone != 1 => {
+                if let Some(f) = list.get(index) {
+                    let at = if zone == 0 { index } else { after_row(&list, index) };
+                    let line_y = if zone == 0 { index as i32 * rh - scroll } else { at as i32 * rh - scroll + rh - s(2) };
                     // A line under the Explorer groups is a new root favourite, not a child of that row.
                     let indent = if f.in_tree() { s(14) * f.depth.min(8) as i32 } else { 0 };
                     if line_y + s(2) >= 0 && line_y < list_bottom {
@@ -761,6 +768,15 @@ pub(crate) unsafe fn paint_side(h: HWND) {
                     }
                 }
             }
+            Some(DropLine::Root { after }) => {
+                // Under the list, at root indent. A nested last row must not pull this mark inward.
+                let line_y = (after as i32 + 1) * rh - scroll;
+                let thick = s(2).max(1);
+                if line_y + thick >= 0 && line_y < list_bottom {
+                    fill(dc, RECT { left: s(8), top: line_y, right: rc.right - s(8), bottom: line_y + thick }, accent);
+                }
+            }
+            _ => {}
         }
         paint_pin_note(dc, rc, font, dpi);
     });
@@ -962,7 +978,7 @@ unsafe fn side_menu(h: HWND, index: Option<usize>, x: i32, y: i32) {
     }
 }
 
-fn set_drop(next: Option<(usize, u8)>) -> bool {
+fn set_drop(next: Option<DropLine>) -> bool {
     app(|a| {
         let paint = a.side_drop != next;
         a.side_drop = next;
@@ -970,22 +986,35 @@ fn set_drop(next: Option<(usize, u8)>) -> bool {
     })
 }
 
+/// Root-end mark when `y` is under the last row, including the trailing gap.
+/// A pin or a favourite file copied here lands as a new root leaf. Anything else clears the line.
+fn root_end_mark(y: i32, list: &[FavRow], drag: &SideDrag) -> Option<DropLine> {
+    let scroll = app(|a| a.side_scroll);
+    if !fav_root_end_hit(y, 0, scroll, row_h(), list_page(), list.len()) {
+        return None;
+    }
+    match side_act(drag.kind, drag.group, drag.file, drag.path.is_empty(), RowKind::Tree) {
+        SideAct::Copy | SideAct::Move => drop_line(&hits_of(list), &DropSpot::End),
+        _ => None,
+    }
+}
+
 fn track_drop(y: i32) -> bool {
     let drag = app(|a| a.side_drag.clone());
     let Some(drag) = drag else { return false };
     let list = rows();
-    let Some(i) = row_at(y) else { return set_drop(None) };
+    let Some(i) = row_at(y) else { return set_drop(root_end_mark(y, &list, &drag)) };
     let Some(target) = list.get(i) else { return set_drop(None) };
     let kind = side_act(drag.kind, drag.group, drag.file, drag.path.is_empty(), target.kind);
     let next = match kind {
         SideAct::None => None,
-        SideAct::Pin => list.iter().position(|r| r.kind == RowKind::Pins && r.group).map(|row| (row, 1)),
-        SideAct::PinFile => list.iter().position(|r| r.kind == RowKind::Files && r.group).map(|row| (row, 1)),
+        SideAct::Pin => list.iter().position(|r| r.kind == RowKind::Pins && r.group).map(|index| DropLine::At { index, zone: 1 }),
+        SideAct::PinFile => list.iter().position(|r| r.kind == RowKind::Files && r.group).map(|index| DropLine::At { index, zone: 1 }),
         SideAct::Copy | SideAct::Move => {
             let scroll = app(|a| a.side_scroll);
             let rh = row_h();
             let top = i as i32 * rh - scroll;
-            Some((i, drop_zone(target.group, y - top, rh)))
+            Some(DropLine::At { index: i, zone: drop_zone(target.group, y - top, rh) })
         }
     };
     set_drop(next)
@@ -1085,18 +1114,68 @@ fn nudge_side(down: bool) {
     }
 }
 
+fn settle_tree(id: Option<Vec<usize>>) {
+    if let Some(id) = id {
+        let i = tree_pos(&rows(), &id);
+        app(|a| a.side_sel = i);
+        changed();
+    } else {
+        repaint_side();
+    }
+}
+
+/// Gap under the list: move a favourite to the root end, or copy a pin there.
+fn finish_root_end(drag: &SideDrag) {
+    match side_act(drag.kind, drag.group, drag.file, drag.path.is_empty(), RowKind::Tree) {
+        SideAct::Move => {
+            let moved = app(|a| {
+                let id = move_dropped(&mut a.s.tree, &drag.id, &DropSpot::End)?;
+                if id == drag.id {
+                    return None;
+                }
+                a.s.sync_favs();
+                Some(id)
+            });
+            settle_tree(moved);
+        }
+        SideAct::Copy => {
+            let name = if drag.name.is_empty() || drag.name == short_name(&drag.path) { String::new() } else { drag.name.clone() };
+            let copied = app(|a| {
+                let id = copy_at(&mut a.s.tree, &drag.path, &name, &DropSpot::End, drag.file);
+                if id.is_some() {
+                    a.s.sync_favs();
+                }
+                id
+            });
+            settle_tree(copied);
+        }
+        _ => repaint_side(),
+    }
+}
+
 fn finish_drop() {
     let list = rows();
-    let (drag, onto) = app(|a| {
-        let onto = a.side_drop.and_then(|(i, zone)| list.get(i).cloned().map(|r| (r, zone)));
+    let (drag, mark) = app(|a| {
+        let mark = a.side_drop;
         let drag = a.side_drag.clone();
         a.side_drag = None;
         a.side_drop = None;
         a.side_press = None;
-        (drag, onto)
+        (drag, mark)
     });
     let Some(drag) = drag else { return };
-    let Some((target, zone)) = onto else {
+    let Some(mark) = mark else {
+        repaint_side();
+        return;
+    };
+    let (index, zone) = match mark {
+        DropLine::Root { .. } => {
+            finish_root_end(&drag);
+            return;
+        }
+        DropLine::At { index, zone } => (index, zone),
+    };
+    let Some(target) = list.get(index).cloned() else {
         repaint_side();
         return;
     };
@@ -1616,7 +1695,7 @@ fn into_folder_at(y: i32) -> Option<String> {
     fav_into_folder(dropm, row.group, row.file, &row.path, y - top, rh).then(|| row.path.clone())
 }
 
-fn fav_target(y: i32) -> (DropSpot, Option<(usize, u8)>) {
+fn fav_target(y: i32) -> (DropSpot, Option<DropLine>) {
     let list = rows();
     let hits = hits_of(&list);
     let index = row_at(y);
@@ -1656,7 +1735,7 @@ impl SideDrop {
         matches!(kind, RowKind::Pins | RowKind::Files).then_some(kind)
     }
 
-    unsafe fn paint_line(&self, line: Option<(usize, u8)>) {
+    unsafe fn paint_line(&self, line: Option<DropLine>) {
         if set_drop(line) {
             _ = InvalidateRect(Some(self.hwnd), None, false);
         }
@@ -1681,7 +1760,7 @@ impl SideDrop {
                     Some(HomeDrop::Folders(_)) => RowKind::Pins,
                     _ => RowKind::Files,
                 };
-                rows().iter().position(|r| r.group && r.kind == want).map(|row| (row, 1u8))
+                rows().iter().position(|r| r.group && r.kind == want).map(|index| DropLine::At { index, zone: 1 })
             }).flatten();
             self.paint_line(next);
             return;
@@ -1973,6 +2052,7 @@ mod tests {
         fav_hover_cursor, fav_hover_paints, fav_leave_paints, fav_panel_draws, fav_panel_focus_frame, fav_panel_focus_rgb, fav_panel_group_on_accent, fav_panel_row_fill, fav_release, fav_row_at, fav_row_height, fav_sel_after_release, fav_tip_act, fav_tip_blocked, fav_tip_hides, fav_tip_same, fav_tip_text,
         mark_rows, FavCursor, FavRelease, FavRow, FavTipAct, RowKind,
     };
+    use crate::{fav_end_gap_px, fav_in_end_gap, fav_list_extent, fav_list_max_scroll, fav_root_end_hit};
     use crate::i18n::UI;
 
     #[test]
@@ -2042,6 +2122,21 @@ mod tests {
         assert_eq!(fav_row_at(10, 0, 0, 100, 4), None);
         assert_eq!(fav_row_at(10, i32::MAX, 20, 100, 4), None);
         assert_eq!(fav_row_at(0, 0, 20, 100, 0), None);
+    }
+
+    #[test]
+    fn gap_under_the_last_row_is_not_a_row_hit() {
+        let gap = fav_end_gap_px(96);
+        let row_h = 20;
+        let n = 4usize;
+        let page = n as i32 * row_h;
+        let max = fav_list_max_scroll(fav_list_extent(n, row_h, gap), page);
+        assert_eq!(max, gap);
+        assert_eq!(fav_row_at(page - 1, max, row_h, page, n), None, "the bottom of the gap is not a row");
+        assert_eq!(fav_row_at(page - gap, max, row_h, page, n), None, "the first pixel of the gap is not a row");
+        assert_eq!(fav_row_at(page - gap - 1, max, row_h, page, n), Some(n - 1), "the pixel above the gap is the last row");
+        assert!(fav_in_end_gap(page - 1, 0, max, row_h, n, gap));
+        assert!(fav_root_end_hit(page - gap, 0, max, row_h, page, n));
     }
 
     #[test]

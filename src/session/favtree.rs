@@ -491,6 +491,8 @@ pub(crate) fn insert_dropped(tree: &mut Vec<FavNode>, items: &[Dropped], spot: &
 }
 
 /// Spot under the pointer. `index` is the visible row, or none for the empty area under the list.
+/// That empty area is the root end. It is not the trailing edge of the last visible row:
+/// a nested last row would otherwise take the drop into its group.
 /// A row that is not in the favourites tree inserts at the start of that tree.
 pub(crate) fn drop_spot(hits: &[DropHit], index: Option<usize>, zone: u8) -> DropSpot {
     if let Some(row) = index.and_then(|i| hits.get(i)) {
@@ -503,17 +505,104 @@ pub(crate) fn drop_spot(hits: &[DropHit], index: Option<usize>, zone: u8) -> Dro
         }
         return DropSpot::End;
     }
-    if let Some(last) = hits.iter().rev().find(|r| r.tree && !r.id.is_empty()) {
-        return DropSpot::At(last.id.clone(), 2);
-    }
     DropSpot::End
 }
 
-/// Visible row and zone for the insertion line. None when there is no row to draw under.
-pub(crate) fn drop_line(hits: &[DropHit], spot: &DropSpot) -> Option<(usize, u8)> {
+/// Where the insertion line is drawn. `At` follows one visible row.
+/// `Root` is under the whole list, at root indent, so a nested last row cannot pull the mark inward.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DropLine {
+    At { index: usize, zone: u8 },
+    Root { after: usize },
+}
+
+/// Line for `spot`. None when the list has no row to anchor it to.
+pub(crate) fn drop_line(hits: &[DropHit], spot: &DropSpot) -> Option<DropLine> {
     match spot {
-        DropSpot::End => hits.len().checked_sub(1).map(|i| (i, 2)),
-        DropSpot::At(id, zone) => hits.iter().position(|r| r.tree && r.id == *id).map(|i| (i, *zone)),
+        DropSpot::End => hits.len().checked_sub(1).map(|after| DropLine::Root { after }),
+        DropSpot::At(id, zone) => hits.iter().position(|r| r.tree && r.id == *id).map(|index| DropLine::At { index, zone: *zone }),
+    }
+}
+
+/// Empty drop band under a favourites list, in DIP. 10 px at 96 DPI.
+pub(crate) const FAV_END_GAP_DIP: i32 = 10;
+
+/// `FAV_END_GAP_DIP` scaled the way the chrome scales (`dip * dpi / 96`).
+pub(crate) fn fav_end_gap_px(dpi: i32) -> i32 {
+    FAV_END_GAP_DIP.saturating_mul(dpi.max(0)) / 96
+}
+
+/// Height of `n` rows plus the trailing gap. An empty list has no gap.
+pub(crate) fn fav_list_extent(n: usize, row_h: i32, gap: i32) -> i32 {
+    if n == 0 || row_h <= 0 {
+        return 0;
+    }
+    (n as i32).saturating_mul(row_h).saturating_add(gap.max(0))
+}
+
+/// Largest scroll offset that still shows the trailing gap.
+pub(crate) fn fav_list_max_scroll(extent: i32, page: i32) -> i32 {
+    (extent - page.max(0)).max(0)
+}
+
+/// `y` is inside the reserved band under the last row.
+/// `list_top` and `y` share a client space. Row 0 starts at `list_top - scroll`.
+pub(crate) fn fav_in_end_gap(y: i32, list_top: i32, scroll: i32, row_h: i32, n: usize, gap: i32) -> bool {
+    if n == 0 || row_h <= 0 || gap <= 0 {
+        return false;
+    }
+    let content = y as i64 - list_top as i64 + scroll as i64;
+    let start = n as i64 * row_h as i64;
+    content >= start && content < start + gap as i64
+}
+
+/// `y` is inside the list page and at or below the last row. That includes the
+/// reserved gap and any further empty page under a short list. A point on a row is false.
+pub(crate) fn fav_root_end_hit(y: i32, list_top: i32, scroll: i32, row_h: i32, page_bottom: i32, n: usize) -> bool {
+    if n == 0 || row_h <= 0 || y < list_top || y >= page_bottom {
+        return false;
+    }
+    let content = y as i64 - list_top as i64 + scroll as i64;
+    content >= n as i64 * row_h as i64
+}
+
+/// Move `from` to `spot`. `End` appends at the root, outside every group.
+/// `apply_drop` still refuses an empty target; the root end goes through here.
+pub(crate) fn move_dropped(tree: &mut Vec<FavNode>, from: &[usize], spot: &DropSpot) -> Option<Vec<usize>> {
+    match spot {
+        DropSpot::At(onto, zone) => apply_drop(tree, from, onto, *zone),
+        DropSpot::End => move_to_root_end(tree, from),
+    }
+}
+
+fn move_to_root_end(tree: &mut Vec<FavNode>, from: &[usize]) -> Option<Vec<usize>> {
+    if from.is_empty() {
+        return None;
+    }
+    if from.len() == 1 && from[0] + 1 == tree.len() {
+        return Some(from.to_vec());
+    }
+    let mut next = tree.clone();
+    let node = take_node(&mut next, from)?;
+    let index = next.len();
+    insert_child(&mut next, &[], index, node)?;
+    *tree = next;
+    Some(vec![index])
+}
+
+/// Same as [`copy_leaf`], or a new root leaf when `spot` is [`DropSpot::End`].
+pub(crate) fn copy_at(tree: &mut Vec<FavNode>, path: &str, name: &str, spot: &DropSpot, file: bool) -> Option<Vec<usize>> {
+    match spot {
+        DropSpot::At(onto, zone) => copy_leaf(tree, path, name, onto, *zone, file),
+        DropSpot::End => {
+            let path = tidy_path(path);
+            if path.is_empty() || contains_path(tree, &path) {
+                return None;
+            }
+            let index = tree.len();
+            insert_child(tree, &[], index, FavNode::leaf(&path, name, file))?;
+            Some(vec![index])
+        }
     }
 }
 
@@ -1878,12 +1967,80 @@ mod tests {
         assert_eq!(drop_spot(&hits, Some(2), 1), DropSpot::At(vec![0], 1));
         assert_eq!(drop_spot(&hits, Some(3), 1), DropSpot::At(vec![0, 0], 2), "a leaf has no inside");
         assert_eq!(drop_spot(&hits, Some(0), 1), DropSpot::At(vec![0], 0), "a pin row inserts before the tree");
-        assert_eq!(drop_spot(&hits, None, 2), DropSpot::At(vec![1], 2), "empty space is after the last favourite");
-        assert_eq!(drop_line(&hits, &DropSpot::At(vec![0], 1)), Some((2, 1)));
-        assert_eq!(drop_line(&hits, &DropSpot::End), Some((4, 2)));
+        assert_eq!(drop_spot(&hits, None, 2), DropSpot::End, "empty space is the root end");
+        assert_eq!(drop_line(&hits, &DropSpot::At(vec![0], 1)), Some(DropLine::At { index: 2, zone: 1 }));
+        assert_eq!(drop_line(&hits, &DropSpot::End), Some(DropLine::Root { after: 4 }));
         let pins = vec![hit(false, true, vec![])];
         assert_eq!(drop_spot(&pins, None, 2), DropSpot::End);
-        assert_eq!(drop_line(&pins, &DropSpot::End), Some((0, 2)));
+        assert_eq!(drop_line(&pins, &DropSpot::End), Some(DropLine::Root { after: 0 }));
         assert_eq!(drop_line(&[], &DropSpot::End), None);
+    }
+
+    #[test]
+    fn empty_space_under_a_nested_last_row_is_the_root_end() {
+        let hits = vec![
+            hit(true, true, vec![0]),
+            hit(true, false, vec![0, 0]),
+        ];
+        assert_eq!(drop_spot(&hits, None, 2), DropSpot::End);
+        assert_eq!(drop_spot(&hits, Some(0), 1), DropSpot::At(vec![0], 1), "the group row still opens inward");
+        assert_eq!(drop_spot(&hits, Some(0), 2), DropSpot::At(vec![0], 2), "the bottom of that row stays after the group");
+        assert_eq!(drop_spot(&hits, Some(1), 2), DropSpot::At(vec![0, 0], 2));
+        assert_eq!(drop_line(&hits, &DropSpot::End), Some(DropLine::Root { after: 1 }));
+        assert_eq!(drop_line(&hits, &DropSpot::At(vec![0, 0], 2)), Some(DropLine::At { index: 1, zone: 2 }));
+        assert_ne!(drop_line(&hits, &DropSpot::End), drop_line(&hits, &DropSpot::At(vec![0, 0], 2)));
+    }
+
+    #[test]
+    fn root_end_move_does_not_enter_the_last_group() {
+        let mut tree = jobs_and_desk();
+        assert!(apply_drop(&mut tree, &[0], &[], 2).is_none(), "an empty target is still refused");
+        assert_eq!(move_dropped(&mut tree, &[0], &DropSpot::End), Some(vec![1]));
+        assert_eq!(labels(&tree), "Desk/c/d/Jobs/a/b");
+        assert_eq!(tree[1].name, "Jobs");
+        assert_eq!(tree[1].children.len(), 2, "the moved group keeps its own children");
+        assert!(tree[0].children.iter().all(|n| n.name != "Jobs"));
+        assert_eq!(move_dropped(&mut tree, &[0, 1], &DropSpot::End), Some(vec![2]));
+        assert_eq!(tree[0].children.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["c"]);
+        assert_eq!(tree[2].name, "d");
+        assert!(tree[2].children.is_empty(), "a leaf at the root end is not a child of the last group");
+        assert_eq!(move_dropped(&mut tree, &[2], &DropSpot::End), Some(vec![2]), "the last root node stays put");
+        let id = insert_dropped(&mut tree, &[item(r"E:\tail", false)], &DropSpot::End).unwrap();
+        assert_eq!(id, vec![3]);
+        assert_eq!(tree[3].path, r"E:\tail");
+        assert!(tree.iter().take(3).all(|n| n.path != r"E:\tail"));
+        assert!(tree[1].children.iter().all(|n| n.path != r"E:\tail"));
+        let id = copy_at(&mut tree, r"E:\pin\", "Pin", &DropSpot::End, false).unwrap();
+        assert_eq!(id, vec![4]);
+        assert_eq!(tree[4].name, "Pin");
+        assert_eq!(tree[4].path, r"E:\pin");
+    }
+
+    #[test]
+    fn end_gap_sits_under_the_last_row_after_scroll() {
+        assert_eq!(fav_end_gap_px(96), 10);
+        assert_eq!(fav_end_gap_px(192), 20);
+        assert_eq!(fav_end_gap_px(120), 12);
+        let gap = fav_end_gap_px(96);
+        let row_h = 20;
+        let n = 4;
+        let page = 80;
+        let extent = fav_list_extent(n, row_h, gap);
+        assert_eq!(extent, 90);
+        let max = fav_list_max_scroll(extent, page);
+        assert_eq!(max, gap);
+        assert!(fav_in_end_gap(70, 0, max, row_h, n, gap));
+        assert!(fav_in_end_gap(79, 0, max, row_h, n, gap));
+        assert!(!fav_in_end_gap(69, 0, max, row_h, n, gap), "the last row is not the gap");
+        assert!(fav_root_end_hit(70, 0, max, row_h, page, n));
+        assert!(!fav_root_end_hit(69, 0, max, row_h, page, n));
+        assert!(fav_root_end_hit(50, 0, 0, row_h, 100, 1), "empty page under a short list is the root end");
+        assert!(!fav_in_end_gap(50, 0, 0, row_h, 1, gap));
+        assert!(fav_in_end_gap(20, 0, 0, row_h, 1, gap));
+        assert!(!fav_in_end_gap(19, 0, 0, row_h, 1, gap));
+        assert!(fav_in_end_gap(110, 40, 10, row_h, n, gap), "a list that does not start at the window top");
+        assert!(fav_root_end_hit(150, 40, 10, row_h, 200, n));
+        assert!(!fav_root_end_hit(150, 40, 10, row_h, 140, n));
+        assert_eq!(fav_list_extent(0, row_h, gap), 0);
     }
 }

@@ -409,6 +409,8 @@ struct St {
     drag: Option<i32>,
     /// Tree id of the favourites row being dragged. Indices shift as the node moves.
     fav_drag: Option<Vec<usize>>,
+    /// Pointer is in the gap under the favourites list. The root-end line stays up.
+    fav_end: bool,
     /// Handler ids expanded on the right-click menu page.
     ctx_open: Vec<String>,
 }
@@ -438,6 +440,7 @@ impl Default for St {
             thumb_h: 0,
             drag: None,
             fav_drag: None,
+            fav_end: false,
             ctx_open: Vec::new(),
         }
     }
@@ -463,6 +466,7 @@ struct Snap {
     mono: HFONT,
     icon: HFONT,
     ctx_open: Vec<String>,
+    fav_end: bool,
 }
 
 fn snap() -> Snap {
@@ -483,6 +487,7 @@ fn snap() -> Snap {
             mono: st.mono,
             icon: st.icon,
             ctx_open: st.ctx_open.clone(),
+            fav_end: st.fav_end,
         }
     })
 }
@@ -1025,7 +1030,10 @@ fn fav_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, y: i32, rq: &str) ->
         return y;
     }
     // The page title is the heading. The table's own name/path row stays in the board.
-    let board = crate::layout_fav_board(&rows, left, right, y, dpi);
+    let mut board = crate::layout_fav_board(&rows, left, right, y, dpi);
+    let gap = if board.slots.is_empty() { 0 } else { sc(dpi, crate::FAV_END_GAP_DIP) };
+    board.table.bottom = board.table.bottom.saturating_add(gap);
+    let tail = board.bottom + gap;
     g.items.push(Item::Table(board.table));
     g.items.push(Item::FavHead(board.head));
     if let Some(rect) = board.empty {
@@ -1034,7 +1042,20 @@ fn fav_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, y: i32, rq: &str) ->
     for slot in board.slots {
         g.items.push(Item::FavRow { i: slot.index, rect: slot.rect, rename: slot.rename, btn: slot.delete });
     }
-    board.bottom + sc(dpi, 8)
+    tail + sc(dpi, 8)
+}
+
+/// Table edges and the bottom of the last real favourites row. The root-end gap starts there.
+fn fav_tail(g: &Geo) -> Option<(i32, i32, i32)> {
+    let table = g.items.iter().find_map(|it| match it {
+        Item::Table(r) => Some(*r),
+        _ => None,
+    })?;
+    let bottom = g.items.iter().filter_map(|it| match it {
+        Item::FavRow { i, rect, .. } if *i != usize::MAX => Some(rect.bottom),
+        _ => None,
+    }).max()?;
+    Some((table.left, table.right, bottom))
 }
 
 fn key_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str) -> i32 {
@@ -1233,6 +1254,7 @@ mod tests {
             mono: HFONT::default(),
             icon: HFONT::default(),
             ctx_open: Vec::new(),
+            fav_end: false,
         }
     }
 

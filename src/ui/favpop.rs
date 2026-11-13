@@ -73,6 +73,8 @@ struct St {
     hot_row: Option<usize>,
     expand_w: i32,
     tip_on: bool,
+    /// Pointer is in the gap under the list. The root-end line stays up until the drag ends.
+    drop_end: bool,
 }
 
 impl Default for St {
@@ -98,6 +100,7 @@ impl Default for St {
             hot_row: None,
             expand_w: 0,
             tip_on: false,
+            drop_end: false,
         }
     }
 }
@@ -679,7 +682,7 @@ unsafe fn fav_manager_activate() {
 /// A group toggles. A leaf navigates the active pane, or launches a file, and the window closes.
 unsafe fn activate_row(row: &FavRow) {
     if row.group {
-        finish_drag();
+        let _ = finish_drag();
         let _ = ReleaseCapture();
         if row.in_tree() {
             toggle_id(&row.id);
@@ -689,7 +692,7 @@ unsafe fn activate_row(row: &FavRow) {
         return;
     }
     let row = row.clone();
-    let moved = finish_drag();
+    let (moved, _) = finish_drag();
     let _ = ReleaseCapture();
     if moved {
         commit();
@@ -1006,7 +1009,9 @@ fn row_rects(n: usize, body: RECT, scroll: i32, dpi: i32) -> Vec<RECT> {
 
 fn content_h(n: usize, hint: bool, dpi: i32) -> i32 {
     let rh = row_h(dpi);
-    n as i32 * rh + if hint { rh } else { 0 }
+    let hint_h = if hint { rh } else { 0 };
+    let gap = if n == 0 { 0 } else { fav_end_gap_px(dpi) };
+    fav_list_extent(n, rh, gap).saturating_add(hint_h)
 }
 
 unsafe fn layout(h: HWND) {
@@ -1126,6 +1131,18 @@ unsafe fn paint(h: HWND) {
             let r = RECT { left: lay.body.left, top, right: lay.body.right, bottom: top + rh };
             text(dc, r, empty_msg(""), small, t.sub, DT_CENTER);
         }
+        if ST.with(|s| s.borrow().drop_end) && !rows.is_empty() {
+            let rh = row_h(dpi);
+            let top = lay.body.top - scroll + rows.len() as i32 * rh;
+            let thick = px(dpi, 2).max(1);
+            if top + thick > lay.body.top && top < lay.body.bottom {
+                fill(
+                    dc,
+                    RECT { left: lay.body.left + px(dpi, 8), top, right: lay.body.right - px(dpi, 8), bottom: top + thick },
+                    crate::live_accent(),
+                );
+            }
+        }
         if saved != 0 {
             let _ = RestoreDC(dc, saved);
         }
@@ -1244,14 +1261,17 @@ unsafe fn on_command(h: HWND, id: i32, code: u32) {
     let _ = InvalidateRect(Some(h), None, false);
 }
 
-unsafe fn finish_drag() -> bool {
+/// `(tree changed, the root-end line was showing)`.
+unsafe fn finish_drag() -> (bool, bool) {
     ST.with(|s| {
         let mut st = s.borrow_mut();
         let had = st.drag.take().is_some();
         let moved = st.drag_moved;
+        let line = st.drop_end;
         st.drag_moved = false;
         st.drag_ready = false;
-        had && moved
+        st.drop_end = false;
+        (had && moved, line)
     })
 }
 
@@ -1400,6 +1420,12 @@ fn fav_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         rects.iter().enumerate().find(|(_, r)| y >= r.top && y < r.bottom).and_then(|(i, r)| rows.get(i).map(|row| (row.clone(), *r)))
                     }).flatten();
                     if let Some((target, rect)) = hit {
+                        let cleared = ST.with(|s| {
+                            let mut st = s.borrow_mut();
+                            let cleared = st.drop_end;
+                            st.drop_end = false;
+                            cleared
+                        });
                         if fav_popup_can_drop(true, &from, &target) {
                             let zone = drop_zone(target.group, y - rect.top, (rect.bottom - rect.top).max(1));
                             let moved = app(|a| {
@@ -1421,7 +1447,48 @@ fn fav_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                                 });
                                 layout(h);
                                 let _ = InvalidateRect(Some(h), None, false);
+                            } else if cleared {
+                                let _ = InvalidateRect(Some(h), None, false);
                             }
+                        } else if cleared {
+                            let _ = InvalidateRect(Some(h), None, false);
+                        }
+                    } else if inside(lay.body, x, y) && fav_root_end_hit(y, lay.body.top, scroll, row_h(dpi), lay.body.bottom, rows.len()) {
+                        let moved = app(|a| {
+                            a.s.ensure_fav_tree();
+                            let new_id = move_dropped(&mut a.s.tree, &from, &DropSpot::End)?;
+                            if new_id == from {
+                                return None;
+                            }
+                            a.s.sync_favs();
+                            Some(new_id)
+                        });
+                        let paint = ST.with(|s| {
+                            let mut st = s.borrow_mut();
+                            let paint = !st.drop_end || moved.is_some();
+                            st.drop_end = true;
+                            if let Some(new_id) = moved.clone() {
+                                st.drag = Some(new_id.clone());
+                                st.sel = Some(Sel { kind: RowKind::Tree, id: new_id });
+                                st.drag_moved = true;
+                            }
+                            paint
+                        });
+                        if moved.is_some() {
+                            layout(h);
+                        }
+                        if paint {
+                            let _ = InvalidateRect(Some(h), None, false);
+                        }
+                    } else {
+                        let cleared = ST.with(|s| {
+                            let mut st = s.borrow_mut();
+                            let cleared = st.drop_end;
+                            st.drop_end = false;
+                            cleared
+                        });
+                        if cleared {
+                            let _ = InvalidateRect(Some(h), None, false);
                         }
                     }
                 } else {
@@ -1477,7 +1544,7 @@ fn fav_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let lay = client_lay(h);
                 let over = hit_act(&lay, x, y).filter(|id| act_on(*id));
                 let effect = ST.with(|s| s.borrow_mut().track.pointer_up(over));
-                let moved = finish_drag();
+                let (moved, _) = finish_drag();
                 let _ = ReleaseCapture();
                 if let TrackEffect::Click(id) = effect {
                     run_act(h, id);
@@ -1487,11 +1554,12 @@ fn fav_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let _ = InvalidateRect(Some(h), None, false);
             }
             WM_CAPTURECHANGED => {
-                if finish_drag() {
+                let (moved, line) = finish_drag();
+                if moved {
                     commit();
                 }
                 let effect = ST.with(|s| s.borrow_mut().track.capture_lost());
-                if !matches!(effect, TrackEffect::None) {
+                if moved || line || !matches!(effect, TrackEffect::None) {
                     let _ = InvalidateRect(Some(h), None, false);
                 }
             }
@@ -1660,5 +1728,15 @@ mod tests {
             assert_eq!(lay.expand.right - lay.expand.left, wide, "dpi {dpi}");
             assert!(lay.expand.right + px(dpi, BTN_GAP) <= lay.close.left, "dpi {dpi}");
         }
+    }
+
+    #[test]
+    fn list_content_keeps_a_root_gap_under_the_last_row() {
+        assert_eq!(content_h(0, false, 96), 0);
+        assert_eq!(content_h(0, true, 96), row_h(96));
+        assert_eq!(crate::fav_end_gap_px(96), 10);
+        assert_eq!(content_h(3, false, 96), 3 * row_h(96) + 10);
+        assert_eq!(content_h(3, false, 192), 3 * row_h(192) + 20);
+        assert_eq!(content_h(2, true, 96), 2 * row_h(96) + row_h(96) + 10);
     }
 }
