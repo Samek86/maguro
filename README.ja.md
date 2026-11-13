@@ -32,11 +32,7 @@
 
 <br>
 
-<p align="center">
-  <a href="docs/demo-ja.mp4"><img src="docs/demo-ja.gif" width="320" alt="Maguroの動作画面"></a>
-</p>
-
-<p align="center">▶ <a href="docs/demo-ja.mp4">フル動画を見る</a>（60秒）</p>
+https://github.com/user-attachments/assets/eedf08c5-859f-4a9c-9d09-131ad0e44b76
 
 <br>
 
