@@ -1349,7 +1349,7 @@ mod tests {
         crate::UI.store(2, Ordering::Relaxed);
         assert_eq!(
             tx(crate::Key::TurnOffBeforeUninstall),
-            "削除前にオフにしてください。オフにしないと無いプログラムでフォルダーが開きます."
+            "削除前にオフにしてください。オフにしないと無いプログラムでフォルダーが開きます。"
         );
         assert!(card_hit(folder, "削除前にオフ"));
         let (_, page) = commit_search(2, 2, "削除前にオフ");
