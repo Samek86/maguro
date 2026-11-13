@@ -51,6 +51,22 @@ Each pane is a real Windows Explorer view. The right-click menu, drag and drop, 
 
 Copy and move go through **IFileOperation**, so you get the Windows progress window, undo, and the usual conflict prompts. Network transfers can switch to robocopy when you want them to.
 
+## Use Maguro as your default folder app (recommended)
+
+Turn this on, and double-clicking a folder or a drive opens it in Maguro. You don’t have to start Maguro first.
+
+This option is **off by default**. You turn it on yourself: **Settings → General → Use as default folder app**.
+
+**If you want to remove Maguro completely, turn this switch off first, then delete it.**
+
+1. Open **Settings → General** and turn off **Use as default folder app**.
+2. Check that a folder opens in File Explorer.
+3. Delete Maguro.
+
+If Maguro was already deleted and folders no longer open, download and run Maguro again, turn the switch off, then delete it.
+
+How the option works — the registry keys it writes, and how turning it off restores the previous default — is under [Default folder app](#default-folder-app) in Settings.
+
 ## Features
 
 ### 1. Layout gallery — every preset
@@ -219,7 +235,7 @@ Settings live in `%APPDATA%\Maguro\maguro.json`. Put a file named `portable.txt`
 
 To build from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-**If you want to remove Maguro completely, turn this switch off first, then delete it.** The steps are under [Default folder app](#default-folder-app).
+**If you want to remove Maguro completely, turn this switch off first, then delete it.** The steps are under [Use Maguro as your default folder app (recommended)](#use-maguro-as-your-default-folder-app-recommended).
 
 ## Keyboard shortcuts
 
@@ -273,19 +289,11 @@ Language (Auto, English, and every language file), font, light / dark theme, acc
 
 ### Default folder app
 
-**Settings → General → Use as default folder app** makes Maguro the program that opens file-system folders and drives for the current Windows user. A folder opened from another program, or by double-clicking it, opens in Maguro. Win+E, the taskbar, and virtual folders such as `shell:` still open in File Explorer.
+The switch is **Settings → General → Use as default folder app**. It is **off by default**; you turn it on yourself. For why to use it, how to turn it on, and the steps to take before you delete Maguro, see [Use Maguro as your default folder app (recommended)](#use-maguro-as-your-default-folder-app-recommended).
 
 This is not saved in `maguro.json`. Turning the option on writes only to the current-user registry (`HKCU\Software\Classes\Directory\shell` and `HKCU\Software\Classes\Drive\shell`): it adds a `Maguro` verb whose command runs this `maguro.exe`, and sets that verb as the default. Machine-wide settings (HKLM) and the `Folder` class are left alone.
 
 Turn the same option **off** to undo it. Maguro restores the previous default it saved and removes its verb.
-
-**If you want to remove Maguro completely, turn this switch off first, then delete it.**
-
-1. Open **Settings → General** and turn off **Use as default folder app**.
-2. Check that a folder opens in File Explorer.
-3. Delete Maguro.
-
-If Maguro was already deleted and folders no longer open, download and run Maguro again, turn the switch off, then delete it.
 
 ## Language files
 

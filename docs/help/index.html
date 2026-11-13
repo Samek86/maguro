@@ -257,7 +257,7 @@ body.lb-open { overflow: hidden; }
   </div>
   <nav class="toc" id="toc" aria-label="목차">
     <div class="toc-title">목차</div>
-    <a href="#overview">개요</a><a href="#address-toolbar">주소창과 도구 모음</a><a href="#layouts">레이아웃과 패널</a><a href="#panedrag">패널 이동과 복제</a><a href="#tabs">창 탭과 세션</a><a href="#tab-list">탭 목록</a><a href="#pane-tabs">패널 탭</a><a href="#pane-colors">패널 색</a><a href="#favorites">즐겨찾기와 폴더 트리</a><a href="#search">검색</a><a href="#preview">미리보기와 빠른 미리보기</a><a href="#files">파일 작업</a><a href="#batch-rename">일괄 이름 바꾸기</a><a href="#basket">파일 바구니</a><a href="#watch">폴더 감시</a><a href="#clipboard">클립보드 경로</a><a href="#workspaces">작업 공간</a><a href="#servers">서버 연결</a><a href="#office">Office 파일</a><a href="#ctxmenu">우클릭 메뉴</a><a href="#theme">테마와 스타일 컨트롤</a><a href="#settings">설정</a><a href="#window-actions">Win+Shift+E와 그 밖의 동작</a><a href="#shortcuts">단축키</a><a href="#languages">언어</a><a href="#troubleshoot">문제 해결</a>
+    <a href="#overview">개요</a><a href="#default-folder-app">기본 폴더 앱으로 쓰기 (추천)</a><a href="#address-toolbar">주소창과 도구 모음</a><a href="#layouts">레이아웃과 패널</a><a href="#panedrag">패널 이동과 복제</a><a href="#tabs">창 탭과 세션</a><a href="#tab-list">탭 목록</a><a href="#pane-tabs">패널 탭</a><a href="#pane-colors">패널 색</a><a href="#favorites">즐겨찾기와 폴더 트리</a><a href="#search">검색</a><a href="#preview">미리보기와 빠른 미리보기</a><a href="#files">파일 작업</a><a href="#batch-rename">일괄 이름 바꾸기</a><a href="#basket">파일 바구니</a><a href="#watch">폴더 감시</a><a href="#clipboard">클립보드 경로</a><a href="#workspaces">작업 공간</a><a href="#servers">서버 연결</a><a href="#office">Office 파일</a><a href="#ctxmenu">우클릭 메뉴</a><a href="#theme">테마와 스타일 컨트롤</a><a href="#settings">설정</a><a href="#window-actions">Win+Shift+E와 그 밖의 동작</a><a href="#shortcuts">단축키</a><a href="#languages">언어</a><a href="#troubleshoot">문제 해결</a>
   </nav>
 </aside>
 <main class="main">
@@ -275,6 +275,19 @@ body.lb-open { overflow: hidden; }
     <p>시작 메뉴나 명령줄에서 실행합니다. <code>maguro.exe C:\Work D:\Archive</code>처럼 폴더 경로를 넘기면 그 폴더들이 열리고, <code>.maguro</code> 파일을 넘기면 저장해 둔 세션이 열립니다. <code>.grids</code>, <code>.qdr</code>, <code>grids.ini</code>는 세션 파일이 아니므로 가져오지 않습니다.</p>
     <p>F1을 누르면 브라우저에서 이 도움말이 열립니다. Ctrl+/는 앱 안의 간단한 단축키 목록을, Ctrl+,는 설정을 엽니다.</p>
     <div class="shot-grid"><figure class="shot"><img src="../images-v8/ko/hero_light.png" alt="주 창, 라이트 테마" loading="lazy"><figcaption>주 창, 라이트</figcaption></figure><figure class="shot"><img src="../images-v8/ko/hero_dark.png" alt="주 창, 다크 테마" loading="lazy"><figcaption>주 창, 다크</figcaption></figure></div>
+  </section>
+
+  <section class="section-block" id="default-folder-app" data-search="기본 폴더 앱 추천 탐색기 더블클릭 드라이브 삭제 스위치 기본값 꺼짐 default folder app">
+    <h2>기본 폴더 앱으로 쓰기 (추천)</h2>
+    <p>이 옵션을 켜면, 폴더나 드라이브를 더블클릭했을 때 Maguro가 열립니다. Maguro를 먼저 실행하지 않아도 됩니다. Win+E, 작업 표시줄, <code>shell:</code> 같은 가상 폴더는 계속 탐색기로 열립니다.</p>
+    <p>이 옵션은 <strong>기본값이 꺼짐</strong>입니다. 직접 <strong>설정 → 일반 → 기본 폴더 앱으로 사용</strong>에서 켭니다.</p>
+    <p><strong>Maguro를 완전히 삭제하고 싶을 때는 이 스위치를 끄고 나서 삭제해 주세요.</strong></p>
+    <ol>
+      <li><strong>설정 → 일반</strong>에서 <strong>기본 폴더 앱으로 사용</strong>을 끕니다.</li>
+      <li>폴더가 탐색기에서 열리는지 확인합니다.</li>
+      <li>Maguro를 삭제합니다.</li>
+    </ol>
+    <p>이미 Maguro를 지웠는데 폴더가 열리지 않으면, Maguro를 다시 받아 실행한 다음 스위치를 끄고 삭제하세요.</p>
   </section>
 
   <section class="section-block" id="address-toolbar" data-search="address toolbar status swap drive buttons gear menu 주소창 도구모음 상태 톱니 보기 모양 동작">
@@ -470,14 +483,7 @@ body.lb-open { overflow: hidden; }
     <h2>설정</h2>
     <p>Ctrl+,로 설정을 엽니다. 검색 상자에 입력하면 제목이나 설명이 일치하는 페이지, 카드, 단축키로 이동합니다. 변경 사항은 바로 적용됩니다. 설정 파일은 <code>%APPDATA%\Maguro\maguro.json</code>이고, exe 옆에 <code>portable.txt</code>가 있으면 exe 옆의 <code>maguro.json</code>을 씁니다. 파일이 없으면 기본값으로 시작합니다. 저장에 실패하면 5초 뒤에 다시 시도합니다. 읽을 수 없는 파일은 건드리지 않고, 알 수 없는 키는 그대로 보존합니다. 각 키에 대한 설명은 <a href="https://github.com/Samek86/maguro/blob/main/docs/settings.md">docs/settings.md</a>에 있습니다.</p>
     <p><strong>일반.</strong> 표시 언어(자동이면 맞는 언어 파일이 있을 때 Windows를 따르고, 없으면 영어). 글꼴은 창 전체에 적용되며, 글꼴 크기 설정은 없습니다. 시작할 때는 마지막 상태 복원, 저장한 세션 하나 열기, 기본 레이아웃 중에서 고릅니다. 기본 폴더 앱으로 사용은 파일 시스템 폴더와 드라이브에만 Maguro를 등록합니다. Win+E, 작업 표시줄, <code>shell:</code> 같은 가상 폴더는 계속 탐색기로 열립니다. 그 밖에 기본 레이아웃, 중복 실행 막기, 창 하나만 쓰기, 열기/저장 대화 상자의 폴더, 클립보드 경로 단축키, 빈 곳 더블클릭으로 상위 폴더, Everything, WinMerge 경로가 있습니다.</p>
-    <p><strong>설정 → 일반 → 기본 폴더 앱으로 사용</strong>을 켜면, 현재 Windows 사용자에게서 파일 시스템의 폴더와 드라이브를 여는 프로그램이 Maguro가 됩니다. 다른 프로그램에서 폴더를 열거나 폴더를 더블클릭하면 Maguro가 열립니다. Win+E, 작업 표시줄, <code>shell:</code> 같은 가상 폴더는 계속 탐색기로 열립니다. 이 옵션은 <code>maguro.json</code>에 저장되지 않습니다. 켜면 <code>HKCU\Software\Classes\Directory\shell</code>과 <code>HKCU\Software\Classes\Drive\shell</code>에만 씁니다. <code>Maguro</code> 동사를 추가하고, 그 명령이 이 <code>maguro.exe</code>를 실행하게 한 뒤 기본값으로 둡니다. 컴퓨터 전체(HKLM) 설정과 <code>Folder</code> 클래스는 바꾸지 않습니다. 같은 옵션을 끄면 저장해 둔 이전 기본값을 되돌리고 자신의 동사를 지웁니다.</p>
-    <p><strong>Maguro를 완전히 삭제하고 싶을 때는 이 스위치를 끄고 나서 삭제해 주세요.</strong></p>
-    <ol>
-      <li><strong>설정 → 일반</strong>에서 <strong>기본 폴더 앱으로 사용</strong>을 끕니다.</li>
-      <li>폴더가 탐색기에서 열리는지 확인합니다.</li>
-      <li>Maguro를 삭제합니다.</li>
-    </ol>
-    <p>이미 Maguro를 지웠는데 폴더가 열리지 않으면, Maguro를 다시 받아 실행한 다음 스위치를 끄고 삭제하세요.</p>
+    <p>스위치는 설정 → 일반에 있습니다. <strong>기본값은 꺼짐</strong>이고, 자동으로 켜지지 않습니다. 왜 쓰는지, 어떻게 켜는지, 삭제 전에 할 일은 <a href="#default-folder-app">기본 폴더 앱으로 쓰기 (추천)</a>에 있습니다. 이 옵션은 <code>maguro.json</code>에 저장되지 않습니다. 켜면 <code>HKCU\Software\Classes\Directory\shell</code>과 <code>HKCU\Software\Classes\Drive\shell</code>에만 씁니다. <code>Maguro</code> 동사를 추가하고, 그 명령이 이 <code>maguro.exe</code>를 실행하게 한 뒤 기본값으로 둡니다. 컴퓨터 전체(HKLM) 설정과 <code>Folder</code> 클래스는 바꾸지 않습니다. 같은 옵션을 끄면 저장해 둔 이전 기본값을 되돌리고 자신의 동사를 지웁니다.</p>
     <p><strong>모양.</strong> 테마, 강조 색, 도구 모음, 드라이브 버튼.</p>
     <p><strong>패널·보기.</strong> 새 패널의 기본 보기. 폴더마다 보기 기억을 켜면 정렬, 열, 보기 방식, 아이콘 크기, 그룹을 설정 파일 옆의 <code>folder-views.json</code>에 저장합니다. 모든 폴더의 기본 보기는 활성 패널에서 가져오며, 이 폴더의 보기 지우기와 모두 지우기도 있습니다. 새 패널의 시작 폴더는 내 PC, 바탕 화면, 지정한 폴더 중에서 고릅니다. 숨김 파일. 파일 확장명은 Windows 자체 설정이라 탐색기에도 똑같이 적용됩니다. 폴더 크기와, 기본으로 꺼져 있는 네트워크 폴더 크기 옵션. 왼쪽 패널, 즐겨찾기와 트리 중 어느 쪽을 위에 둘지, 즐겨찾기 패널 표시와 트리뷰 패널 표시. 활성 패널 테두리 강조. 미리보기 창. 스페이스로 미리보기. 휠로 다음/이전 파일로 넘기기.</p>
     <p><strong>파일 작업.</strong> 일반적인 붙여넣기에는 항상 Windows 복사 창을 씁니다. 네트워크 폴더 고속 복사. 삭제할 때 확인. 기본 삭제 방식. 새 파일 이름. 끌어 놓기 기본 동작은 Windows 규칙, 항상 복사, 항상 묻기 중에서 고릅니다.</p>
