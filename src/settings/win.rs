@@ -889,6 +889,18 @@ unsafe fn draw(dc: HDC, rc: RECT, g: &Geo, sn: &Snap, h: HWND) {
             Item::FavRestore(_) => {}
         }
     }
+    if sn.fav_end {
+        if let Some((left, right, bottom)) = fav_tail(g) {
+            let thick = sc(dpi, 2).max(1);
+            if bottom + thick > g.content.top && bottom < g.content.bottom {
+                crate::fill(
+                    dc,
+                    RECT { left: left + sc(dpi, 8), top: bottom, right: right - sc(dpi, 8), bottom: bottom + thick },
+                    crate::live_accent(),
+                );
+            }
+        }
+    }
     if g.has_bar {
         let track = crate::blend(t.bg, t.text, 0.08);
         crate::paint_wash(dc, g.track, dpi, track, t.bg);
@@ -2208,6 +2220,13 @@ unsafe fn on_click(h: HWND, x: i32, y: i32) {
     }
 }
 
+/// Under the last favourites row, inside the table and the scrolling page.
+/// That is the root-end gap and any empty page below a short list.
+fn fav_settings_end(x: i32, y: i32, g: &Geo) -> bool {
+    let Some((left, right, bottom)) = fav_tail(g) else { return false };
+    x >= left && x < right && y >= bottom && y < g.content.bottom
+}
+
 extern "system" fn settings_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     crate::crash::catch_wnd(std::panic::AssertUnwindSafe(|| settings_proc_inner(h, msg, wp, lp)))
 }
@@ -2315,6 +2334,12 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         _ => None,
                     });
                     if let Some((to_i, rect)) = hit {
+                        let cleared = ST.with(|s| {
+                            let mut st = s.borrow_mut();
+                            let cleared = st.fav_end;
+                            st.fav_end = false;
+                            cleared
+                        });
                         let moved = app(|a| {
                             a.s.ensure_fav_tree();
                             let target = crate::tree_rows(&a.s.tree).get(to_i).map(|r| (r.id.clone(), r.group));
@@ -2334,9 +2359,45 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                             ST.with(|s| s.borrow_mut().fav_drag = Some(new_id));
                             layout(h);
                             let _ = InvalidateRect(Some(h), None, false);
+                        } else if cleared {
+                            let _ = InvalidateRect(Some(h), None, false);
+                        }
+                    } else if fav_settings_end(x, y, &g) {
+                        let moved = app(|a| {
+                            a.s.ensure_fav_tree();
+                            let new_id = crate::move_dropped(&mut a.s.tree, &from, &crate::DropSpot::End)?;
+                            if new_id == from {
+                                return None;
+                            }
+                            a.s.sync_favs();
+                            Some(new_id)
+                        });
+                        let paint = ST.with(|s| {
+                            let mut st = s.borrow_mut();
+                            let paint = !st.fav_end || moved.is_some();
+                            st.fav_end = true;
+                            if let Some(new_id) = moved.clone() {
+                                st.fav_drag = Some(new_id);
+                            }
+                            paint
+                        });
+                        if moved.is_some() {
+                            layout(h);
+                        }
+                        if paint {
+                            let _ = InvalidateRect(Some(h), None, false);
+                        }
+                    } else {
+                        let cleared = ST.with(|s| {
+                            let mut st = s.borrow_mut();
+                            let cleared = st.fav_end;
+                            st.fav_end = false;
+                            cleared
+                        });
+                        if cleared {
+                            let _ = InvalidateRect(Some(h), None, false);
                         }
                     }
-                    let _ = x;
                     return LRESULT(0);
                 }
                 if let Some(off) = ST.with(|s| s.borrow().drag) {
@@ -2373,7 +2434,11 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
             WM_LBUTTONUP => {
-                let fav = ST.with(|s| s.borrow_mut().fav_drag.take());
+                let fav = ST.with(|s| {
+                    let mut st = s.borrow_mut();
+                    st.fav_end = false;
+                    st.fav_drag.take()
+                });
                 if ST.with(|s| s.borrow().drag.is_some()) || fav.is_some() {
                     ST.with(|s| s.borrow_mut().drag = None);
                     let _ = ReleaseCapture();
@@ -2385,7 +2450,11 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_CAPTURECHANGED => {
                 // Capture taken away mid-drag (Alt+Tab, a popup): end the drag as a button-up would.
                 // A normal button-up has already cleared both, so this does nothing then.
-                let fav = ST.with(|s| s.borrow_mut().fav_drag.take());
+                let fav = ST.with(|s| {
+                    let mut st = s.borrow_mut();
+                    st.fav_end = false;
+                    st.fav_drag.take()
+                });
                 ST.with(|s| s.borrow_mut().drag = None);
                 if fav.is_some() {
                     crate::commit_favs();

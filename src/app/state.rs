@@ -136,7 +136,7 @@ pub(crate) struct Desk {
     pub(crate) side_sel: Option<usize>,
     pub(crate) side_scroll: i32,
     pub(crate) side_drag: Option<SideDrag>, // node being dragged
-    pub(crate) side_drop: Option<(usize, u8)>, // visible row, drop zone
+    pub(crate) side_drop: Option<DropLine>, // insertion line: a row, or the root end
     pub(crate) side_press: Option<(i32, i32, usize)>,
     /// An OLE drop is over the favourites panel. The location tip stays hidden so it cannot take the drop.
     pub(crate) side_external: bool,
