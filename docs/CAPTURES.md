@@ -123,9 +123,9 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 | favorites.ja.png | 즐겨찾기 | MaguroMain 사이드바 | light/ja | favorites 시드 | 305322 B (1226×823) | capture-main.ps1 | DWM |  |
 | favorites.ko.png | 즐겨찾기 | MaguroMain 사이드바 | light/ko | favorites 시드 | 303594 B (1226×823) | capture-main.ps1 | DWM |  |
 | favorites.png | 즐겨찾기 | MaguroMain 사이드바 | light/en | favorites 시드 | 301707 B (1226×823) | capture-main.ps1 | DWM |  |
-| feature_basket.ja.png | 파일 바구니 | MaguroBasket | light/ja | 데모 | 28005 B (544×513) | capture-features.ps1 | DWM |  |
-| feature_basket.ko.png | 파일 바구니 | MaguroBasket | light/ko | 데모 | 27101 B (544×513) | capture-features.ps1 | DWM |  |
-| feature_basket.png | 파일 바구니 | MaguroBasket | light/en | 데모 | 24121 B (546×513) | capture-features.ps1 | DWM |  |
+| feature_basket.ja.png | 파일 바구니 | MaguroBasket | light/ja | G:\Mixed 데모 5개 파일 | 18486 B (574×511) | capture-features.ps1 (WM_COMMAND 1125) | DWM | **2026-11-13 재촬영.** 이전 v8은 v7 복사(546×513, 경로 C:\WORK\pgtest\demo-253, クリア가 둘째 줄). 현재 창은 590 DIP이라 버튼 5개가 한 줄 |
+| feature_basket.ko.png | 파일 바구니 | MaguroBasket | light/ko | G:\Mixed 데모 5개 파일 | 15382 B (574×511) | capture-features.ps1 (WM_COMMAND 1125) | DWM | **2026-11-13 재촬영.** 이전 v8은 v7 복사(546×513, 경로 C:\WORK\pgtest\demo-253) |
+| feature_basket.png | 파일 바구니 | MaguroBasket | light/en | G:\Mixed demo files (5) | 14799 B (574×511) | capture-features.ps1 (WM_COMMAND 1125) | DWM | **Retaken 2026-11-13.** Previous v8 was a v7 copy (546×513, path C:\WORK\pgtest\demo-253, Clear wrapped to a second row). Current window is 590 DIP so all five footer buttons fit on one row |
 | feature_excel_readonly_tidy.ja.png | Excel 정리 | MaguroExcelTidy | light/ja | readme-excel-demo sheet.xlsx | 7672 B (422×244) | 컨텍스트 메뉴 id=0x8007 (PR #312 shared UI) | DWM | images-v4 재촬영 |
 | feature_excel_readonly_tidy.ko.png | Excel 정리 | MaguroExcelTidy | light/ko | readme-excel-demo sheet.xlsx | 5797 B (422×244) | 컨텍스트 메뉴 id=0x8007 (PR #312 shared UI) | DWM | images-v4 재촬영 |
 | feature_excel_readonly_tidy.png | Excel 정리 | MaguroExcelTidy | light/en | readme-excel-demo sheet.xlsx | 6217 B (422×244) | 컨텍스트 메뉴 id=0x8007 (PR #312 shared UI) | DWM | images-v4 재촬영 |
@@ -238,7 +238,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 버튼·카드·검색 칸이 공유 토큰으로 바뀌었다. 아래 캡처는 다시 찍는다.
 
 - `feature_folder_watch.png`, `feature_folder_watch.ko.png`, `feature_folder_watch.ja.png`
-- `feature_basket.png`, `feature_basket.ko.png`, `feature_basket.ja.png`
+- `feature_basket.png`, `feature_basket.ko.png`, `feature_basket.ja.png` — **2026-11-13 재촬영 완료** (아래 변경 이력)
 - `tab_list.png`
 - `rename.png`, `rename.ko.png`, `rename.ja.png`
 - `copy_progress.png`, `copy_progress.ko.png`, `copy_progress.ja.png` — 푸터 버튼이 28 DIP라 창 높이는 480×148. 위 표의 480×152는 재촬영 전 값이다.
@@ -249,6 +249,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 
 ## 변경 이력 (관련)
 
+- **2026-11-13 (basket):** `feature_basket.png` / `.ko` / `.ja` 를 현재 main(7356696)에서 다시 찍어 `docs/images-v8/{en,ko,ja}/` 에 넣음. 이전 v8 파일은 v7과 바이트가 같았고, 창이 546×513이라 영어·일본어에서 Clear/クリア가 둘째 줄로 접혔으며 경로는 테스트용 `C:\WORK\pgtest\demo-253\basket-src` 였다. 새 샷은 574×511, 데모 경로는 `G:\Mixed` (notes.docx, plan.xlsx, budget-2026.csv, samples.zip, todo.txt), 버튼 5개가 한 줄.
 - **2026-11-13:** 세그먼트 컨트롤 반영 재촬영 → `docs/images-v8/` (84장, common/en/ja/ko). servers.png(en/ko/ja, 406×526)와 settings_ctxmenu.png(en/ko/ja, 984×631)만 새로 찍고 나머지는 v7을 복사. 우클릭 시간 기록을 Advanced로 옮기고(#393) 페이지 안내문을 뺀 화면. README·도움말 경로 images-v7 → images-v8. `docs/images-v7/`는 트리에 남김(옛 URL을 덮어쓰지 않음). 시드 `readme2-cfgs-v6`.
 - **2026-11-08 (v0.2.10):** 버튼 높이 28 반영 재촬영 → `docs/images-v7/` (84장, common/en/ja/ko). README·도움말 경로 images-v6 → images-v7. 시드 `readme2-cfgs-v6`. 폴더 감시 위쪽 버튼은 28이다.
 - **2026-11-06 (v0.2.7):** 글꼴 +1 릴리스 후 전체 재촬영 → `docs/images-v6/` (84장, common/en/ja/ko). README·도움말 경로 images-v5 → images-v6. 시드 `readme2-cfgs-v6`(fav_panel+tree_panel, side_split=0.5). copy_progress는 help-demo\src 2GB 파일로. 루트 `workspaces*.png`(톱니 하위 메뉴, 참조 없음)는 공식 스크립트가 없어 v6에 넣지 않음.
