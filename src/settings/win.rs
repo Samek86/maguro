@@ -3,15 +3,17 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Once;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Graphics::Gdi::{
-    CreateRectRgn, DeleteObject, ExtSelectClipRgn, GetWindowRgn, GetWindowRgnBox, RedrawWindow, SetWindowRgn, GDI_REGION_TYPE, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW, RGN_AND,
+    CreateRectRgn, DeleteObject, ExtSelectClipRgn, GetWindowRgn, GetWindowRgnBox, RedrawWindow, ScreenToClient, SetWindowRgn, GDI_REGION_TYPE, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW, RGN_AND,
     RGN_ERROR,
 };
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::{SetWindowTheme, DRAWITEMSTRUCT, WM_MOUSELEAVE};
+use windows::Win32::UI::Controls::{
+    InitCommonControlsEx, SetWindowTheme, DRAWITEMSTRUCT, ICC_LINK_CLASS, INITCOMMONCONTROLSEX, LHITTESTINFO, LIF_ITEMINDEX, LIF_STATE, LIS_DEFAULTCOLORS, LIST_ITEM_STATE_FLAGS, LITEM, LM_HITTEST, LM_SETITEM, NMHDR, NM_CLICK, NM_RETURN, WC_LINK, WM_MOUSELEAVE,
+};
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, IsWindowEnabled, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_ESCAPE, VK_RETURN};
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, IsWindowEnabled, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_ESCAPE, VK_RETURN, VK_SHIFT, VK_TAB};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::*;
@@ -2448,25 +2450,35 @@ thread_local! {
     static ABOUT_DONE: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Visible repo address. The link opens [`ABOUT_REPO_URL`].
+pub(crate) const ABOUT_REPO_LABEL: &str = "github.com/Samek86/maguro";
+/// Browser target for the About repo link.
+pub(crate) const ABOUT_REPO_URL: &str = "https://github.com/Samek86/maguro";
+
 pub(crate) struct AboutCopy {
     pub title: String,
     pub version: String,
     pub desc: String,
     pub license: String,
-    /// Plain-text repo address only. Not a link; never opened in a browser.
+    /// Shown address, without a scheme. The SysLink opens [`ABOUT_REPO_URL`].
     pub repo: String,
-    /// Short fork note with the upstream address. Plain text, same as `repo`.
+    /// Short fork note with the upstream address. Plain text, not a link.
     pub fork: String,
 }
 
-/// Body of the About window: product name, version, description, license, plain-text repo, and a short fork line.
+/// `<A>` markup for the repo SysLink. The visible run is [`ABOUT_REPO_LABEL`].
+pub(crate) fn about_link_markup() -> String {
+    format!("<A HREF=\"{ABOUT_REPO_URL}\">{ABOUT_REPO_LABEL}</A>")
+}
+
+/// Body of the About window: product name, version, description, license, repo address, and a short fork line.
 pub(crate) fn about_copy(version: &str, desc: &str, license: &str, fork: &str) -> AboutCopy {
     AboutCopy {
         title: "Maguro".into(),
         version: version.into(),
         desc: desc.into(),
         license: license.into(),
-        repo: "github.com/Samek86/maguro".into(),
+        repo: ABOUT_REPO_LABEL.into(),
         fork: fork.into(),
     }
 }
@@ -2495,6 +2507,11 @@ pub(crate) struct AboutLay {
 const ABOUT_W_DIP: i32 = 440;
 const ABOUT_ICON_DIP: i32 = 48;
 const ABOUT_BTN_W_DIP: i32 = 88;
+/// OK. Id 1, so Enter on the button still posts the command the loop already used.
+const ABOUT_OK: i32 = 1;
+/// Repo SysLink. Not a closing command.
+const ABOUT_LINK: i32 = 2;
+const ABOUT_LINK_SUB: usize = 7;
 
 /// Client height for the stacked About body. Heights are already in pixels.
 pub(crate) fn about_client_h(dpi: i32, desc_h: i32, lic_h: i32, repo_h: i32, fork_h: i32) -> i32 {
@@ -2619,8 +2636,11 @@ unsafe fn paint_about(h: HWND) {
         crate::paint_meta(dc, lay.version, &copy.version, small);
         crate::wrap_text(dc, lay.desc, &copy.desc, font, t.text, false);
         crate::wrap_text(dc, lay.license, &copy.license, small, t.sub, false);
-        // Plain text only — no SysLink, no ShellExecute, no click handler.
-        crate::wrap_text(dc, lay.repo, &copy.repo, small, t.sub, false);
+        // The repo address is the SysLink child. Paint it only when that control is missing.
+        let link = ctl(h, ABOUT_LINK);
+        if link.0.is_null() || !IsWindow(Some(link)).as_bool() {
+            crate::wrap_text(dc, lay.repo, &copy.repo, small, crate::about_link_ink(dark), false);
+        }
         crate::wrap_text(dc, lay.fork, &copy.fork, small, t.sub, false);
     });
 }
@@ -2630,8 +2650,76 @@ unsafe fn layout_about(h: HWND) {
     let mut rc = RECT::default();
     let _ = GetClientRect(h, &mut rc);
     let lay = about_metrics(rc.right - rc.left, rc.bottom - rc.top, dpi);
-    move_to(ctl(h, 1), lay.ok, true);
+    move_to(ctl(h, ABOUT_OK), lay.ok, true);
+    move_to(ctl(h, ABOUT_LINK), lay.repo, true);
     let _ = InvalidateRect(Some(h), None, false);
+}
+
+/// Enter closes unless the repo link is focused, so the link can open the browser.
+/// Escape always closes. Tab is left to the dialog manager.
+fn about_key_closes(vk: u16, link_focused: bool) -> bool {
+    vk == VK_ESCAPE.0 || (vk == VK_RETURN.0 && !link_focused)
+}
+
+fn ensure_link_class() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| unsafe {
+        let icc = INITCOMMONCONTROLSEX { dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_LINK_CLASS };
+        let _ = InitCommonControlsEx(&icc);
+    });
+}
+
+unsafe fn about_meta_font() -> HFONT {
+    let small = app(|a| a.small_font);
+    if small.is_invalid() { ask_font() } else { small }
+}
+
+/// True when the pointer is on the anchor, not the empty part of the row.
+unsafe fn link_anchor_hot(h: HWND) -> bool {
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() || !ScreenToClient(h, &mut pt).as_bool() {
+        return false;
+    }
+    let mut info = LHITTESTINFO { pt, item: LITEM::default() };
+    let hit = SendMessageW(h, LM_HITTEST, Some(WPARAM(0)), Some(LPARAM(&mut info as *mut LHITTESTINFO as isize)));
+    hit.0 >= 0
+}
+
+unsafe extern "system" fn about_link_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    if msg == WM_SETCURSOR && link_anchor_hot(h) {
+        let _ = SetCursor(LoadCursorW(None, IDC_HAND).ok());
+        return LRESULT(1);
+    }
+    DefSubclassProc(h, msg, wp, lp)
+}
+
+unsafe fn open_about_repo() {
+    let url = HSTRING::from(ABOUT_REPO_URL);
+    let _ = ShellExecuteW(None, w!("open"), &url, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+}
+
+/// Drop the theme colours so [`color_about_link`] supplies the ink on both themes.
+unsafe fn prepare_about_link(link: HWND) {
+    if link.0.is_null() {
+        return;
+    }
+    let _ = SetWindowTheme(link, w!(""), w!(""));
+    let mut item = LITEM {
+        mask: LIF_ITEMINDEX | LIF_STATE,
+        iLink: 0,
+        state: LIST_ITEM_STATE_FLAGS(0),
+        stateMask: LIS_DEFAULTCOLORS,
+        ..Default::default()
+    };
+    let _ = SendMessageW(link, LM_SETITEM, Some(WPARAM(0)), Some(LPARAM(&mut item as *mut LITEM as isize)));
+    let _ = SetWindowSubclass(link, Some(about_link_proc), ABOUT_LINK_SUB, 0);
+}
+
+unsafe fn create_about_link(parent: HWND, font: HFONT) -> HWND {
+    ensure_link_class();
+    let link = child_at(parent, WC_LINK, &about_link_markup(), WS_TABSTOP.0, ABOUT_LINK, font);
+    prepare_about_link(link);
+    link
 }
 
 unsafe extern "system" fn about_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -2655,9 +2743,21 @@ unsafe fn about_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
             draw_about_btn(&*(lp.0 as *const DRAWITEMSTRUCT));
             return LRESULT(1);
         }
+        WM_CTLCOLORSTATIC => {
+            if HWND(lp.0 as _) == ctl(h, ABOUT_LINK) {
+                return crate::color_about_link(HDC(wp.0 as _));
+            }
+        }
+        WM_NOTIFY => {
+            let hdr = &*(lp.0 as *const NMHDR);
+            if hdr.idFrom == ABOUT_LINK as usize && (hdr.code == NM_CLICK || hdr.code == NM_RETURN) {
+                open_about_repo();
+                return LRESULT(0);
+            }
+        }
         WM_COMMAND => {
             let id = (wp.0 & 0xffff) as i32;
-            if id == 1 {
+            if id == ABOUT_OK {
                 let _ = DestroyWindow(h);
                 return LRESULT(0);
             }
@@ -2675,7 +2775,11 @@ unsafe fn about_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
             let _ = SetWindowPos(h, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
             let font = ask_font();
             if !font.is_invalid() {
-                SendMessageW(ctl(h, 1), WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+                SendMessageW(ctl(h, ABOUT_OK), WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+            }
+            let meta = about_meta_font();
+            if !meta.is_invalid() {
+                SendMessageW(ctl(h, ABOUT_LINK), WM_SETFONT, Some(WPARAM(meta.0 as usize)), Some(LPARAM(1)));
             }
             layout_about(h);
             return LRESULT(0);
@@ -2702,7 +2806,7 @@ fn ensure_about_class() {
     });
 }
 
-/// About Maguro. One OK button. Body: name, version, description, license, plain-text repo, short fork line.
+/// About Maguro. OK closes the window. The repo address opens in the browser. The fork line stays plain text.
 pub(crate) unsafe fn show_about(owner: HWND) {
     ensure_about_class();
     ABOUT_DONE.with(|d| d.set(false));
@@ -2738,12 +2842,13 @@ pub(crate) unsafe fn show_about(owner: HWND) {
         return;
     }
     style_window(h);
-    let _ = child_at(h, w!("BUTTON"), tx(crate::Key::Ok), 0xB | 0x00010000, 1, font);
+    let _ = create_about_link(h, about_meta_font());
+    let _ = child_at(h, w!("BUTTON"), tx(crate::Key::Ok), 0xB | 0x00010000, ABOUT_OK, font);
     layout_about(h);
     let _ = ShowWindow(h, SW_SHOW);
     crate::keys::set_modal(true);
     let _ = EnableWindow(owner, false);
-    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(ctl(h, 1)));
+    let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(ctl(h, ABOUT_OK)));
     let mut msg = MSG::default();
     while !ABOUT_DONE.with(|d| d.get()) {
         if !GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -2759,8 +2864,18 @@ pub(crate) unsafe fn show_about(owner: HWND) {
         }
         if msg.message == WM_KEYDOWN && mine {
             let vk = msg.wParam.0 as u16;
-            if vk == VK_RETURN.0 || vk == VK_ESCAPE.0 {
-                let _ = SendMessageW(h, WM_COMMAND, Some(WPARAM(1)), Some(LPARAM(0)));
+            if vk == VK_TAB.0 {
+                // Tab between the link and OK. Enter stays with the key check below.
+                if !IsDialogMessageW(h, &msg).as_bool() {
+                    let cur = GetFocus();
+                    let cur = if cur.0.is_null() { None } else { Some(cur) };
+                    if let Ok(next) = GetNextDlgTabItem(h, cur, GetKeyState(VK_SHIFT.0 as i32) < 0) {
+                        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(Some(next));
+                    }
+                }
+                continue;
+            } else if about_key_closes(vk, GetFocus() == ctl(h, ABOUT_LINK)) {
+                let _ = SendMessageW(h, WM_COMMAND, Some(WPARAM(ABOUT_OK as usize)), Some(LPARAM(0)));
                 continue;
             }
         }
@@ -3123,7 +3238,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn about_body_is_name_version_description_license_and_plain_repo() {
+    fn about_body_lists_the_repo_and_the_link_opens_the_https_url() {
         let copy = about_copy(
             "0.1.77",
             "Fast multi-pane file manager for Windows",
@@ -3132,6 +3247,7 @@ mod tests {
         );
         let body = about_body(&copy);
         assert_eq!(copy.title, "Maguro");
+        assert_eq!(copy.repo, ABOUT_REPO_LABEL);
         assert_eq!(copy.repo, "github.com/Samek86/maguro");
         assert_eq!(copy.fork, "Fork of github.com/efww/grids");
         assert!(body.starts_with("Maguro\n0.1.77\n"));
@@ -3139,10 +3255,15 @@ mod tests {
         assert!(body.contains("MIT License · © 2026 efww, Samek86"));
         assert!(body.contains("github.com/Samek86/maguro"));
         assert!(body.contains("Fork of github.com/efww/grids"));
-        // Plain address only — never a URL scheme that would invite a browser open.
+        // The visible lines stay a bare address. The browser opens the https URL.
         assert!(!body.contains("http"));
         assert!(!body.contains("https"));
         assert!(!body.contains('?'));
+        assert_eq!(ABOUT_REPO_URL, "https://github.com/Samek86/maguro");
+        let markup = about_link_markup();
+        assert_eq!(markup, "<A HREF=\"https://github.com/Samek86/maguro\">github.com/Samek86/maguro</A>");
+        assert!(!markup.contains("efww"));
+        assert!(markup.contains(copy.repo.as_str()));
         assert_eq!(crate::ICON_GROUP_EXE, 1);
         assert_eq!(crate::ICON_GROUP_DARK, 2);
         assert_eq!(crate::ICON_GROUP_LIGHT, 3);
@@ -3199,7 +3320,90 @@ mod tests {
             assert_eq!(lay.ok.right - lay.ok.left, sc(dpi, ABOUT_BTN_W_DIP));
             assert!(lay.desc.left == m && lay.license.left == m && lay.repo.left == m && lay.fork.left == m);
             assert!(lay.ok.top >= lay.fork.bottom);
+            assert!(lay.repo.right > lay.repo.left && lay.repo.bottom > lay.repo.top);
+            assert!(lay.repo.bottom <= lay.ok.top);
+            assert!(!rects_overlap(lay.repo, lay.ok));
+            assert!(!rects_overlap(lay.fork, lay.ok));
         }
+    }
+
+    fn rects_overlap(a: RECT, b: RECT) -> bool {
+        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+    }
+
+    fn contrast(a: u32, b: u32) -> f32 {
+        let chan = |c: u32| {
+            let f = c as f32 / 255.0;
+            if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+        };
+        let rel = |rgb: u32| 0.2126 * chan(rgb >> 16) + 0.7152 * chan(rgb >> 8 & 0xFF) + 0.0722 * chan(rgb & 0xFF);
+        let (x, y) = (rel(a), rel(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn about_repo_row_is_the_link_slot_and_stays_clear_of_ok() {
+        for dpi in [96, 120, 144, 192] {
+            let cw = sc(dpi, ABOUT_W_DIP);
+            let desc_h = sc(dpi, 36);
+            let lic_h = sc(dpi, 18);
+            let repo_h = sc(dpi, 18);
+            let fork_h = sc(dpi, 32);
+            let ch = about_client_h(dpi, desc_h, lic_h, repo_h, fork_h);
+            let lay = about_lay(cw, ch, dpi, desc_h, lic_h, repo_h, fork_h);
+            let link = lay.repo;
+            assert!(link.right - link.left > sc(dpi, 120), "the address has a row of its own");
+            assert_eq!(link.bottom - link.top, repo_h);
+            assert_eq!(link.left, sc(dpi, 16));
+            assert!(link.bottom <= lay.fork.top);
+            assert!(lay.ok.top >= lay.fork.bottom);
+            assert!(lay.ok.top - link.bottom >= sc(dpi, 16));
+            assert!(!rects_overlap(link, lay.ok));
+            assert!(lay.ok.bottom <= ch);
+        }
+    }
+
+    #[test]
+    fn about_enter_on_the_link_stays_open_and_escape_still_closes() {
+        assert!(about_key_closes(VK_RETURN.0, false));
+        assert!(!about_key_closes(VK_RETURN.0, true));
+        assert!(about_key_closes(VK_ESCAPE.0, false));
+        assert!(about_key_closes(VK_ESCAPE.0, true));
+        assert!(!about_key_closes(VK_TAB.0, false));
+        assert!(!about_key_closes(VK_TAB.0, true));
+    }
+
+    #[test]
+    fn about_link_ink_stays_off_the_ground_in_both_themes() {
+        let light = crate::about_link_ink(false);
+        let dark = crate::about_link_ink(true);
+        assert_eq!(light, crate::ACCENT);
+        assert_eq!(dark, crate::ACCENT_HOVER_DARK);
+        assert_eq!(
+            crate::button_colors(crate::ButtonKind::Link, crate::ButtonState::Normal, false, crate::BG_LIGHT).ink,
+            light
+        );
+        assert_ne!(light, crate::BG_LIGHT);
+        assert_ne!(light, crate::SUB_LIGHT);
+        assert_ne!(dark, crate::BG_DARK);
+        assert_ne!(dark, crate::SUB_DARK);
+        assert!(contrast(dark, crate::BG_DARK) >= 4.5, "dark link {:#08X}", dark);
+        assert!(contrast(light, crate::BG_LIGHT) > 2.0, "light link {:#08X}", light);
+        let lum = |c: u32| 0.2126 * (c >> 16 & 0xFF) as f32 + 0.7152 * (c >> 8 & 0xFF) as f32 + 0.0722 * (c & 0xFF) as f32;
+        assert!(lum(dark) > lum(light));
+    }
+
+    #[test]
+    fn about_link_uses_the_hand_over_the_anchor() {
+        let src = include_str!("win.rs");
+        let start = src.find("fn link_anchor_hot(").expect("link_anchor_hot");
+        let tail = &src[start..];
+        let end = tail.find("\nunsafe fn open_about_repo").expect("open_about_repo follows");
+        let proc = &tail[..end];
+        assert!(proc.contains("IDC_HAND"));
+        assert!(proc.contains("LM_HITTEST"));
+        assert!(proc.contains("WM_SETCURSOR"));
     }
     
 

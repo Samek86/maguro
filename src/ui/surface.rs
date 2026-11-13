@@ -144,6 +144,23 @@ pub(crate) unsafe fn color_edit_on(dc: HDC, fill: u32, ink: u32) -> LRESULT {
     LRESULT(GetStockObject(DC_BRUSH).0 as isize)
 }
 
+/// About repo link. Light is the link-button accent. Dark is the lighter cerulean
+/// already used when an accent has to read on a dark ground.
+pub(crate) fn about_link_ink(dark: bool) -> u32 {
+    if dark { ACCENT_HOVER_DARK } else { ACCENT }
+}
+
+/// `WM_CTLCOLORSTATIC` for that link. The brush is the window ground, so the
+/// control does not leave a white hole where the parent clips children.
+pub(crate) unsafe fn color_about_link(dc: HDC) -> LRESULT {
+    let t = ui_tokens();
+    SetTextColor(dc, crate::cref(about_link_ink(t.dark)));
+    SetBkColor(dc, crate::cref(t.bg));
+    SetBkMode(dc, TRANSPARENT);
+    SetDCBrushColor(dc, crate::cref(t.bg));
+    LRESULT(GetStockObject(DC_BRUSH).0 as isize)
+}
+
 /// Folder chip and key cap. Card fill, hairline, shared radius. Corners blend into `ground`.
 pub(crate) unsafe fn paint_chip(dc: HDC, r: RECT, dpi: i32, ground: u32) {
     if r.right <= r.left || r.bottom <= r.top {
