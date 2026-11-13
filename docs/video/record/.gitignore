@@ -1,0 +1,4 @@
+uiafind.exe
+__pycache__/
+*.pyc
+langprobe.py
