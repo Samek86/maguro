@@ -1013,7 +1013,8 @@ pub(crate) unsafe fn on_key(vk: u16, ctrl: bool, shift: bool, alt: bool) -> bool
 
 unsafe fn open(main: HWND) {
     let dpi = GetDpiForWindow(main).max(96) as i32;
-    let style = WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN | WS_VISIBLE;
+    // Hidden until the caption is styled. WS_VISIBLE here leaves a light title bar.
+    let style = create_style();
     let mut rc = RECT { left: 0, top: 0, right: sc(dpi, 840), bottom: sc(dpi, 500) };
     _ = AdjustWindowRectExForDpi(&mut rc, style, false, WINDOW_EX_STYLE(0), dpi as u32);
     let (ww, hh) = (rc.right - rc.left, rc.bottom - rc.top);
@@ -1078,8 +1079,13 @@ fn place(owner: HWND, ww: i32, hh: i32) -> (i32, i32) {
     (x, y)
 }
 
+/// Overlapped tool window, created hidden. The caption is styled before `ShowWindow`.
+fn create_style() -> WINDOW_STYLE {
+    WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN
+}
+
 unsafe fn style_window(hwnd: HWND) {
-    style_dialog_caption(hwnd);
+    restyle_dialog_caption(hwnd);
 }
 
 /// Point the filter and the rename box at the shared faces.
@@ -2197,7 +2203,7 @@ fn tablist_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_GETMINMAXINFO => {
                 let dpi = GetDpiForWindow(h).max(96);
                 let mut rc = RECT { left: 0, top: 0, right: sc(dpi as i32, 420), bottom: sc(dpi as i32, 280) };
-                let style = WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN;
+                let style = create_style();
                 _ = AdjustWindowRectExForDpi(&mut rc, style, false, WINDOW_EX_STYLE(0), dpi);
                 let m = &mut *(lp.0 as *mut MINMAXINFO);
                 m.ptMinTrackSize.x = rc.right - rc.left;
@@ -2489,6 +2495,13 @@ unsafe fn end_name_edit(save: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_list_is_created_hidden_so_the_caption_takes_the_theme() {
+        let style = create_style();
+        assert_eq!(style.0 & WS_VISIBLE.0, 0);
+        assert_eq!(style.0 & WS_OVERLAPPEDWINDOW.0, WS_OVERLAPPEDWINDOW.0);
+    }
 
     #[test]
     fn grid_label_is_columns_by_rows_without_spaces() {
