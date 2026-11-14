@@ -169,7 +169,7 @@ pub(crate) struct Desk {
     pub(crate) pane_tab_drag: Option<usize>,  // pane tab being reordered inside its strip
     pub(crate) pane_tab_tip: bool,            // path tooltip for a pane tab is installed
     pub(crate) pane_tab_lock_tip: bool,       // "Locked" tooltip on a pane tab's lock glyph
-    pub(crate) drag_hint: String,             // status while Ctrl copies; empty while moving
+    pub(crate) drag_hint: String,             // status while Ctrl copies or a pane tab splits; empty while moving a whole pane
     pub(crate) pane_over: HWND,               // accent or red preview of the drop region
     pub(crate) gap_hot: Option<Hit>, // splitter under the pointer, drawn in the accent colour
     pub(crate) sizing: bool, // inside the window's own move/size loop

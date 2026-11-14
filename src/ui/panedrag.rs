@@ -39,7 +39,7 @@ pub(crate) struct PanePress {
 }
 
 /// A pane drag that has passed the click slack. `hot` is the pane and zone under the pointer.
-/// A blocked copy still has no `hot`: the red preview is not a drop.
+/// A blocked copy or tab split still has no `hot`: the red preview is not a drop.
 #[derive(Clone, Copy)]
 pub(crate) struct PaneMove {
     pub(crate) hwnd: HWND,
@@ -47,8 +47,11 @@ pub(crate) struct PaneMove {
     pub(crate) hot: Option<(usize, DropZone)>,
     /// Ctrl is down. The drop copies the current pane tab instead of moving the pane.
     pub(crate) copy: bool,
-    /// The copy's edge would pass 4 columns, 4 rows, or 16 panes.
+    /// The edge would pass 4 columns, 4 rows, or 16 panes.
     pub(crate) blocked: bool,
+    /// Pane-tab body that started the drag. None is the header or the empty part of the strip.
+    /// Two or more tabs, dropped on an edge, move this tab into a new pane. One tab is a pane move.
+    pub(crate) tab: Option<usize>,
 }
 
 /// New grid after a drop. `perm[slot]` is the slot whose pane lands there (same rule as `reorder`).
@@ -397,19 +400,62 @@ pub(crate) enum CopyDrop {
     Blocked,
 }
 
+/// One pane tab dragged off its strip onto an edge. The source pane stays.
+/// `Split` adds a cell for that tab. `Blocked` is an edge past the grid caps.
+/// A pane with one tab is a [`DragPlan::Move`] instead, and the centre is a move too.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TabSplit {
+    Split {
+        heights: Vec<usize>,
+        colr: Vec<f64>,
+        rowr: Vec<Vec<f64>>,
+        /// `None` is the new cell. Every other entry is the old slot that stays there.
+        slots: Vec<Option<usize>>,
+    },
+    Blocked,
+}
+
 /// Move when Ctrl is up, copy when it is down. None is not a drop.
-/// A blocked copy is still `Some`, so the preview can turn red and the drop can refuse it.
+/// A blocked copy or tab split is still `Some`, so the preview can turn red and the drop can refuse it.
 #[derive(Clone, Debug)]
 pub(crate) enum DragPlan {
     Move(LayoutShift),
     Copy(CopyDrop),
+    TabSplit(TabSplit),
 }
 
 pub(crate) fn drag_plan(copy: bool, heights: &[usize], colr: &[f64], rowr: &[Vec<f64>], from: usize, onto: usize, zone: DropZone) -> Option<DragPlan> {
+    drag_plan_tab(copy, heights, colr, rowr, from, onto, zone, None)
+}
+
+/// `tab` is `(index, count)` when a pane-tab body was grabbed.
+/// One tab, or a centre drop, is a whole-pane move. An edge with two or more
+/// tabs moves that tab into a new pane. Ctrl stays a copy.
+pub(crate) fn drag_plan_tab(
+    copy: bool,
+    heights: &[usize],
+    colr: &[f64],
+    rowr: &[Vec<f64>],
+    from: usize,
+    onto: usize,
+    zone: DropZone,
+    tab: Option<(usize, usize)>,
+) -> Option<DragPlan> {
     if copy {
-        pane_copy(heights, colr, rowr, onto, zone).map(DragPlan::Copy)
-    } else {
-        pane_drop(heights, colr, rowr, from, onto, zone).map(DragPlan::Move)
+        return pane_copy(heights, colr, rowr, onto, zone).map(DragPlan::Copy);
+    }
+    if zone != DropZone::Center && tab.is_some_and(|(index, count)| count >= 2 && index < count) {
+        return tab_edge(heights, colr, rowr, onto, zone).map(DragPlan::TabSplit);
+    }
+    pane_drop(heights, colr, rowr, from, onto, zone).map(DragPlan::Move)
+}
+
+/// Same grid as a copy split: the source pane is not removed, so its own edge is a normal split.
+fn tab_edge(heights: &[usize], colr: &[f64], rowr: &[Vec<f64>], onto: usize, zone: DropZone) -> Option<TabSplit> {
+    match pane_copy(heights, colr, rowr, onto, zone)? {
+        CopyDrop::Split { heights, colr, rowr, slots } => Some(TabSplit::Split { heights, colr, rowr, slots }),
+        CopyDrop::Blocked => Some(TabSplit::Blocked),
+        CopyDrop::Tab => None,
     }
 }
 
@@ -833,5 +879,177 @@ mod tests {
         let short_r = vec![vec![1.0 / 3.0; 3], vec![1.0], vec![1.0], vec![1.0]];
         assert!(matches!(drag_plan(true, &[3, 1, 1, 1], cols_c, &short_r, 0, 1, DropZone::Bottom), Some(DragPlan::Copy(CopyDrop::Split { .. }))));
         assert!(matches!(drag_plan(true, &[3, 1, 1, 1], cols_c, &short_r, 0, 1, DropZone::Right), Some(DragPlan::Copy(CopyDrop::Blocked))));
+    }
+
+    fn assert_tab_split(plan: Option<DragPlan>, heights: &[usize], colr: &[f64], rowr: &[&[f64]], slots: &[Option<usize>]) {
+        match plan {
+            Some(DragPlan::TabSplit(TabSplit::Split { heights: h, colr: c, rowr: r, slots: s })) => {
+                assert_eq!(h, heights, "heights");
+                assert!(near_slice(&c, colr), "colr {c:?}");
+                assert_eq!(r.len(), rowr.len());
+                for (got, want) in r.iter().zip(rowr) {
+                    assert!(near_slice(got, want), "rowr {got:?} {want:?}");
+                }
+                assert_eq!(s, slots);
+            }
+            other => panic!("expected a tab split, got {other:?}"),
+        }
+    }
+
+    fn assert_same_move(a: Option<DragPlan>, b: Option<DragPlan>) {
+        match (a, b) {
+            (Some(DragPlan::Move(x)), Some(DragPlan::Move(y))) => {
+                assert_eq!(x.heights, y.heights);
+                assert!(near_slice(&x.colr, &y.colr), "{:?} {:?}", x.colr, y.colr);
+                assert_eq!(x.rowr.len(), y.rowr.len());
+                for (p, q) in x.rowr.iter().zip(&y.rowr) {
+                    assert!(near_slice(p, q));
+                }
+                assert_eq!(x.perm, y.perm);
+                assert_eq!(x.focus, y.focus);
+            }
+            (None, None) => {}
+            (a, b) => panic!("moves differ: {a:?} vs {b:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pane_tab_edge_splits_that_tab_and_one_tab_still_moves_the_pane() {
+        let h = &[1usize, 1][..];
+        let c = &[0.2, 0.8][..];
+        let r = &[vec![1.0], vec![1.0]][..];
+        // The header, and a pane that has only the grabbed tab, keep the column move.
+        let moved = drag_plan(false, h, c, r, 0, 1, DropZone::Right);
+        assert_same_move(drag_plan_tab(false, h, c, r, 0, 1, DropZone::Right, None), moved.clone());
+        assert_same_move(drag_plan_tab(false, h, c, r, 0, 1, DropZone::Right, Some((0, 1))), moved);
+        // Two or more tabs on that edge insert a column instead of moving the pane.
+        assert_tab_split(
+            drag_plan_tab(false, h, c, r, 0, 1, DropZone::Right, Some((0, 2))),
+            &[1, 1, 1],
+            &[0.2, 0.4, 0.4],
+            &[&[1.0], &[1.0], &[1.0]],
+            &[Some(0), Some(1), None],
+        );
+        // The centre is still a swap of the two panes. Ctrl is still a copy.
+        assert_same_move(
+            drag_plan_tab(false, h, c, r, 0, 1, DropZone::Center, Some((1, 3))),
+            drag_plan(false, h, c, r, 0, 1, DropZone::Center),
+        );
+        assert!(matches!(
+            drag_plan_tab(true, h, c, r, 0, 1, DropZone::Right, Some((0, 3))),
+            Some(DragPlan::Copy(CopyDrop::Split { .. }))
+        ));
+        assert!(matches!(drag_plan_tab(true, h, c, r, 0, 1, DropZone::Center, Some((0, 3))), Some(DragPlan::Copy(CopyDrop::Tab))));
+    }
+
+    #[test]
+    fn a_pane_tab_can_split_its_own_pane_on_an_edge_but_not_the_centre() {
+        let h = &[1usize][..];
+        let c = &[1.0][..];
+        let r = &[vec![1.0]][..];
+        let tab = Some((1, 2));
+        // One pane has nowhere to move, including onto itself. A second tab can leave through an edge.
+        assert!(drag_plan(false, h, c, r, 0, 0, DropZone::Left).is_none());
+        assert!(drag_plan_tab(false, h, c, r, 0, 0, DropZone::Center, tab).is_none());
+        assert!(drag_plan_tab(false, h, c, r, 0, 0, DropZone::Left, Some((0, 1))).is_none());
+        assert_tab_split(drag_plan_tab(false, h, c, r, 0, 0, DropZone::Left, tab), &[1, 1], &[0.5, 0.5], &[&[1.0], &[1.0]], &[None, Some(0)]);
+        assert_tab_split(drag_plan_tab(false, h, c, r, 0, 0, DropZone::Right, tab), &[1, 1], &[0.5, 0.5], &[&[1.0], &[1.0]], &[Some(0), None]);
+        assert_tab_split(drag_plan_tab(false, h, c, r, 0, 0, DropZone::Top, tab), &[2], &[1.0], &[&[0.5, 0.5]], &[None, Some(0)]);
+        assert_tab_split(drag_plan_tab(false, h, c, r, 0, 0, DropZone::Bottom, tab), &[2], &[1.0], &[&[0.5, 0.5]], &[Some(0), None]);
+    }
+
+    #[test]
+    fn a_pane_tab_edge_uses_the_same_halves_as_a_copy_split() {
+        let rowr = vec![vec![0.4, 0.6], vec![1.0]];
+        let h = &[2usize, 1][..];
+        let c = &[0.4, 0.6][..];
+        let tab = Some((0, 3));
+        assert_tab_split(
+            drag_plan_tab(false, h, c, &rowr, 0, 2, DropZone::Left, tab),
+            &[2, 1, 1],
+            &[0.4, 0.3, 0.3],
+            &[&[0.4, 0.6], &[1.0], &[1.0]],
+            &[Some(0), Some(1), None, Some(2)],
+        );
+        assert_tab_split(
+            drag_plan_tab(false, h, c, &rowr, 0, 2, DropZone::Right, tab),
+            &[2, 1, 1],
+            &[0.4, 0.3, 0.3],
+            &[&[0.4, 0.6], &[1.0], &[1.0]],
+            &[Some(0), Some(1), Some(2), None],
+        );
+        assert_tab_split(
+            drag_plan_tab(false, h, c, &rowr, 0, 1, DropZone::Top, tab),
+            &[3, 1],
+            &[0.4, 0.6],
+            &[&[0.4, 0.3, 0.3], &[1.0]],
+            &[Some(0), None, Some(1), Some(2)],
+        );
+        assert_tab_split(
+            drag_plan_tab(false, h, c, &rowr, 0, 0, DropZone::Bottom, tab),
+            &[3, 1],
+            &[0.4, 0.6],
+            &[&[0.2, 0.2, 0.6], &[1.0]],
+            &[Some(0), None, Some(1), Some(2)],
+        );
+        // Right of the source column inserts a column after it and keeps that column's rows.
+        // The centre of the source pane is not a drop.
+        assert_tab_split(
+            drag_plan_tab(false, h, c, &rowr, 0, 0, DropZone::Right, tab),
+            &[2, 1, 1],
+            &[0.2, 0.2, 0.6],
+            &[&[0.4, 0.6], &[1.0], &[1.0]],
+            &[Some(0), Some(1), None, Some(2)],
+        );
+        assert!(drag_plan_tab(false, h, c, &rowr, 0, 0, DropZone::Center, tab).is_none());
+    }
+
+    #[test]
+    fn a_pane_tab_edge_past_the_grid_caps_is_blocked_and_the_centre_still_moves() {
+        let cols_h = &[1usize, 1, 1, 1][..];
+        let cols_c = &[0.25; 4][..];
+        let cols_r = vec![vec![1.0]; 4];
+        let tab = Some((0, 2));
+        assert!(matches!(drag_plan_tab(false, cols_h, cols_c, &cols_r, 0, 3, DropZone::Right, tab), Some(DragPlan::TabSplit(TabSplit::Blocked))));
+        assert!(matches!(drag_plan_tab(false, cols_h, cols_c, &cols_r, 3, 3, DropZone::Right, tab), Some(DragPlan::TabSplit(TabSplit::Blocked))));
+        assert!(matches!(drag_plan_tab(false, cols_h, cols_c, &cols_r, 0, 0, DropZone::Left, tab), Some(DragPlan::TabSplit(TabSplit::Blocked))));
+        assert_same_move(
+            drag_plan_tab(false, cols_h, cols_c, &cols_r, 0, 3, DropZone::Center, tab),
+            drag_plan(false, cols_h, cols_c, &cols_r, 0, 3, DropZone::Center),
+        );
+        // One tab still moves that column along the cap. Ctrl still reports a blocked copy.
+        assert!(matches!(drag_plan_tab(false, cols_h, cols_c, &cols_r, 0, 3, DropZone::Right, Some((0, 1))), Some(DragPlan::Move(_))));
+        assert!(matches!(drag_plan_tab(true, cols_h, cols_c, &cols_r, 0, 3, DropZone::Right, tab), Some(DragPlan::Copy(CopyDrop::Blocked))));
+
+        let rows_h = &[4usize][..];
+        let rows_c = &[1.0][..];
+        let rows_r = vec![vec![0.25; 4]];
+        assert!(matches!(drag_plan_tab(false, rows_h, rows_c, &rows_r, 0, 3, DropZone::Bottom, tab), Some(DragPlan::TabSplit(TabSplit::Blocked))));
+        assert!(matches!(drag_plan_tab(false, rows_h, rows_c, &rows_r, 0, 0, DropZone::Top, tab), Some(DragPlan::TabSplit(TabSplit::Blocked))));
+        assert_same_move(
+            drag_plan_tab(false, rows_h, rows_c, &rows_r, 0, 3, DropZone::Center, tab),
+            drag_plan(false, rows_h, rows_c, &rows_r, 0, 3, DropZone::Center),
+        );
+
+        let full_h = &[4usize, 4, 4, 4][..];
+        let full_c = &[0.25; 4][..];
+        let full_r = vec![vec![0.25; 4]; 4];
+        assert!(matches!(drag_plan_tab(false, full_h, full_c, &full_r, 0, 15, DropZone::Left, tab), Some(DragPlan::TabSplit(TabSplit::Blocked))));
+        assert!(matches!(drag_plan_tab(false, full_h, full_c, &full_r, 15, 15, DropZone::Bottom, tab), Some(DragPlan::TabSplit(TabSplit::Blocked))));
+        assert_same_move(
+            drag_plan_tab(false, full_h, full_c, &full_r, 0, 15, DropZone::Center, tab),
+            drag_plan(false, full_h, full_c, &full_r, 0, 15, DropZone::Center),
+        );
+
+        // Four columns, but the short column can still take the tab as a new row.
+        let short_r = vec![vec![1.0 / 3.0; 3], vec![1.0], vec![1.0], vec![1.0]];
+        assert!(matches!(
+            drag_plan_tab(false, &[3, 1, 1, 1], cols_c, &short_r, 0, 3, DropZone::Bottom, tab),
+            Some(DragPlan::TabSplit(TabSplit::Split { .. }))
+        ));
+        assert!(matches!(
+            drag_plan_tab(false, &[3, 1, 1, 1], cols_c, &short_r, 0, 3, DropZone::Right, tab),
+            Some(DragPlan::TabSplit(TabSplit::Blocked))
+        ));
     }
 }
