@@ -412,7 +412,7 @@ pub(crate) struct Session {
     pub(crate) bar: bool,              // tab-row icons and drive buttons
     /// Drive-letter buttons on the tab row. Off hides them and gives that width to the tabs. Missing means on.
     pub(crate) drive_buttons: bool,
-    /// Window tabs down the left side. Off keeps the top row. Missing from the file means off.
+    /// Window tabs between the favourites panel and the panes. Off keeps the top row. Missing from the file means off.
     pub(crate) vertical_tabs: bool,
     pub(crate) view_new: i32,          // FOLDERVIEWMODE for a pane that has none yet (see EXPLORER_VIEWS)
     pub(crate) view_icon: i32,         // icon size beside view_new; 0 = that mode's usual size (large icons are 96)

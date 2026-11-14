@@ -1338,7 +1338,12 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
         let s = |v: i32| v * dpi / 96;
         fill(dc, rc, pal().bg);
         if vertical {
-            fill(dc, RECT { left: rc.right - 1, ..rc }, pal().line);
+            // Both edges. The column sits between the side panel and the panes, and `pal().line`
+            // is the same hairline the plates use, in either theme. A one-pixel strip is just that line.
+            if rc.right > rc.left {
+                fill(dc, RECT { right: rc.left + 1, ..rc }, pal().line);
+                fill(dc, RECT { left: rc.right - 1, ..rc }, pal().line);
+            }
         } else {
             fill(dc, RECT { top: rc.bottom - 1, ..rc }, pal().line);
         }

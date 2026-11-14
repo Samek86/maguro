@@ -254,7 +254,7 @@ struct SettingsFile {
     /// Drive buttons on the tab row. Missing means on. Omitted while on, so an older file stays unchanged.
     #[serde(default = "yes", skip_serializing_if = "is_on")]
     drive_buttons: bool,
-    /// Window tabs in a column on the left. Missing means off. Omitted while off, so an older file stays unchanged.
+    /// Window tabs between the favourites panel and the panes. Missing means off. Omitted while off, so an older file stays unchanged.
     #[serde(default, skip_serializing_if = "is_off")]
     vertical_tabs: bool,
     #[serde(default = "view_details")]

@@ -1781,7 +1781,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "If you want to remove Maguro completely, turn this switch off first, then delete it.",
     "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu",
     "Vertical tabs",
-    "Window tabs in a column on the left. Off keeps them on the top row.",
+    "Window tabs in a column between the favourites panel and the panes. Off keeps them on the top row.",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
