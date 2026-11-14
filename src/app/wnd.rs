@@ -250,7 +250,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let min_w = pane_min_w(a.dpi);
                     let min_h = pane_min_h(a.dpi);
                     match d {
-                        Hit::Side => a.s.side = x - g.gap / 2,
+                        Hit::Side => a.s.side = x - g.vtab - g.gap / 2,
                         Hit::SideSplit => a.s.side_split = tree_share_at(y - g.gap / 2, g.top, g.bot - g.top, g.gap, side_min(a.dpi), a.s.fav_top),
                         Hit::Col(k) => {
                             let len = g.w - g.pad - g.gx;
@@ -666,6 +666,10 @@ pub(crate) unsafe fn paint_main(h: HWND) {
     });
     buffered(h, |dc, rc| {
         paint_window(dc, rc);
+        // The top row is the toolbar once the tabs move to the left column. The strip used to paint this line.
+        if g.vtab > 0 && g.top > 0 {
+            fill(dc, RECT { left: 0, top: g.top - 1, right: g.w, bottom: g.top }, pal().line);
+        }
         if g.side > 0 {
             let side = side_rect(&g);
             fill(dc, side, side_ground());

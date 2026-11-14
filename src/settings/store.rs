@@ -254,6 +254,9 @@ struct SettingsFile {
     /// Drive buttons on the tab row. Missing means on. Omitted while on, so an older file stays unchanged.
     #[serde(default = "yes", skip_serializing_if = "is_on")]
     drive_buttons: bool,
+    /// Window tabs in a column on the left. Missing means off. Omitted while off, so an older file stays unchanged.
+    #[serde(default, skip_serializing_if = "is_off")]
+    vertical_tabs: bool,
     #[serde(default = "view_details")]
     view_new: i32,
     /// Icon size for `view_new`. Missing or 0 is that mode's usual size (large icons stay 96).
@@ -482,6 +485,7 @@ impl SettingsFile {
             font_face: String::new(),
             bar: true,
             drive_buttons: true,
+            vertical_tabs: false,
             view_new: 4,
             view_icon: 0,
             start: 0,
@@ -601,6 +605,7 @@ impl SettingsFile {
             font_face: s.font_face.trim().to_string(),
             bar: s.bar,
             drive_buttons: s.drive_buttons,
+            vertical_tabs: s.vertical_tabs,
             view_new: s.view_new,
             view_icon: s.view_icon,
             start: s.start_new.min(2),
@@ -715,6 +720,7 @@ impl SettingsFile {
         self.extra.remove("space_preview");
         self.extra.remove("preview_pane");
         self.extra.remove("preview_width");
+        self.extra.remove("vertical_tabs");
         self.extra.remove("peek_wheel_nav");
         self.extra.remove("remember_folder_view");
         self.extra.remove("show_folder_sizes");
@@ -800,6 +806,7 @@ impl SettingsFile {
         s.font_face = self.font_face.trim().to_string();
         s.bar = self.bar;
         s.drive_buttons = self.drive_buttons;
+        s.vertical_tabs = self.vertical_tabs;
         let mode = crate::known_view_mode(self.view_new);
         s.view_icon = if mode == self.view_new { self.view_icon.max(0) } else { 0 };
         s.view_new = mode;
@@ -2288,6 +2295,32 @@ mod tests {
         assert_eq!(saved["preview_pane"], true);
         assert_eq!(saved["preview_width"], 320);
         assert!(saved.get("extra").is_none());
+    }
+
+    #[test]
+    fn vertical_tabs_default_off_and_round_trip() {
+        assert!(!Session::default().vertical_tabs);
+        assert!(!adopt(r#"{"version":1}"#).unwrap().vertical_tabs);
+        assert!(!Session::parse("side=1\n").vertical_tabs);
+        assert!(!Session::parse("verticaltabs=0").vertical_tabs);
+        let mut s = Session::default();
+        s.vertical_tabs = true;
+        assert!(Session::parse(&s.to_ini()).vertical_tabs);
+        assert!(Session::parse("verticaltabs=1").vertical_tabs);
+        assert!(!Session::default().to_ini().contains("verticaltabs"));
+        let text = pretty(&SettingsFile::from_session(&s));
+        assert!(text.contains("\"vertical_tabs\": true"), "{text}");
+        assert!(adopt(&text).unwrap().vertical_tabs);
+        assert!(!pretty(&SettingsFile::from_session(&Session::default())).contains("vertical_tabs"));
+        let mut kept = Session::default();
+        kept.vertical_tabs = true;
+        kept.take_layout(&Session { vertical_tabs: false, ..Session::default() });
+        assert!(kept.vertical_tabs);
+        let mut file = SettingsFile::from_session(&s);
+        file.extra.insert("vertical_tabs".into(), serde_json::json!(false));
+        file.merge_forward(&file.clone());
+        let saved: Value = serde_json::from_str(&pretty(&file)).unwrap();
+        assert_eq!(saved["vertical_tabs"], true);
     }
 
     #[test]

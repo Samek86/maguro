@@ -888,11 +888,13 @@ pub(crate) enum Key {
     IconList,
     TurnOffBeforeUninstall,
     PaneNumTip,
+    VerticalTabs,
+    VerticalTabsDesc,
 }
 
-pub(crate) const KEY_COUNT: usize = 883;
+pub(crate) const KEY_COUNT: usize = 885;
 
-const _: () = assert!((Key::PaneNumTip as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::VerticalTabsDesc as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1778,6 +1780,8 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "List",
     "If you want to remove Maguro completely, turn this switch off first, then delete it.",
     "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu",
+    "Vertical tabs",
+    "Window tabs in a column on the left. Off keeps them on the top row.",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2665,4 +2669,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "icon_list",
     "turn_off_before_uninstall",
     "pane_num_tip",
+    "vertical_tabs",
+    "vertical_tabs_desc",
 ];

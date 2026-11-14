@@ -130,19 +130,44 @@ pub(crate) fn side_min(dpi: i32) -> i32 {
 /// Client size that fits the current tab: every pane at `PANE_MIN_W` × `PANE_MIN_H`,
 /// the left panel when it is open, the preview pane when it is open, the tab strip,
 /// the status line, and the icon group.
+/// Top-row minimum. Release code goes through [`client_min_for`].
+#[cfg(test)]
 pub(crate) fn client_min(heights: &[usize], dpi: i32, tree_on: bool, bar: bool, preview_on: bool) -> (i32, i32) {
+    client_min_for(heights, dpi, tree_on, bar, preview_on, false)
+}
+
+/// Same minimum as [`client_min`]. `vertical` adds the left tab strip under the toolbar,
+/// and only on the content side: the icon row already spans the full width.
+pub(crate) fn client_min_for(heights: &[usize], dpi: i32, tree_on: bool, bar: bool, preview_on: bool, vertical: bool) -> (i32, i32) {
     let s = |v: i32| v * dpi.max(1) / 96;
     let (pad, gap) = (s(8), s(8));
     let cols = heights.len().max(1) as i32;
     let rows = heights.iter().copied().max().unwrap_or(1).max(1) as i32;
     let grid_w = cols * pane_min_w(dpi) + gap * (cols - 1).max(0);
     let grid_h = rows * pane_min_h(dpi) + gap * (rows - 1).max(0);
-    let left = if tree_on { s(120) + gap } else { pad };
+    let vtab = if vertical { super::tabs::vtab_width(dpi) } else { 0 };
+    let left = vtab + if tree_on { s(120) + gap } else { pad };
     let preview = if preview_on { gap + s(PREVIEW_DEF_DIP) } else { 0 };
     let width = (left + grid_w + pad + preview).max(super::tabs::icon_group_min(dpi, bar));
     let side_h = if tree_on { side_min(dpi) * 2 + gap } else { 0 };
     let height = s(32) + grid_h.max(side_h) + s(24);
     (width, height)
+}
+
+/// Left edge of the file grid. `vtab == 0` is the top-row layout: the pad, or the side panel plus the gap.
+pub(crate) fn grid_left(vtab: i32, side: i32, gap: i32, pad: i32) -> i32 {
+    let origin = vtab.max(0);
+    if side > 0 { origin + side + gap } else { origin + pad }
+}
+
+/// The tab strip. `vtab == 0` is the full-width top row. Otherwise the column under the toolbar, left of the plates.
+pub(crate) fn tab_strip_rect(client_w: i32, plates_top: i32, plates_bot: i32, vtab: i32) -> RECT {
+    let w = client_w.max(0);
+    if vtab > 0 {
+        RECT { left: 0, top: plates_top, right: vtab.min(w), bottom: plates_bot.max(plates_top) }
+    } else {
+        RECT { left: 0, top: 0, right: w, bottom: plates_top.max(0) }
+    }
 }
 
 /// Grow `cur` until it is at least `min_w` by `min_h`. The top-left stays, then the rect
@@ -195,7 +220,7 @@ fn monitor_work(h: HWND) -> Option<RECT> {
 /// so a layout the monitor cannot hold still leaves the window on screen.
 pub(crate) unsafe fn min_track_size(h: HWND) -> (i32, i32) {
     let (cw, ch, dpi) = app(|a| {
-        let (w, ht) = client_min(&a.s.heights, a.dpi, a.s.side_shown(), a.s.bar, a.s.preview_on);
+        let (w, ht) = client_min_for(&a.s.heights, a.dpi, a.s.side_shown(), a.s.bar, a.s.preview_on, a.s.vertical_tabs);
         (w, ht, a.dpi)
     });
     let (mut tw, mut th) = frame_around(cw, ch, dpi);
@@ -238,7 +263,7 @@ pub(crate) unsafe fn ensure_window_fits() {
     }
     let Some(work) = monitor_work(main) else { return };
     let (cw, ch, dpi) = app(|a| {
-        let (w, ht) = client_min(&a.s.heights, a.dpi, a.s.side_shown(), a.s.bar, a.s.preview_on);
+        let (w, ht) = client_min_for(&a.s.heights, a.dpi, a.s.side_shown(), a.s.bar, a.s.preview_on, a.s.vertical_tabs);
         (w, ht, a.dpi)
     });
     let (min_w, min_h) = frame_around(cw, ch, dpi);
@@ -308,7 +333,9 @@ pub(crate) enum Hit {
 pub(crate) struct Geo {
     pub(crate) w: i32,
     pub(crate) h: i32,   // client height
-    pub(crate) top: i32, // tab strip bottom = plates top
+    pub(crate) top: i32, // toolbar / tab-row bottom = plates top
+    /// Width of the vertical window-tab strip. 0 keeps the tabs on the top row.
+    pub(crate) vtab: i32,
     pub(crate) bot: i32, // plates bottom = status line top
     pub(crate) pad: i32,
     pub(crate) gap: i32,
@@ -370,8 +397,9 @@ pub(crate) fn geo(a: &App) -> Geo {
     unsafe { _ = GetClientRect(a.main, &mut rc) };
     let s = |v: i32| v * a.dpi / 96;
     let (pad, gap) = (s(8), s(8));
-    let side = if a.s.side_shown() { a.s.side.clamp(s(120), (rc.right - gap - pad - s(240)).max(s(120))) } else { 0 };
-    let gx = if side > 0 { side + gap } else { pad };
+    let vtab = if a.s.vertical_tabs { super::tabs::vtab_width(a.dpi).min(rc.right.max(0)) } else { 0 };
+    let side = if a.s.side_shown() { a.s.side.clamp(s(120), (rc.right - vtab - gap - pad - s(240)).max(s(120))) } else { 0 };
+    let gx = grid_left(vtab, side, gap, pad);
     let preview = preview_plate(a.s.preview_on, a.s.preview_w, a.dpi, rc.right, gx, gap, pad);
     let grid_w = (rc.right - pad - gx - if preview > 0 { preview + gap } else { 0 }).max(0);
     let top = s(32); // tab strip. `bar` hides the icon group except the gear, not this row.
@@ -384,6 +412,7 @@ pub(crate) fn geo(a: &App) -> Geo {
         w: rc.right,
         h: rc.bottom,
         top,
+        vtab,
         bot,
         pad,
         gap,
@@ -433,7 +462,8 @@ pub(crate) fn side_gap_rect(g: &Geo) -> Option<RECT> {
         return None;
     }
     let top = g.top + g.side_top_h();
-    Some(RECT { left: 0, top, right: g.side, bottom: top + g.gap })
+    let sr = side_rect(g);
+    Some(RECT { left: sr.left, top, right: sr.right, bottom: top + g.gap })
 }
 
 /// Folder-tree rect, then the favourites rect. `inset` pads the plate's outer edges, not the gap.
@@ -452,7 +482,7 @@ pub(crate) fn side_panes(g: &Geo, inset: i32) -> (RECT, RECT) {
 }
 
 pub(crate) fn side_rect(g: &Geo) -> RECT {
-    RECT { left: 0, top: g.top, right: g.side, bottom: g.bot }
+    RECT { left: g.vtab, top: g.top, right: g.vtab + g.side, bottom: g.bot }
 }
 
 pub(crate) fn status_rect(g: &Geo) -> RECT {
@@ -940,7 +970,7 @@ pub(crate) fn tint_name(k: u8) -> &'static str {
 pub(crate) fn gap_line(g: &Geo, d: Hit, t: i32) -> Option<RECT> {
     let vbar = |x: i32| RECT { left: x - t / 2, top: g.top, right: x - t / 2 + t, bottom: g.bot };
     match d {
-        Hit::Side if g.side > 0 => Some(vbar(g.side + g.gap / 2)),
+        Hit::Side if g.side > 0 => Some(vbar(g.vtab + g.side + g.gap / 2)),
         Hit::SideSplit => {
             let gap = side_gap_rect(g)?;
             let y = gap.top + (gap.bottom - gap.top) / 2;
@@ -973,7 +1003,7 @@ pub(crate) fn hit(g: &Geo, x: i32, y: i32) -> Option<Hit> {
             return Some(Hit::SideSplit);
         }
     }
-    if g.side > 0 && x >= g.side && x < g.gx {
+    if g.side > 0 && x >= g.vtab + g.side && x < g.gx {
         return Some(Hit::Side);
     }
     // The preview stays while a pane is zoomed, so its splitter is tested before that early return.
@@ -1240,6 +1270,7 @@ mod tests {
             w: 1000,
             h: 600,
             top: 34,
+            vtab: 0,
             bot: 576,
             pad: 8,
             gap: 8,
@@ -1424,6 +1455,7 @@ mod tests {
             w: 1000,
             h: 800,
             top: 66,
+            vtab: 0,
             bot: 700,
             pad: 8,
             gap: 8,
@@ -1473,6 +1505,7 @@ mod tests {
             w: 1000,
             h: 800,
             top: 66,
+            vtab: 0,
             bot: 700,
             pad: 8,
             gap: 8,
@@ -1502,6 +1535,7 @@ mod tests {
             w: 1000,
             h: 800,
             top: 66,
+            vtab: 0,
             bot: 700,
             pad: 8,
             gap: 8,
@@ -1597,6 +1631,30 @@ mod tests {
         }
         assert!(side_gap_rect(&Geo { side: 0, tree_h: 0, ..fav_on_top.clone() }).is_none());
         assert_eq!(gap_line(&Geo { side: 0, tree_h: 0, ..fav_on_top }, Hit::SideSplit, 2), None);
+    }
+
+    #[test]
+    fn vertical_tabs_off_keeps_the_plate_and_the_minimum() {
+        assert_eq!(grid_left(0, 240, 8, 8), 248);
+        assert_eq!(grid_left(0, 0, 8, 8), 8);
+        assert_eq!(grid_left(180, 240, 8, 8), 428);
+        assert_eq!(grid_left(180, 0, 8, 8), 188);
+        assert_eq!(tab_strip_rect(800, 32, 576, 0), RECT { left: 0, top: 0, right: 800, bottom: 32 });
+        assert_eq!(tab_strip_rect(800, 32, 576, 180), RECT { left: 0, top: 32, right: 180, bottom: 576 });
+        assert_eq!(tab_strip_rect(100, 32, 576, 180), RECT { left: 0, top: 32, right: 100, bottom: 576 });
+        for (h, tree, bar, preview) in [(&[2usize, 2][..], true, true, false), (&[1][..], false, false, false), (&[1, 1, 1][..], false, true, true)] {
+            assert_eq!(client_min_for(h, 96, tree, bar, preview, false), client_min(h, 96, tree, bar, preview));
+        }
+        // 2×2 with the side panel is icon-bound at 450. The strip adds to the content side only: 604.
+        assert_eq!(client_min_for(&[2, 2], 96, true, true, false, true), (604, 304));
+        assert_eq!(client_min_for(&[1], 96, false, false, false, true), (336, 176));
+        let shifted = Geo { vtab: 180, gx: 428, ..plate(false, 300) };
+        assert_eq!(side_rect(&shifted), RECT { left: 180, top: 66, right: 420, bottom: 700 });
+        let (tree, _) = side_panes(&shifted, 2);
+        assert_eq!((tree.left, tree.right), (182, 418));
+        assert_eq!(hit(&shifted, 424, 400), Some(Hit::Side));
+        assert_eq!(hit(&shifted, 100, 400), None);
+        assert_eq!(hit(&shifted, 200, 66 + 300 + 3), Some(Hit::SideSplit));
     }
 
     #[test]
