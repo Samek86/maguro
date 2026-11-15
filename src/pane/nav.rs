@@ -3452,6 +3452,7 @@ unsafe fn on_nav_impl(i: usize, pidl: *const ITEMIDLIST) {
     super::recent::on_arrived(i, &parse);
     crate::shell::listsync::retarget(app(|a| a.main));
     super::marks_overlay::on_arrived(i);
+    crate::marks::follow::on_folder_shown(&here);
 }
 
 #[implement(IExplorerBrowserEvents)]

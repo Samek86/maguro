@@ -3,6 +3,7 @@
 //! The file is marks.json in the config folder (roaming Maguro, or the exe folder when
 //! portable.txt is present). This module never opens maguro.json.
 
+pub(crate) mod follow;
 mod resolve;
 mod store;
 mod toggle;
@@ -28,6 +29,24 @@ pub(crate) fn load_live() {
     let dir = crate::settings::store::config_dir();
     let store = Store::load_in(&dir, MarksLock::Os);
     *live().lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
+    follow::arm_sweep();
+}
+
+/// Run `f` against the live store and save when it reports a change.
+/// The overlay refresh is posted to the UI thread; `f` must not call into the UI.
+pub(crate) fn commit_edit(f: impl FnOnce(&mut Store) -> bool) {
+    let changed = {
+        let mut g = live().lock().unwrap_or_else(|e| e.into_inner());
+        let Some(store) = g.as_mut() else { return };
+        let changed = f(store);
+        if changed {
+            let _ = store.save();
+        }
+        changed
+    };
+    if changed {
+        follow::poke_ui();
+    }
 }
 
 pub(crate) fn count_in_folder(folder: &str) -> usize {

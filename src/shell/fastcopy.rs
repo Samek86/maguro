@@ -264,6 +264,11 @@ pub(crate) fn run_fast(job: FastJob) {
         complain(job.owner, &text);
         return;
     }
+    if job.mv {
+        let done: HashSet<&str> = copied.iter().map(|(path, _)| path.as_str()).collect();
+        let pairs: Vec<(String, String)> = items.iter().filter(|item| !item.skip && done.contains(item.src.as_str())).map(|item| (item.src.clone(), item.dest.clone())).collect();
+        crate::marks::follow::on_fast_moves(&pairs);
+    }
     drop(job.busy);
     ui.show_done();
 }
