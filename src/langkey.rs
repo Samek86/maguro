@@ -898,11 +898,27 @@ pub(crate) enum Key {
     ShowImportantMarkStarsDesc,
     ImportantCount,
     ImportantMarksFull,
+    ImportantList,
+    MarkStateHere,
+    MarkStateRecycled,
+    MarkStateLost,
+    OpenLocation,
+    CleanUpMissing,
+    CleanUpMissingConfirm,
+    ItemCannotBeOpened,
+    MarksBlockedNewer,
+    MarksBlockedBad,
+    ReplaceMarksConfirm,
+    MarksState,
+    MarksImportBad,
+    MarksExported,
+    MarksReplaced,
+    MarksSaveFailed,
 }
 
-pub(crate) const KEY_COUNT: usize = 893;
+pub(crate) const KEY_COUNT: usize = 909;
 
-const _: () = assert!((Key::ImportantMarksFull as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::MarksSaveFailed as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1798,6 +1814,22 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Stars on marked files and folders. Off hides the stars and keeps the marks. On by default.",
     "{n} important",
     "Important marks are full (20,000).",
+    "Important list",
+    "Here",
+    "Recycle Bin",
+    "Missing",
+    "Open location",
+    "Clean up missing items",
+    "Remove every missing item from the important list? Items in the Recycle Bin stay.",
+    "That item cannot be opened.",
+    "marks.json (version {version}) was written by a newer Maguro. It was left unchanged.\n\n{path}",
+    "marks.json could not be read. It was left unchanged.\n\n{path}",
+    "Replace the important list with this file? Marks that are not in the file are removed. The list stops at 20,000.",
+    "State",
+    "That file is not an important-marks list.",
+    "Exported {n} marks.",
+    "{n} marks in the list.",
+    "Could not save marks.json.",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2695,4 +2727,20 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "show_important_mark_stars_desc",
     "important_count",
     "important_marks_full",
+    "important_list",
+    "mark_state_here",
+    "mark_state_recycled",
+    "mark_state_lost",
+    "open_location",
+    "clean_up_missing",
+    "clean_up_missing_confirm",
+    "item_cannot_be_opened",
+    "marks_blocked_newer",
+    "marks_blocked_bad",
+    "replace_marks_confirm",
+    "marks_state",
+    "marks_import_bad",
+    "marks_exported",
+    "marks_replaced",
+    "marks_save_failed",
 ];

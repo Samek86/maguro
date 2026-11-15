@@ -1225,6 +1225,7 @@ pub(crate) unsafe fn apply_theme() {
     across_windows(|| apply_theme_desk());
     settings::refresh();
     crate::watch::restyle();
+    crate::marks::restyle_list();
     crate::basket::refresh();
     crate::tablist::restyle();
     crate::rename::refresh();

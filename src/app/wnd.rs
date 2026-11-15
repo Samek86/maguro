@@ -479,6 +479,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
                 ID_SETTINGS => settings::open(h),
                 ID_WATCH => crate::watch::open(h),
+                ID_MARKS_LIST => crate::marks::open_list(h),
                 ID_LANG_AUTO => set_language(Lang::Auto),
                 id if (ID_LANG_FIRST..ID_LANG_FIRST + 64).contains(&id) => {
                     if let Some((lang, _)) = language_choices().get(id - ID_LANG_FIRST) {
@@ -550,6 +551,11 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let label = format!("{}\t{}", tr(crate::Key::FolderWatch), crate::keys::chord_text(i));
                     _ = ModifyMenuW(menu, ID_WATCH as u32, MF_BYCOMMAND | MF_STRING, ID_WATCH, &HSTRING::from(label));
                 }
+                if let Some(i) = crate::keys::index("marks.list") {
+                    let label = format!("{}\t{}", tr(crate::Key::ImportantList), crate::keys::chord_text(i));
+                    _ = ModifyMenuW(menu, ID_MARKS_LIST as u32, MF_BYCOMMAND | MF_STRING, ID_MARKS_LIST, &HSTRING::from(label));
+                }
+                check(ID_MARKS_LIST, crate::marks::list_open());
                 check(ID_DBLUP, dblup);
                 // Same cache as Settings → General. Reload first so a change made outside this menu still checks.
                 crate::folderapp::reload_shown();
@@ -677,6 +683,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_MARKS => {
                 crate::update_status();
                 crate::pane::marks_overlay::on_marks_changed();
+                crate::marks::refresh_list();
             }
             WM_THEME_PANE => theme_pane_step(),
             WM_THEME_RELAUNCH => theme_relaunch(),
@@ -740,6 +747,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     crate::pane::marks_overlay::shutdown();
                     crate::watch::shutdown();
                     crate::basket::close();
+                    crate::marks::close_list();
                     crate::tablist::close();
                     crate::dialogjump::shutdown();
                     PostQuitMessage(0);
@@ -1511,6 +1519,7 @@ pub(crate) unsafe fn make_menus() -> Result<HMENU> {
     item(view, MF_STRING, ID_BASKET, &with_chord(tr(crate::Key::FileBasket), "file.basket"))?;
     item(view, MF_STRING, ID_RECENT, &crate::pane::recent::open_label())?;
     item(view, MF_STRING, ID_GATHER, tr(crate::Key::OpenFoldersFromExplorerWindowsCtrlShift))?;
+    item(view, MF_STRING, ID_MARKS_LIST, &with_chord(tr(crate::Key::ImportantList), "marks.list"))?;
     item(view, MF_STRING, ID_WATCH, &with_chord(tr(crate::Key::FolderWatch), "watch.open"))?;
     sep(view)?;
 

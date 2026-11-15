@@ -4,9 +4,13 @@
 //! portable.txt is present). This module never opens maguro.json.
 
 pub(crate) mod follow;
+mod list;
+mod list_win;
 mod resolve;
 mod store;
 mod toggle;
+
+pub(crate) use list_win::{alive as list_open, captures as captures_list, close as close_list, on_key as on_list_key, open as open_list, refresh as refresh_list, restyle as restyle_list};
 
 #[allow(unused_imports)]
 pub(crate) use store::{read_file_identity, FileIdentity, MarksLock, Store, StoreError, CAP, FILE_NAME};

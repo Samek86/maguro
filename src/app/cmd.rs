@@ -466,6 +466,18 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
         let _ = crate::basket::on_key(vk, ctrl, shift);
         return true;
     }
+    if crate::marks::captures_list(m.hwnd) {
+        if let Some(i) = crate::keys::lookup(vk, ctrl, shift, alt, win) {
+            let id = crate::keys::id_of(i);
+            if id == "marks.list" {
+                if m.lParam.0 & (1 << 30) != 0 {
+                    return true;
+                }
+                return dispatch(id, vk, active_pane(), false, || false);
+            }
+        }
+        return crate::marks::on_list_key(vk, ctrl, shift, alt, win);
+    }
     // Plain Alt+↑/↓ in the favourites panel or its list reorders that row.
     // It must not send the pane behind it to the parent folder.
     if fav_step(vk, ctrl, alt, shift).is_some() {
@@ -649,7 +661,7 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
     }
     if let Some(i) = crate::keys::lookup(vk, ctrl, shift, alt, win) {
         let id = crate::keys::id_of(i);
-        if matches!(id, "app.keys" | "view.peek" | "view.preview" | "app.front" | "dialog.jump" | "clip.open" | "view.gather" | "view.recentfiles" | "file.mkdir" | "file.winmerge" | "file.reveal" | "file.basket" | "file.basket.add" | "file.mark" | "ws.load" | "ws.save" | "watch.open" | "tab.list") && m.lParam.0 & (1 << 30) != 0 {
+        if matches!(id, "app.keys" | "view.peek" | "view.preview" | "app.front" | "dialog.jump" | "clip.open" | "view.gather" | "view.recentfiles" | "file.mkdir" | "file.winmerge" | "file.reveal" | "file.basket" | "file.basket.add" | "file.mark" | "ws.load" | "ws.save" | "watch.open" | "tab.list" | "marks.list") && m.lParam.0 & (1 << 30) != 0 {
             return true;
         }
         // Pane-tab chords stay out of the address bar (already returned) and out of every other focus,
@@ -864,6 +876,7 @@ unsafe fn dispatch(id: &str, vk: u16, a: usize, list: bool, shell: impl Fn() -> 
         "clip.open" => crate::cliphot::on_hotkey(),
         "win.new" => new_window(),
         "watch.open" => crate::watch::open(app(|x| x.main)),
+        "marks.list" => crate::marks::open_list(app(|x| x.main)),
         _ => return shell(),
     }
     true

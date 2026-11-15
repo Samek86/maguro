@@ -139,6 +139,8 @@ const CMDS: &[Cmd] = &[
     cmd("clip.open", WIN, crate::Key::OpenClipboardPath, 0x5A, false, false, true, false, false),
     cmd("win.new", WIN, crate::Key::NewWindow, 0x4E, true, false, false, false, false),
     cmd("watch.open", WIN, crate::Key::FolderWatch, 0x57, true, true, false, false, false),
+    // Ctrl+Shift+I is free. Ctrl+I and Alt+I are free as well. Change it on the Shortcuts page.
+    cmd("marks.list", WIN, crate::Key::ImportantList, 0x49, true, true, false, false, false),
 ];
 
 struct KeyState {
@@ -725,6 +727,9 @@ mod tests {
         assert_eq!(lookup(b'B' as u16, true, false, true, false), index("file.basket.add"));
         assert_eq!(chord_text(index("file.basket").unwrap()), "Ctrl+Shift+B");
         assert_eq!(chord_text(index("file.basket.add").unwrap()), "Ctrl+Alt+B");
+        assert_eq!(chord_text(index("marks.list").unwrap()), "Ctrl+Shift+I");
+        assert_eq!(lookup(b'I' as u16, true, true, false, false), index("marks.list"));
+        assert!(help_text().lines().any(|l| l == "Ctrl+Shift+I\tImportant list"));
         for id in ["file.basket", "file.basket.add"] {
             let chord = default_chord(index(id).unwrap()).unwrap();
             for c in CMDS.iter() {

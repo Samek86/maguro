@@ -144,6 +144,16 @@ const MIGRATED: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "src/marks/list_win.rs",
+        &[
+            "paint_window(",
+            "paint_button(",
+            "style_dialog_caption(",
+            "body_font(",
+            "color_edit_on(",
+        ],
+    ),
+    (
         "src/watch/win.rs",
         &[
             "paint_window(",

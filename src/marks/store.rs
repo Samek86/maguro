@@ -92,6 +92,20 @@ pub(crate) enum StoreError {
     Io(String),
 }
 
+/// Why a store refuses to write. A newer file stays readable. An unreadable file stays in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockKind {
+    Newer(u32),
+    Unreadable,
+}
+
+/// How many rows an import kept. Rows past [`CAP`] are not stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ImportReport {
+    pub(crate) kept: usize,
+    pub(crate) skipped_cap: usize,
+}
+
 /// How `save` excludes other Maguro processes. Tests share a [`MarksLock::Shared`] mutex
 /// so two handles can merge without taking the real `Local\Maguro.marks` mutex.
 #[derive(Clone)]
@@ -125,6 +139,8 @@ pub(crate) struct Store {
     mutations: Vec<Mutation>,
     dirty: bool,
     blocked: bool,
+    /// The next save writes `entries` as the whole file. A normal save merges mutations instead.
+    replace_pending: bool,
     now_unix: i64,
     notice: Option<String>,
 }
@@ -581,6 +597,7 @@ impl Store {
             mutations: Vec::new(),
             dirty: false,
             blocked: false,
+            replace_pending: false,
             now_unix,
             notice: None,
         }
@@ -623,6 +640,27 @@ impl Store {
 
     pub(crate) fn is_blocked(&self) -> bool {
         self.blocked
+    }
+
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Config folder that holds this store's marks.json. Never the settings file.
+    pub(crate) fn folder(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Why this build will not write the file. `None` when the store can be saved.
+    pub(crate) fn block_kind(&self) -> Option<BlockKind> {
+        if !self.blocked {
+            return None;
+        }
+        if self.version > VERSION {
+            Some(BlockKind::Newer(self.version))
+        } else {
+            Some(BlockKind::Unreadable)
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -765,6 +803,59 @@ impl Store {
         Ok(())
     }
 
+    /// Drop every `lost` row. `ok` and `recycled` stay. A blocked store is not changed.
+    pub(crate) fn remove_lost(&mut self) -> Result<usize, StoreError> {
+        if self.blocked {
+            return Err(StoreError::Blocked);
+        }
+        let keys: Vec<String> = self.entries.iter().filter(|e| e.state == STATE_LOST).map(|e| e.key.clone()).collect();
+        let n = keys.len();
+        if n == 0 {
+            return Ok(0);
+        }
+        self.entries.retain(|e| e.state != STATE_LOST);
+        self.reindex();
+        for key in keys {
+            self.mutations.push(Mutation::Remove(key));
+        }
+        self.dirty = true;
+        Ok(n)
+    }
+
+    /// The on-disk document, including rows this build will not rewrite.
+    /// Does not write marks.json.
+    pub(crate) fn export_json(&self) -> String {
+        self.to_json()
+    }
+
+    /// Replace every row with the file. Same shape as marks.json.
+    /// A blocked store, a newer `version`, or a file that is not marks JSON is refused and nothing is written.
+    /// Rows after the first [`CAP`] are skipped. `ok`, `lost`, and `recycled` all come across.
+    pub(crate) fn import_replace(&mut self, bytes: &[u8]) -> Result<ImportReport, StoreError> {
+        if self.blocked {
+            return Err(StoreError::Blocked);
+        }
+        let Some(parsed) = parse_doc(bytes) else {
+            return Err(StoreError::Io("not a marks file".into()));
+        };
+        if parsed.version > VERSION {
+            return Err(StoreError::Io("newer version".into()));
+        }
+        let total = parsed.entries.len();
+        let skipped_cap = total.saturating_sub(CAP);
+        let mut entries = parsed.entries;
+        entries.truncate(CAP);
+        self.entries = entries;
+        self.extra = parsed.extra;
+        self.version = parsed.version.max(1);
+        self.reindex();
+        self.mutations.clear();
+        self.replace_pending = true;
+        self.dirty = true;
+        self.purge_expired_lost(self.now_unix);
+        Ok(ImportReport { kept: self.entries.len(), skipped_cap })
+    }
+
     /// Drop `lost` rows whose `lost_since` is 180 days old or older. Returns how many were removed.
     pub(crate) fn purge_expired_lost(&mut self, now_unix: i64) -> usize {
         if self.blocked {
@@ -806,6 +897,9 @@ impl Store {
     }
 
     fn save_locked(&mut self) -> std::io::Result<Result<(), StoreError>> {
+        if self.replace_pending {
+            return self.save_replace();
+        }
         let path = marks_path(&self.dir);
         match read_store_file(&path) {
             FileState::Missing => {
@@ -837,6 +931,36 @@ impl Store {
         write_atomic(&path, json.as_bytes())?;
         self.mutations.clear();
         self.dirty = false;
+        Ok(Ok(()))
+    }
+
+    /// Write `entries` as the whole file. A bad file or a newer version is left unchanged.
+    fn save_replace(&mut self) -> std::io::Result<Result<(), StoreError>> {
+        let path = marks_path(&self.dir);
+        match read_store_file(&path) {
+            FileState::Bad => {
+                self.blocked = true;
+                self.dirty = false;
+                self.replace_pending = false;
+                return Ok(Err(StoreError::Blocked));
+            }
+            FileState::Good(parsed) if parsed.version > VERSION => {
+                let notice = self.notice.clone();
+                *self = Store::from_parsed(&self.dir, self.lock.clone(), self.now_unix, parsed, true, notice);
+                return Ok(Err(StoreError::Blocked));
+            }
+            FileState::Good(_) => {
+                let bytes = std::fs::read(&path)?;
+                self.maybe_backup(&bytes)?;
+            }
+            FileState::Missing => {}
+        }
+        self.purge_expired_lost(self.now_unix);
+        let json = self.to_json();
+        write_atomic(&path, json.as_bytes())?;
+        self.mutations.clear();
+        self.dirty = false;
+        self.replace_pending = false;
         Ok(Ok(()))
     }
 
