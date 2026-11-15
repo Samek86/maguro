@@ -8,7 +8,10 @@
 use std::cmp::Ordering;
 use std::path::Path;
 
-use super::store::{marks_path, BlockKind, ImportReport, Store, StoreError, STATE_LOST, STATE_OK, STATE_RECYCLED};
+use windows::Win32::Foundation::SYSTEMTIME;
+use windows::Win32::System::Time::SystemTimeToTzSpecificLocalTime;
+
+use super::store::{marks_path, unix_of_added, BlockKind, ImportReport, Store, StoreError, STATE_LOST, STATE_OK, STATE_RECYCLED};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Row {
@@ -189,6 +192,61 @@ fn cmp_fold(a: &str, b: &str) -> Ordering {
 /// True when `path` is maguro.json. The list never writes that file.
 pub(crate) fn is_settings_file(path: &Path) -> bool {
     path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case("maguro.json"))
+}
+
+/// Local clock for an RFC3339 `added` value. `offset_minutes` is minutes east of UTC.
+/// Empty stays empty. A stamp that does not parse is returned unchanged.
+pub(crate) fn format_added_at(added: &str, offset_minutes: i32) -> String {
+    let trimmed = added.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let Some(unix) = unix_of_added(trimmed) else {
+        return added.to_string();
+    };
+    let local = unix.saturating_add(i64::from(offset_minutes).saturating_mul(60));
+    format_clock(super::store::clock_parts(local))
+}
+
+/// Same clock in the computer's time zone. The offset comes from that instant, not a fixed zone.
+pub(crate) fn format_added_local(added: &str) -> String {
+    let Some(offset) = system_offset_minutes(added) else {
+        return if added.trim().is_empty() { String::new() } else { added.to_string() };
+    };
+    format_added_at(added, offset)
+}
+
+/// Minutes east of UTC for this stamp on this computer. `None` when the stamp cannot be shown.
+fn system_offset_minutes(added: &str) -> Option<i32> {
+    let trimmed = added.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let unix = unix_of_added(trimmed)?;
+    let (y, m, d, h, mi, s) = super::store::clock_parts(unix);
+    if !(1..=9999).contains(&y) {
+        return None;
+    }
+    let utc = SYSTEMTIME {
+        wYear: y as u16,
+        wMonth: m as u16,
+        wDay: d as u16,
+        wHour: h as u16,
+        wMinute: mi as u16,
+        wSecond: s as u16,
+        wMilliseconds: 0,
+        wDayOfWeek: 0,
+    };
+    let mut local = SYSTEMTIME::default();
+    unsafe { SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()? };
+    let wall = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond);
+    let local_unix = unix_of_added(&wall)?;
+    i32::try_from((local_unix - unix) / 60).ok()
+}
+
+fn format_clock(parts: (i32, u32, u32, u32, u32, u32)) -> String {
+    let (y, m, d, h, mi, s) = parts;
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}")
 }
 
 #[cfg(test)]
@@ -432,5 +490,55 @@ mod tests {
         );
         assert_eq!(plan_jump(r"D:\nope\gone.txt", STATE_LOST, |_| PathKind::Missing), JumpPlan::Unavailable);
         assert_eq!(plan_jump(r"C:\data\ok.txt", STATE_OK, |_| PathKind::Missing), JumpPlan::Unavailable);
+    }
+
+    #[test]
+    fn added_display_applies_a_fixed_offset_and_drops_the_z() {
+        assert_eq!(format_added_at("2026-11-15T00:00:00Z", 9 * 60), "2026-11-15 09:00:00");
+        assert!(!format_added_at("2026-11-15T00:00:00Z", 9 * 60).ends_with('Z'));
+    }
+
+    #[test]
+    fn added_display_crosses_the_calendar_day_for_both_signs() {
+        assert_eq!(format_added_at("2026-11-15T00:00:00Z", -5 * 60), "2026-11-14 19:00:00");
+        assert_eq!(format_added_at("2026-11-15T18:00:00Z", 9 * 60), "2026-11-16 03:00:00");
+    }
+
+    #[test]
+    fn added_display_in_the_system_zone_has_no_trailing_z() {
+        let shown = format_added_local("2026-11-15T00:00:00Z");
+        assert!(!shown.is_empty());
+        assert!(!shown.contains('Z'), "{shown}");
+        assert!(!shown.contains('T'), "{shown}");
+        assert!(shown.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | ' ' | ':')), "{shown}");
+    }
+
+    #[test]
+    fn a_bad_added_stamp_does_not_panic() {
+        assert_eq!(format_added_at("", 9 * 60), "");
+        assert_eq!(format_added_at("   ", -5 * 60), "");
+        assert_eq!(format_added_at("not-a-stamp", 9 * 60), "not-a-stamp");
+        assert_eq!(format_added_at("2026-13-40T99:00:00Z", -5 * 60), "2026-13-40T99:00:00Z");
+        assert_eq!(format_added_local(""), "");
+        assert_eq!(format_added_local("nope"), "nope");
+    }
+
+    #[test]
+    fn formatting_a_row_for_display_leaves_utc_in_the_file() {
+        let dir = scratch("utc-display");
+        let mut store = store_in(&dir);
+        store.add_with(r"C:\data\ok.txt", id("AAAA", "1111", false), "2026-11-15T00:00:00Z").unwrap();
+        store.save().unwrap();
+        let rows = rows_of(&store);
+        let shown = format_added_at(&rows[0].added, 9 * 60);
+        assert_eq!(shown, "2026-11-15 09:00:00");
+        assert_eq!(rows[0].added, "2026-11-15T00:00:00Z");
+        let exported = export_text(&store);
+        assert!(exported.contains("2026-11-15T00:00:00Z"), "{exported}");
+        assert!(!exported.contains("2026-11-15 09:00:00"), "{exported}");
+        let on_disk = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+        assert!(on_disk.contains("2026-11-15T00:00:00Z"), "{on_disk}");
+        assert!(!on_disk.contains("2026-11-15 09:00:00"), "{on_disk}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
