@@ -414,6 +414,56 @@ pub(crate) fn vtab_display_px(vertical: bool, stored_dip: i32, dpi: i32, client_
     vtab_fit_px(vtab_pref_px(stored_dip, dpi, client_w), room_px)
 }
 
+/// Width while the vertical-tab edge is dragged.
+/// `shown` is the DIP the windows are using. `pending` is the latest clamp.
+/// The session keeps its old value until [`vtab_drag_finish`].
+///
+/// Esc, the button going up, and a lost capture all keep `pending`.
+/// The side-panel splitter keeps the value written during the move; this drag does too,
+/// and it does not put the old width back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VtabLive {
+    pub shown: i32,
+    pub pending: i32,
+    pub placed_px: i32,
+}
+
+impl VtabLive {
+    /// `placed_px` is the strip width already on screen.
+    pub(crate) fn begin(stored_dip: i32, placed_px: i32) -> Self {
+        Self { shown: stored_dip, pending: stored_dip, placed_px }
+    }
+
+    /// One pointer move. `dip` and `px` are already clamped.
+    /// The bool is whether the strip and the panes should move now.
+    ///
+    /// A burst of moves is folded to the newest point before this runs.
+    /// Skipping because another move is queued would freeze the strip: during a drag the
+    /// next move is usually waiting before this one has finished laying out.
+    pub(crate) fn moved(self, dip: i32, px: i32) -> (Self, bool) {
+        let place = vtab_should_place(self.placed_px, px);
+        let next = Self {
+            shown: if place { dip } else { self.shown },
+            pending: dip,
+            placed_px: if place { px } else { self.placed_px },
+        };
+        (next, place)
+    }
+}
+
+/// Move the windows when the on-screen pixel width changed.
+/// The same pixel (a DIP step the screen cannot show) does not layout again.
+pub(crate) fn vtab_should_place(placed_px: i32, next_px: i32) -> bool {
+    next_px != placed_px
+}
+
+/// Button up, Esc, and a lost capture all keep the latest clamped width.
+/// `None` means the gesture is not running, so the stored width stays.
+/// Nothing is restored: the side-panel splitter has no cancel either.
+pub(crate) fn vtab_drag_finish(stored_dip: i32, pending: Option<i32>) -> i32 {
+    pending.unwrap_or(stored_dip)
+}
+
 /// DIP to store while the right edge is at main-window `edge_x`.
 /// The cursor stops at `room_px`. The value stays in 100..=min(600, half the client).
 /// A window whose half is under 100 DIP still stores 100; [`vtab_display_px`] draws it narrower.
@@ -1679,7 +1729,10 @@ unsafe fn on_vtab_grip(h: HWND, x: i32, y: i32) -> bool {
 
 /// Double-click on the grip. Other windows share the width, same as the vertical-tabs switch.
 unsafe fn reset_vtab_width() {
-    app(|a| a.s.vertical_tabs_width = VTAB_W);
+    app(|a| {
+        a.vtab_live = None;
+        a.s.vertical_tabs_width = VTAB_W;
+    });
     publish_shared();
     relayout();
     redraw_all();
@@ -1690,7 +1743,8 @@ unsafe fn reset_vtab_width() {
     note_save();
 }
 
-/// The strip owns the pixels, so the click starts here. The main window then tracks it like the side splitter.
+/// The strip owns the pixels, so the click starts here. The main window then tracks the pointer.
+/// The strip and the panes move while the button is down. The width is stored when it is released.
 unsafe fn begin_vtab_drag() {
     let main = app(|a| a.main);
     gap_hover(main, None);
@@ -1698,8 +1752,14 @@ unsafe fn begin_vtab_drag() {
         a.tab_press = None;
         a.tab_drag = None;
         a.drag = Some(Hit::VTab);
+        let px = geo(a).vtab;
+        a.vtab_live = Some(VtabLive::begin(a.s.vertical_tabs_width, px));
     });
     SetCapture(main);
+    // A guide bar belongs to the other splitters. This drag moves the strip itself.
+    for b in app(|a| a.bars) {
+        _ = ShowWindow(b, SW_HIDE);
+    }
 }
 
 pub(crate) extern "system" fn tabs_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -2313,6 +2373,31 @@ mod tests {
             assert!(vtab_edge_hit(true, strip, edge, width - 1, 20));
             assert!(!vtab_edge_hit(true, strip, edge, width - edge - 1, 20));
         }
+    }
+
+    #[test]
+    fn vertical_strip_drag_moves_when_the_pixels_change_and_keeps_that_width_when_it_ends() {
+        let start = VtabLive::begin(180, 180);
+        assert_eq!(start.pending, 180);
+        // The pixel width changed, so the strip and the panes move. The session value is still 180.
+        let (placed, place) = start.moved(240, 240);
+        assert!(place);
+        assert_eq!((placed.shown, placed.pending, placed.placed_px), (240, 240, 240));
+        assert_eq!(vtab_drag_finish(180, Some(placed.pending)), 240);
+        // Same pixel width (a DIP step the screen cannot show) does not move the windows.
+        let (same, place) = placed.moved(241, 240);
+        assert!(!place);
+        assert_eq!(same.shown, 240);
+        assert_eq!(same.pending, 241);
+        assert_eq!(same.placed_px, 240);
+        // Button up, Esc, and a lost capture share this. None of them put 180 back.
+        assert_eq!(vtab_drag_finish(180, Some(same.pending)), 241);
+        assert_eq!(vtab_drag_finish(180, Some(100)), 100);
+        // A press that never moved, or a second finish after the gesture was cleared.
+        assert_eq!(vtab_drag_finish(180, Some(start.pending)), 180);
+        assert_eq!(vtab_drag_finish(180, None), 180);
+        assert!(!vtab_should_place(180, 180));
+        assert!(vtab_should_place(180, 240));
     }
 }
 

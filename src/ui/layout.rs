@@ -183,6 +183,30 @@ pub(crate) fn vtab_room_px(client_w: i32, left: i32, pad: i32, gap: i32, cols: i
     (client_w - left - pad.max(0) - grid).max(0)
 }
 
+/// The vertical-tab edge moves the strip and the panes on each pointer move.
+/// Every other splitter keeps the guide bar until the button is released.
+pub(crate) fn drag_places_live(d: Hit) -> bool {
+    matches!(d, Hit::VTab)
+}
+
+/// Displayed side-panel width and vertical-strip width for one DIP choice.
+/// The panel borrows room when the strip is wide. The stored panel width is not changed here.
+/// `client_w` is the main window's client width, which may be zero while the window is creating.
+pub(crate) fn vtab_and_side(vertical: bool, dip: i32, dpi: i32, client_w: i32, side_shown: bool, side_stored: i32, cols: i32) -> (i32, i32) {
+    let s = |v: i32| v * dpi / 96;
+    let (pad, gap) = (s(8), s(8));
+    let want = if vertical { super::tabs::vtab_pref_px(dip, dpi, client_w.max(0)) } else { 0 };
+    let side = if side_shown { side_stored.clamp(s(120), (client_w - want - gap - pad - s(240)).max(s(120))) } else { 0 };
+    let left = vtab_left(side, gap);
+    let room = vtab_room_px(client_w, left, pad, gap, cols, pane_min_w(dpi));
+    let vtab = if want > 0 {
+        super::tabs::vtab_display_px(true, dip, dpi, client_w.max(0), room).min((client_w.max(0) - left).max(0))
+    } else {
+        0
+    };
+    (side, vtab)
+}
+
 /// Left edge of the file grid.
 /// `vtab == 0` is the top-row layout: the pad, or the side panel plus the gap.
 /// A vertical strip sits between the side panel and the grid, and the grid starts on the strip's right edge.
@@ -437,16 +461,10 @@ pub(crate) fn geo(a: &App) -> Geo {
     unsafe { _ = GetClientRect(a.main, &mut rc) };
     let s = |v: i32| v * a.dpi / 96;
     let (pad, gap) = (s(8), s(8));
-    let want = if a.s.vertical_tabs { super::tabs::vtab_pref_px(a.s.vertical_tabs_width, a.dpi, rc.right.max(0)) } else { 0 };
-    let side = if a.s.side_shown() { a.s.side.clamp(s(120), (rc.right - want - gap - pad - s(240)).max(s(120))) } else { 0 };
-    // The panel keeps its minimum. The strip then keeps its width unless a pane would fall under its minimum.
-    let left = vtab_left(side, gap);
-    let room = vtab_room_px(rc.right, left, pad, gap, a.s.heights.len() as i32, pane_min_w(a.dpi));
-    let vtab = if want > 0 {
-        super::tabs::vtab_display_px(true, a.s.vertical_tabs_width, a.dpi, rc.right.max(0), room).min((rc.right.max(0) - left).max(0))
-    } else {
-        0
-    };
+    // While the edge is dragged, `shown` is the DIP already given to the windows.
+    // The session field stays at the width from before the press until the gesture ends.
+    let dip = a.vtab_live.map(|l| l.shown).unwrap_or(a.s.vertical_tabs_width);
+    let (side, vtab) = vtab_and_side(a.s.vertical_tabs, dip, a.dpi, rc.right, a.s.side_shown(), a.s.side, a.s.heights.len() as i32);
     let gx = grid_left(vtab, side, gap, pad);
     let preview = preview_plate(a.s.preview_on, a.s.preview_w, a.dpi, rc.right, gx, gap, pad);
     let grid_w = (rc.right - pad - gx - if preview > 0 { preview + gap } else { 0 }).max(0);
@@ -1767,6 +1785,19 @@ mod tests {
 
         let closed = Geo { vtab: 180, side: 0, tree_h: 0, gx: 180, show_fav: false, show_tree: false, ..plate(false, 0) };
         assert_eq!(hit(&closed, 175, 400), Some(Hit::VTab));
+        assert!(drag_places_live(Hit::VTab));
+        assert!(!drag_places_live(Hit::Side));
+        assert!(!drag_places_live(Hit::SideSplit));
+        assert!(!drag_places_live(Hit::Col(0)));
+        assert!(!drag_places_live(Hit::Row(0, 0)));
+        assert!(!drag_places_live(Hit::Preview));
+        // Wide strip, panel open: the panel keeps 240 and the strip is the stored DIP.
+        assert_eq!(vtab_and_side(true, 180, 96, 1000, true, 240, 1), (240, 180));
+        // The panel gives up width so a 500 DIP strip still fits. The stored panel width is not an input result.
+        assert_eq!(vtab_and_side(true, 500, 96, 1000, true, 400, 1), (244, 500));
+        // Horizontal tabs: no strip, and the panel clamp ignores a vertical width.
+        assert_eq!(vtab_and_side(false, 500, 96, 1000, true, 240, 1), (240, 0));
+        assert_eq!(vtab_and_side(true, 180, 96, 1000, false, 240, 1), (0, 180));
         assert_eq!(hit(&closed, 170, 400), None);
         assert_eq!(hit(&closed, 2, 400), None);
         assert_eq!(gap_line(&closed, Hit::Side, 2), None);

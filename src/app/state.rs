@@ -164,6 +164,8 @@ pub(crate) struct Desk {
     pub(crate) dpi: i32,
     pub(crate) panes: Vec<Option<Pane>>,
     pub(crate) drag: Option<Hit>,
+    /// Set only while the vertical-tab edge is dragged. The session width stays put until the gesture ends.
+    pub(crate) vtab_live: Option<VtabLive>,
     pub(crate) pane_press: Option<PanePress>, // header press; a drag only after it moves
     pub(crate) pane_drag: Option<PaneMove>,   // pane grabbed by its header or tab strip
     pub(crate) pane_tab_drag: Option<usize>,  // pane tab being reordered inside its strip
@@ -369,6 +371,7 @@ pub(crate) fn blank_desk() -> Desk {
         dpi: 96,
         panes: (0..MAXP).map(|_| None).collect(),
         drag: None,
+        vtab_live: None,
         pane_press: None,
         pane_drag: None,
         pane_tab_drag: None,

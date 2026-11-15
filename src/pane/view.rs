@@ -423,6 +423,7 @@ pub(crate) unsafe fn relayout() {
 }
 
 // Splitter drag shows translucent guide bars where the boundaries will land; the panes move once, on release.
+// The vertical-tab edge does not use these bars. `place_vtab_live` moves the strip and the panes instead.
 pub(crate) unsafe fn show_bars() {
     let Some((main, bars, rects)) = app(|a| {
         let d = a.drag?;
@@ -477,8 +478,94 @@ unsafe fn paint_drop_overlay(h: HWND, msg: u32, wp: WPARAM, rgb: u32) -> LRESULT
     LRESULT(0)
 }
 
+/// Move the vertical strip, the side panel, and the panes to the DIP already in `vtab_live.shown`.
+/// One deferred move, then one paint of what that move invalidated.
+/// Does not write settings. [`end_drag`] does that when the button is released or the capture is lost.
+pub(crate) unsafe fn place_vtab_live() {
+    let Some((main, bars, moves, preview)) = app(|a| {
+        if a.main.0.is_null() || a.vtab_live.is_none() {
+            return None;
+        }
+        let g = geo(a);
+        let s = |v: i32| v * a.dpi / 96;
+        let (tree, fav) = side_panes(&g, s(2));
+        let mut moves = vec![
+            (a.tree_hwnd, tree),
+            (a.side_hwnd, fav),
+            (a.tabs_hwnd, tab_strip_rect(g.w, g.top, g.bot, a.s.vertical_tabs, g.vtab, g.side, g.gap)),
+        ];
+        let full = RECT { left: g.gx, top: g.top, right: g.grid_right(), bottom: g.bot };
+        let zoomed = a.zoom;
+        for (i, p) in a.panes.iter().enumerate().take(a.s.panes()) {
+            // A zoomed pane covers the grid. The hidden ones are placed once, when the gesture ends.
+            if zoomed.is_some_and(|z| z != i) {
+                continue;
+            }
+            if let Some(p) = p {
+                let r = if zoomed == Some(i) { full } else { cell_rect(&g, &a.s.heights, i) };
+                moves.push((p.hwnd, r));
+            }
+        }
+        let preview_h = a.preview_hwnd;
+        let show_preview = !preview_h.0.is_null() && a.s.preview_on && g.preview > 0;
+        if show_preview {
+            moves.push((preview_h, g.preview_rect()));
+        }
+        // Parent gaps (the splitters) sit in this band. Children are clipped, so this does not repaint them.
+        let band = RECT { left: 0, top: g.top, right: g.w, bottom: g.bot };
+        Some((a.main, a.bars, moves, (preview_h, show_preview, band)))
+    }) else {
+        return;
+    };
+    for b in bars {
+        _ = ShowWindow(b, SW_HIDE);
+    }
+    move_all(&moves, None);
+    let (preview_h, show_preview, band) = preview;
+    if !preview_h.0.is_null() {
+        let visible = IsWindowVisible(preview_h).as_bool();
+        if show_preview && !visible {
+            _ = ShowWindow(preview_h, SW_SHOWNA);
+        } else if !show_preview && visible {
+            // Hide only. Clearing the preview handler waits until the gesture ends and `relayout` runs.
+            _ = ShowWindow(preview_h, SW_HIDE);
+        }
+    }
+    _ = InvalidateRect(Some(main), Some(&band), false);
+    // Mouse moves keep the queue non-empty, so a posted WM_PAINT would wait until the button is released.
+    // Update regions already set by the move are painted now. This does not invalidate every child again.
+    _ = RedrawWindow(Some(main), None, None, RDW_UPDATENOW | RDW_ALLCHILDREN);
+}
+
+/// Esc during a vertical-tab width drag. Keeps the width on screen and drops the capture,
+/// so `WM_CAPTURECHANGED` runs [`end_drag`] and nothing is left mid-gesture.
+/// False when that drag is not running. Other splitters are left alone.
+pub(crate) unsafe fn commit_vtab_drag() -> bool {
+    if app(|a| a.drag) != Some(Hit::VTab) {
+        return false;
+    }
+    _ = ReleaseCapture();
+    // The window that had the capture runs `end_drag` from `WM_CAPTURECHANGED`.
+    // If this thread did not have it, finish here so the gesture cannot stay up.
+    if app(|a| a.drag) == Some(Hit::VTab) {
+        end_drag();
+    }
+    true
+}
+
 pub(crate) unsafe fn end_drag() {
-    let Some((bars, kind)) = app(|a| a.drag.take().map(|d| (a.bars, d))) else { return };
+    let Some((bars, kind)) = app(|a| {
+        let d = a.drag.take()?;
+        if d == Hit::VTab {
+            let pending = a.vtab_live.take().map(|l| l.pending);
+            a.s.vertical_tabs_width = vtab_drag_finish(a.s.vertical_tabs_width, pending);
+        } else {
+            a.vtab_live = None;
+        }
+        Some((a.bars, d))
+    }) else {
+        return;
+    };
     for b in bars {
         _ = ShowWindow(b, SW_HIDE);
     }

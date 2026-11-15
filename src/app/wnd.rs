@@ -15,6 +15,26 @@ pub(crate) fn xy(lp: LPARAM) -> (i32, i32) {
     ((lp.0 & 0xffff) as i16 as i32, ((lp.0 >> 16) & 0xffff) as i16 as i32)
 }
 
+/// Fold pointer moves already queued for this window into one point.
+/// Stops at the first other message, so a button-up is not pulled out from behind a move.
+/// Skipping the layout because a move is queued would freeze the strip for the whole drag.
+fn latest_drag_point(h: HWND, x: i32, y: i32) -> (i32, i32) {
+    let mut x = x;
+    let mut y = y;
+    loop {
+        let mut msg = MSG::default();
+        if unsafe { !PeekMessageW(&mut msg, Some(h), 0, 0, PM_NOREMOVE).as_bool() } || msg.message != WM_MOUSEMOVE {
+            break;
+        }
+        // Remove that next message. A filtered remove could pull a later move out from behind a button-up.
+        if unsafe { !PeekMessageW(&mut msg, Some(h), 0, 0, PM_REMOVE).as_bool() } || msg.message != WM_MOUSEMOVE {
+            break;
+        }
+        (x, y) = xy(msg.lParam);
+    }
+    (x, y)
+}
+
 /// One status-timer pass: the bar, remembered view state, a failed save, and the preview backup.
 pub(crate) unsafe fn status_tick() {
     update_status();
@@ -234,21 +254,36 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let (x, y) = xy(lp);
                 if let Some(d) = app(|a| hit(&geo(a), x, y)) {
                     gap_hover(h, None);
-                    app(|a| a.drag = Some(d));
+                    app(|a| {
+                        a.drag = Some(d);
+                        if d == Hit::VTab {
+                            let px = geo(a).vtab;
+                            a.vtab_live = Some(VtabLive::begin(a.s.vertical_tabs_width, px));
+                        }
+                    });
                     SetCapture(h);
+                    if d == Hit::VTab {
+                        for b in app(|a| a.bars) {
+                            _ = ShowWindow(b, SW_HIDE);
+                        }
+                    }
                 }
             }
             WM_MOUSELEAVE => gap_hover(h, None),
             WM_MOUSEMOVE => {
-                let (x, y) = xy(lp);
+                let (mut x, mut y) = xy(lp);
                 if app(|a| a.drag.is_none()) {
                     gap_hover(h, app(|a| hit(&geo(a), x, y)));
+                } else if app(|a| a.drag == Some(Hit::VTab)) {
+                    // One layout for the burst. The side-panel splitter still sees every move.
+                    (x, y) = latest_drag_point(h, x, y);
                 }
                 let moved = app(|a| {
                     let d = a.drag?;
                     let g = geo(a);
                     let min_w = pane_min_w(a.dpi);
                     let min_h = pane_min_h(a.dpi);
+                    let mut place = false;
                     match d {
                         Hit::Side => a.s.side = side_drag_width(x, g.gap),
                         Hit::SideSplit => a.s.side_split = tree_share_at(y - g.gap / 2, g.top, g.bot - g.top, g.gap, side_min(a.dpi), a.s.fav_top),
@@ -274,9 +309,16 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                             a.s.preview_w = preview_dip(px, a.dpi);
                         }
                         Hit::VTab => {
+                            // The session field stays put. `pending` is what a release will store.
                             let left = vtab_left(g.side, g.gap);
-                            let room = vtab_room_px(g.w, left, g.pad, g.gap, a.s.heights.len() as i32, min_w);
-                            a.s.vertical_tabs_width = vtab_drag_dip(x, left, a.dpi, g.w, room);
+                            let cols = a.s.heights.len() as i32;
+                            let room = vtab_room_px(g.w, left, g.pad, g.gap, cols, min_w);
+                            let dip = vtab_drag_dip(x, left, a.dpi, g.w, room);
+                            let (_, px) = vtab_and_side(true, dip, a.dpi, g.w, a.s.side_shown(), a.s.side, cols);
+                            let live = a.vtab_live.unwrap_or_else(|| VtabLive::begin(a.s.vertical_tabs_width, g.vtab));
+                            let (live, now) = live.moved(dip, px);
+                            a.vtab_live = Some(live);
+                            place = now;
                         }
                     }
                     // The strip drag must not write the side panel's temporary clamp back.
@@ -284,14 +326,20 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     if d != Hit::VTab {
                         a.s.side = kept_side(a.s.side_shown(), a.s.side, geo(a).side);
                     }
-                    Some(d)
+                    Some((d, place))
                 });
-                if let Some(kind) = moved {
-                    // Panes stay put until release: relaying out Explorer views per mouse move is ~120ms.
-                    // The guide bar tracks the new edge, same as the side-panel splitter.
-                    show_bars();
-                    if kind == Hit::VTab {
+                if let Some((kind, place)) = moved {
+                    if drag_places_live(kind) {
+                        // The strip and the panes move now. The guide bar stays hidden.
+                        // Settings are written in `end_drag`, on button-up or a lost capture.
+                        if place {
+                            place_vtab_live();
+                        }
                         SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
+                    } else {
+                        // Other splitters: panes stay put until release. Moving Explorer views per
+                        // mouse move is ~120ms, so the guide bar tracks the new edge instead.
+                        show_bars();
                     }
                 }
             }
@@ -309,7 +357,10 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     Some(Hit::Col(_)) => a.s.colr = even(a.s.heights.len()),
                     Some(Hit::Row(c, _)) => a.s.rowr[c] = even(a.s.heights[c]),
                     Some(Hit::Preview) => a.s.preview_w = 0,
-                    Some(Hit::VTab) => a.s.vertical_tabs_width = VTAB_W,
+                    Some(Hit::VTab) => {
+                        a.vtab_live = None;
+                        a.s.vertical_tabs_width = VTAB_W;
+                    }
                     None => {}
                 });
                 if matches!(d, Some(Hit::SideSplit)) {
