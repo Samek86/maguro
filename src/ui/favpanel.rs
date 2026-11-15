@@ -1395,6 +1395,7 @@ fn side_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         note_side(h);
         note_pins_hwnd(h);
         match msg {
+            WM_NCHITTEST if crate::nchit_passes_to_splitter(h, lp) => return LRESULT(HTTRANSPARENT as isize),
             WM_DESTROY => {
                 hide_side_fav_tip();
                 drop_side(h);

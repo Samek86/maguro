@@ -421,6 +421,8 @@ pub(crate) struct Session {
     pub(crate) drive_buttons: bool,
     /// Window tabs between the favourites panel and the panes. Off keeps the top row. Missing from the file means off.
     pub(crate) vertical_tabs: bool,
+    /// Vertical window-tab strip width in DIP (96 DPI). [`VTAB_W`] is the default and is not written.
+    pub(crate) vertical_tabs_width: i32,
     pub(crate) view_new: i32,          // FOLDERVIEWMODE for a pane that has none yet (see EXPLORER_VIEWS)
     pub(crate) view_icon: i32,         // icon size beside view_new; 0 = that mode's usual size (large icons are 96)
     pub(crate) start_new: u8,          // 0 This PC, 1 Desktop, 2 start_path
@@ -594,6 +596,7 @@ impl Default for Session {
             bar: true,
             drive_buttons: true,
             vertical_tabs: false,
+            vertical_tabs_width: VTAB_W,
             view_new: 4,
             view_icon: 0,
             start_new: 0,
@@ -688,6 +691,7 @@ impl PartialEq for Session {
             && self.bar == o.bar
             && self.drive_buttons == o.drive_buttons
             && self.vertical_tabs == o.vertical_tabs
+            && self.vertical_tabs_width == o.vertical_tabs_width
             && self.view_new == o.view_new
             && self.view_icon == o.view_icon
             && self.start_new == o.start_new
@@ -731,6 +735,20 @@ impl PartialEq for Session {
             && self.excel_tidy_first == o.excel_tidy_first
             && self.excel_tidy_backup == o.excel_tidy_backup
     }
+}
+
+/// Default width of the vertical window-tab strip, in DIP (96 DPI).
+pub(crate) const VTAB_W: i32 = 180;
+/// Narrowest width stored for that strip. A tighter window may draw it narrower.
+pub(crate) const VTAB_MIN_DIP: i32 = 100;
+/// Widest width stored for that strip. Half the client can cap it further while drawing.
+pub(crate) const VTAB_MAX_DIP: i32 = 600;
+
+/// Stored strip width in DIP. Missing and non-integers stay at [`VTAB_W`].
+/// Values outside 100..=600 clamp. 180 is the default and is not written back.
+pub(crate) fn vtab_stored_dip(raw: Option<i64>) -> i32 {
+    let Some(n) = raw else { return VTAB_W };
+    n.clamp(i64::from(VTAB_MIN_DIP), i64::from(VTAB_MAX_DIP)) as i32
 }
 
 /// Folder tree's share of the side plate. Clamps to [0, 1]; NaN becomes an even split.
@@ -1069,6 +1087,7 @@ impl Session {
                 "bar" => s.bar = v.trim() != "0",
                 "drivebuttons" => s.drive_buttons = v.trim() != "0",
                 "verticaltabs" => s.vertical_tabs = v.trim() == "1",
+                "verticaltabsw" => s.vertical_tabs_width = vtab_stored_dip(v.trim().parse::<i64>().ok()),
                 // Retired show/hide switch. The status line is always on. The key is ignored and not written back.
                 "stat" => {}
                 "viewnew" => s.view_new = match v.trim() {
@@ -1220,6 +1239,10 @@ impl Session {
         }
         if self.vertical_tabs {
             o += "verticaltabs=1\n";
+        }
+        let vtab_w = vtab_stored_dip(Some(i64::from(self.vertical_tabs_width)));
+        if vtab_w != VTAB_W {
+            o += &format!("verticaltabsw={vtab_w}\n");
         }
         if self.preview_w > 0 {
             o += &format!("previeww={}\n", self.preview_w);

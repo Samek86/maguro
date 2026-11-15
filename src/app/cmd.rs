@@ -364,6 +364,11 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
     if VIRTUAL_KEY(vk) == VK_ESCAPE && cancel_pane_drag() {
         return true;
     }
+    // Vertical-tab width: Esc keeps the width already on screen and ends the gesture.
+    // The side-panel splitter has no Esc path; it keeps its dragged value when the capture ends.
+    if VIRTUAL_KEY(vk) == VK_ESCAPE && commit_vtab_drag() {
+        return true;
+    }
     // The preview takes its own keys. Pane shortcuts must not act behind it.
     let peek = app(|a| a.peek);
     if !peek.0.is_null() && m.hwnd == peek {
