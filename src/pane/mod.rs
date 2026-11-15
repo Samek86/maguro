@@ -17,6 +17,7 @@ mod status;
 mod tree;
 mod view;
 mod drag;
+pub(crate) mod marks_overlay;
 
 pub(crate) use find::*;
 pub(crate) use imgjob::image_main;

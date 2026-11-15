@@ -796,6 +796,7 @@ pub(crate) unsafe fn remember_tabs() {
 }
 
 pub(crate) unsafe fn detach_live() {
+    crate::pane::marks_overlay::note_all_hidden();
     hide_addr_tip();
     for i in 0..MAXP {
         let got = app(|a| {
@@ -841,6 +842,7 @@ pub(crate) unsafe fn attach_live() {
     // A delete that finished while this tab was parked can re-list now that the view has a site.
     crate::shell::listsync::relist_shown();
     crate::shell::listsync::retarget(app(|a| a.main));
+    crate::pane::marks_overlay::sync_visible();
 }
 
 pub(crate) unsafe fn sync_filter_edits() {

@@ -35,6 +35,12 @@ pub(crate) fn count_in_folder(folder: &str) -> usize {
     g.as_ref().map(|s| count_ok(s, folder)).unwrap_or(0)
 }
 
+/// Read the live store. The lock is not held across `f`'s further calls.
+pub(crate) fn with_store<R>(f: impl FnOnce(&Store) -> R) -> Option<R> {
+    let g = live().lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().map(f)
+}
+
 unsafe fn resolve_items(items: &[(String, bool)]) -> Vec<Target> {
     items.iter().map(|(p, file)| resolve::from_parsing(p, !*file)).collect()
 }
@@ -87,5 +93,8 @@ fn after_toggle(out: Outcome) {
             crate::app::app(|a| a.status_key.clear());
         }
     }
-    unsafe { crate::update_status() }
+    unsafe {
+        crate::update_status();
+        crate::pane::marks_overlay::on_marks_changed();
+    }
 }

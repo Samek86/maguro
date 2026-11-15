@@ -753,6 +753,7 @@ impl Drop for ClearBridge {
         CTX_MENU.with(|m| m.set(0));
         CTX_BACKGROUND.with(|c| c.set(false));
         CTX_OPEN.store(false, Ordering::Release);
+        crate::pane::marks_overlay::note_menu(false);
     }
 }
 
@@ -886,6 +887,7 @@ pub(crate) unsafe fn show_ctx(i: usize, pt: POINT) -> bool {
     if CTX_OPEN.swap(true, Ordering::AcqRel) {
         return true;
     }
+    crate::pane::marks_overlay::note_menu(true);
     let t_pre = std::time::Instant::now();
     let _open = ClearBridge;
     let Some(sv) = view_of::<IShellView>(i) else { return false };
@@ -941,6 +943,7 @@ pub(crate) unsafe fn show_paths_ctx(i: usize, items: &[(String, bool)], pt: POIN
     if CTX_OPEN.swap(true, Ordering::AcqRel) {
         return true;
     }
+    crate::pane::marks_overlay::note_menu(true);
     let _open = ClearBridge;
     let Some(sv) = view_of::<IShellView>(i) else { return false };
     let owner = sv.GetWindow().unwrap_or_else(|_| app(|a| a.main));

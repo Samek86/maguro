@@ -910,6 +910,7 @@ unsafe fn create_peek(i: usize) -> bool {
     _ = DwmSetWindowAttribute(hw, DWMWA_BORDER_COLOR, &none as *const _ as _, 4);
     view(|v| v.restore = Some(rect));
     app(|a| (a.peek, a.peek_pane) = (hw, i));
+    crate::pane::marks_overlay::note_peek(true);
     true
 }
 
@@ -3290,6 +3291,7 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_PEEK_LOST if GetActiveWindow() != h && !HOLD_PEEK.load(Ordering::SeqCst) => _ = DestroyWindow(h),
             WM_DESTROY => {
+                crate::pane::marks_overlay::note_peek(false);
                 let from_find = FROM_FIND.load(Ordering::SeqCst);
                 let i = app(|a| a.peek_pane);
                 drop_zoom(h);
