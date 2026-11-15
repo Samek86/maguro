@@ -993,21 +993,35 @@ fn push_mark(names: &mut Vec<String>, text: &str) {
     names.push(key);
 }
 
-/// One item at the top of the file or folder menu. The shell menu is left in place.
+/// Mark or unmark, directly under Maguro's favourites row when that row is present.
+/// The shell menu is left in place. A Recent "Show in folder" row stays at the top.
 pub(crate) unsafe fn insert_mark_item(menu: HMENU, items: &[(String, bool)]) {
     if items.is_empty() {
         return;
     }
+    let (text, on) = crate::marks::menu_parts(items);
+    insert_mark_label(menu, &text, on);
+}
+
+/// Shared by the mark and unmark labels. Position follows the menu, not the wording.
+unsafe fn insert_mark_label(menu: HMENU, text: &str, enabled: bool) {
     if let Some(i) = crate::menu_index(menu, ID_CTX_MARK as usize) {
         let _ = DeleteMenu(menu, i, MF_BYPOSITION);
     }
-    let (text, on) = crate::marks::menu_parts(items);
     let mut flags = MF_STRING | MF_BYPOSITION;
-    if !on {
+    if !enabled {
         flags |= MF_GRAYED;
     }
     let label = HSTRING::from(text);
-    let _ = InsertMenuW(menu, 0, flags, ID_CTX_MARK as usize, &label);
+    let _ = InsertMenuW(menu, mark_slot(menu), flags, ID_CTX_MARK as usize, &label);
+}
+
+/// Directly under Favourites. With no favourites row, append so position 0 stays free.
+unsafe fn mark_slot(menu: HMENU) -> u32 {
+    if let Some(fav) = crate::menu_index(menu, crate::ID_CTX_FAV as usize) {
+        return fav.saturating_add(1);
+    }
+    GetMenuItemCount(Some(menu)).max(0) as u32
 }
 
 /// Maguro appends its own commands at 0x8000 and above. The shell's range stops at 0x7FFF.
@@ -4922,5 +4936,89 @@ mod invoke_part_tests {
         }
         assert_eq!(std::env::current_dir().unwrap(), before);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod mark_menu_pos_tests {
+    use super::*;
+
+    unsafe fn push(menu: HMENU, id: u32, text: &str) {
+        let _ = AppendMenuW(menu, MF_STRING, id as usize, &HSTRING::from(text));
+    }
+
+    unsafe fn ids(menu: HMENU) -> Vec<u32> {
+        let n = GetMenuItemCount(Some(menu)).max(0);
+        (0..n).map(|i| GetMenuItemID(menu, i)).collect()
+    }
+
+    unsafe fn text_at(menu: HMENU, index: u32) -> String {
+        let mut buf = [0u16; 128];
+        let n = GetMenuStringW(menu, index, Some(&mut buf), MF_BYPOSITION);
+        let n = n.max(0) as usize;
+        String::from_utf16_lossy(&buf[..n.min(buf.len())])
+    }
+
+    /// Shell verbs on top, then the Maguro block: batch rename, favourites, WinMerge.
+    unsafe fn maguro_block() -> HMENU {
+        let menu = CreatePopupMenu().unwrap();
+        push(menu, 10, "Open");
+        push(menu, 11, "Cut");
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        push(menu, crate::ID_CTX_BATCH, "Batch rename");
+        push(menu, crate::ID_CTX_FAV, "Add to Favourites");
+        push(menu, 0x8020, "WinMerge");
+        menu
+    }
+
+    #[test]
+    fn mark_item_sits_under_favourites_not_at_the_top() {
+        unsafe {
+            let menu = maguro_block();
+            insert_mark_item(menu, &[(r"C:\maguro-marks-menu-pos\note.txt".into(), true)]);
+            let ids = ids(menu);
+            let fav = ids.iter().position(|id| *id == crate::ID_CTX_FAV).unwrap();
+            let mark = ids.iter().position(|id| *id == ID_CTX_MARK).unwrap();
+            assert_ne!(mark, 0, "mark row must leave the shell verbs at the top: {ids:?}");
+            assert_eq!(mark, fav + 1, "mark row must sit directly under favourites: {ids:?}");
+            assert_eq!(ids[0], 10);
+            assert!(text_at(menu, mark as u32).starts_with("Mark as important"), "{}", text_at(menu, mark as u32));
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn unmark_label_uses_the_same_slot_and_reveal_stays_first() {
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, crate::ID_CTX_REVEAL, "Show in folder");
+            push(menu, 10, "Open");
+            push(menu, crate::ID_CTX_BATCH, "Batch rename");
+            push(menu, crate::ID_CTX_FAV, "Remove from Favourites");
+            push(menu, 0x8020, "WinMerge");
+            insert_mark_label(menu, "Remove important mark", true);
+            let ids = ids(menu);
+            let fav = ids.iter().position(|id| *id == crate::ID_CTX_FAV).unwrap();
+            let mark = ids.iter().position(|id| *id == ID_CTX_MARK).unwrap();
+            assert_eq!(ids[0], crate::ID_CTX_REVEAL, "reveal stays at the top: {ids:?}");
+            assert_ne!(mark, 0);
+            assert_eq!(mark, fav + 1, "{ids:?}");
+            assert_eq!(text_at(menu, mark as u32), "Remove important mark");
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn without_favourites_the_mark_row_is_not_forced_to_the_top() {
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, 10, "Open");
+            push(menu, 11, "Copy");
+            insert_mark_label(menu, "Mark as important", true);
+            let ids = ids(menu);
+            assert_eq!(ids[0], 10);
+            assert_eq!(*ids.last().unwrap(), ID_CTX_MARK);
+            let _ = DestroyMenu(menu);
+        }
     }
 }

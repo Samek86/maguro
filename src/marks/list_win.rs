@@ -19,7 +19,7 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, GetSaveFileNameW, OFN_FILEMUSTEXIST, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW};
 
 use super::list::{
-    blocked_message, cleanup_lost, export_text, file_name, filter_rows, import_replace, is_settings_file, plan_jump, rows_of, sort_rows, state_key, unmark, JumpPlan, PathKind, Row, SortCol,
+    blocked_message, cleanup_lost, export_text, file_name, filter_rows, format_added_local, import_replace, is_settings_file, plan_jump, rows_of, sort_rows, state_key, unmark, JumpPlan, PathKind, Row, SortCol,
 };
 use super::store::{marks_path, StoreError};
 use crate::imports::*;
@@ -580,7 +580,7 @@ unsafe fn fill_item(lp: LPARAM) {
             0 => row.name.clone(),
             1 => row.path.clone(),
             2 => crate::tr(state_key(&row.state)).to_string(),
-            3 => row.added.clone(),
+            3 => format_added_local(&row.added),
             _ => String::new(),
         }
     });

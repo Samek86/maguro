@@ -398,6 +398,22 @@ fn unix_of_rfc3339(text: &str) -> Option<i64> {
     Some(local - i64::from(offset))
 }
 
+/// Unix seconds of an `added` stamp. `None` when the text is not RFC3339.
+pub(crate) fn unix_of_added(text: &str) -> Option<i64> {
+    unix_of_rfc3339(text)
+}
+
+/// UTC calendar fields of a unix instant: year, month, day, hour, minute, second.
+pub(crate) fn clock_parts(unix: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = unix.div_euclid(DAY_SECS);
+    let secs = unix.rem_euclid(DAY_SECS);
+    let (y, m, d) = ymd_from_unix_days(days);
+    let h = (secs / 3600) as u32;
+    let mi = ((secs % 3600) / 60) as u32;
+    let s = (secs % 60) as u32;
+    (y, m, d, h, mi, s)
+}
+
 fn parse_offset(rest: &str) -> Option<i32> {
     if rest == "Z" || rest == "z" {
         return Some(0);
