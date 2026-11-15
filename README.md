@@ -108,6 +108,8 @@ Chrome-style tabs across the window, plus tabs inside each pane. A tab is named 
 
 The main-window tab list can be shown as a vertical strip to the right of the favourites panel (Settings → Appearance → Vertical tabs; off by default). Drag the strip's right edge to change its width. Double-click the edge to reset it. The width is remembered.
 
+<p align="center"><img width="760" alt="Vertical window tabs" src="docs/images-v8/en/vertical_tabs.png"></p>
+
 ### 4. Pin, lock, and colour tabs
 
 Double-click or right-click a tab → Rename to pin your own name. Lock a tab so it cannot be closed by accident. Pick a tab colour so related work stands out at a glance.
