@@ -190,6 +190,13 @@ struct PaneTabSet {
     cur: usize,
 }
 
+/// One pane tab moved onto another pane. `src_browse` is the folder the source
+/// should open when the tab on display was the one that left.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MovedPaneTab {
+    pub(crate) src_browse: Option<String>,
+}
+
 fn align_bools(src: &[bool], n: usize) -> Vec<bool> {
     let mut v: Vec<bool> = src.iter().copied().take(n).collect();
     v.resize(n, false);
@@ -1594,6 +1601,49 @@ impl Session {
         self.commit_pane_tabs(i, &b);
         self.land_pane_path(i, &to);
         Some(to)
+    }
+
+    /// Move pane tab `tab` from `src` onto `dst`. `dst` becomes that one folder.
+    /// View mode, sort and columns on `dst` stay as they are (the split copies them first).
+    /// `src` must keep at least one tab, so a single tab is refused: that drag moves the pane.
+    /// A locked tab moves; this is not a close. The source's current index follows the same
+    /// rule as closing a tab. None when the tab cannot move.
+    pub(crate) fn move_pane_tab(&mut self, src: usize, tab: usize, dst: usize) -> Option<MovedPaneTab> {
+        if src >= MAXP || dst >= MAXP || src == dst {
+            return None;
+        }
+        self.ensure_pane_tabs();
+        let mut b = self.bundle(src);
+        if b.paths.len() < 2 || tab >= b.paths.len() {
+            return None;
+        }
+        let path = b.paths[tab].clone();
+        let locked = b.locks.get(tab).copied().unwrap_or(false);
+        let name = b.names.get(tab).cloned().unwrap_or_default();
+        let cur = b.cur;
+        b.paths.remove(tab);
+        if tab < b.locks.len() {
+            b.locks.remove(tab);
+        }
+        if tab < b.names.len() {
+            b.names.remove(tab);
+        }
+        let (next, go) = match tab.cmp(&cur) {
+            std::cmp::Ordering::Less => (cur - 1, None),
+            std::cmp::Ordering::Greater => (cur, None),
+            std::cmp::Ordering::Equal => {
+                let n = tab.min(b.paths.len() - 1);
+                (n, Some(b.paths[n].clone()))
+            }
+        };
+        b.cur = next;
+        self.commit_pane_tabs(src, &b);
+        if let Some(ref to) = go {
+            self.land_pane_path(src, to);
+        }
+        self.commit_pane_tabs(dst, &PaneTabSet { paths: vec![path.clone()], locks: vec![locked], names: vec![name], cur: 0 });
+        self.land_pane_path(dst, &path);
+        Some(MovedPaneTab { src_browse: go })
     }
 
     /// Closes pane tab k. The last one stays, and so does a locked tab. Closing the current one
@@ -3186,6 +3236,82 @@ mod crumb_tests {
         assert_eq!((s.paths[3].as_str(), s.views[3], s.cols[3].as_str()), (r"C:\src", (4, 32), "name:1"));
         assert!(s.pane_folders[3].is_empty() && s.pane_cur[3] == 0);
         assert_eq!(s.pane_folders[0].len(), 4);
+    }
+
+    #[test]
+    fn move_pane_tab_moves_folder_lock_name_and_adjusts_cur() {
+        let mut s = Session::default();
+        s.paths[0] = r"C:\b".into();
+        s.views[0] = (4, 32);
+        s.cols[0] = "name:1".into();
+        s.pane_folders[0] = vec![r"C:\a".into(), r"C:\b".into(), r"C:\c".into()];
+        s.pane_cur[0] = 1;
+        assert!(s.set_pane_tab_lock(0, 2, true));
+        assert!(s.set_pane_tab_name(0, 0, "Old"));
+        assert!(s.set_pane_tab_name(0, 2, "Docs"));
+        // A single tab stays, and a tab cannot land on its own pane. A locked tab can still move.
+        let mut one = Session::default();
+        one.paths[0] = r"C:\only".into();
+        assert!(one.move_pane_tab(0, 0, 1).is_none());
+        assert_eq!(one.paths[0], r"C:\only");
+        assert!(s.move_pane_tab(0, 1, 0).is_none());
+        assert_eq!(s.close_pane_tab(0, 2), None);
+
+        // The tab before the one on display: cur slides down, and nothing has to browse.
+        let mut before = s.clone();
+        crate::copy_pane_view(&mut before, 0, 1);
+        let moved = before.move_pane_tab(0, 0, 1).unwrap();
+        assert!(moved.src_browse.is_none());
+        assert_eq!(before.pane_tab_list(0), vec![r"C:\b".to_string(), r"C:\c".into()]);
+        assert_eq!((before.pane_cur[0], before.paths[0].as_str()), (0, r"C:\b"));
+        assert_eq!(before.pane_tab_names(0), vec!["".to_string(), "Docs".into()]);
+        assert_eq!(before.pane_tab_locks(0), vec![false, true]);
+        assert_eq!(before.pane_tab_list(1), vec![r"C:\a".to_string()]);
+        assert_eq!(before.pane_tab_names(1), vec!["Old".to_string()]);
+        assert!(!before.pane_tab_locked(1));
+        assert!(before.pane_folders[1].is_empty());
+        assert_eq!((before.views[0], before.cols[0].as_str()), ((4, 32), "name:1"));
+        assert_eq!((before.views[1], before.cols[1].as_str()), ((4, 32), "name:1"));
+
+        // The tab on display: the source shows the right neighbour. The moved tab takes no lock or name.
+        let mut cur = s.clone();
+        crate::copy_pane_view(&mut cur, 0, 1);
+        let moved = cur.move_pane_tab(0, 1, 1).unwrap();
+        assert_eq!(moved.src_browse.as_deref(), Some(r"C:\c"));
+        assert_eq!((cur.pane_cur[0], cur.paths[0].as_str()), (1, r"C:\c"));
+        assert_eq!(cur.pane_tab_list(0), vec![r"C:\a".to_string(), r"C:\c".into()]);
+        assert_eq!(cur.pane_tab_names(0), vec!["Old".to_string(), "Docs".into()]);
+        assert_eq!(cur.pane_tab_locks(0), vec![false, true]);
+        assert_eq!(cur.pane_tab_list(1), vec![r"C:\b".to_string()]);
+        assert!(cur.pane_folders[1].is_empty() && !cur.pane_tab_locked(1));
+        assert!(cur.pane_tab_names(1).iter().all(|n| n.is_empty()));
+
+        // A later locked tab leaves cur where it is, and the lock and title go with it.
+        let mut later = s.clone();
+        crate::copy_pane_view(&mut later, 0, 1);
+        let moved = later.move_pane_tab(0, 2, 1).unwrap();
+        assert!(moved.src_browse.is_none());
+        assert_eq!((later.pane_cur[0], later.paths[0].as_str()), (1, r"C:\b"));
+        assert_eq!(later.pane_tab_list(0), vec![r"C:\a".to_string(), r"C:\b".into()]);
+        assert_eq!(later.pane_tab_names(0), vec!["Old".to_string(), "".into()]);
+        assert_eq!(later.pane_tab_list(1), vec![r"C:\c".to_string()]);
+        assert!(later.pane_tab_locked(1) && later.pane_strip_on(1));
+        assert_eq!(later.pane_tab_names(1), vec!["Docs".to_string()]);
+        assert!(later.pane_folders[1].is_empty());
+        later.heights = vec![1, 1];
+        later.colr = vec![0.5, 0.5];
+        later.rowr = vec![vec![1.0], vec![1.0]];
+        later.active = 1;
+        later.anchor();
+        let back = Session::parse(&later.to_ini());
+        assert_eq!(back.pane_tab_list(0), vec![r"C:\a".to_string(), r"C:\b".into()]);
+        assert_eq!(back.pane_cur[0], 1);
+        assert_eq!(back.paths[0], r"C:\b");
+        assert_eq!(back.pane_tab_list(1), vec![r"C:\c".to_string()]);
+        assert!(back.pane_tab_locked(1));
+        assert_eq!(back.pane_tab_names(1), vec!["Docs".to_string()]);
+        assert_eq!((back.views[1], back.cols[1].as_str()), ((4, 32), "name:1"));
+        assert_eq!(back.heights, vec![1, 1]);
     }
 
     #[test]

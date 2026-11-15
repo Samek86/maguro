@@ -8,8 +8,9 @@ use super::{apply_pane_tab_chrome, arm_tab_left, commit_layout, focus_view, go_n
 // The file list is not a grab: OLE drag-and-drop from the view is untouched.
 // Window-tab reorder is a different window and a different capture.
 // A drag that stays on a pane-tab body reorders that pane's tabs. Leaving the
-// strip before the slack is a pane move, and Ctrl then copies. Releasing Ctrl
-// mid-move returns to the move. A copy never leaves this window tab.
+// strip is a pane move, and Ctrl then copies. A pane tab from a pane that has
+// another tab, dropped on an edge, moves that tab into a new pane. Releasing
+// Ctrl mid-move returns to the move or the tab split. A copy never leaves this window tab.
 
 /// Drop preview when a copy would pass the grid caps. The move preview stays the accent.
 pub(crate) const COPY_BLOCK: u32 = 0xE23B3B;
@@ -78,7 +79,9 @@ struct DropHot {
 }
 
 fn hit_drop(a: &App) -> Option<DropHot> {
-    let from = a.pane_drag.as_ref()?.from;
+    let drag = a.pane_drag.as_ref()?;
+    let from = drag.from;
+    let tab = drag.tab;
     if a.zoom.is_some() {
         return None;
     }
@@ -90,21 +93,36 @@ fn hit_drop(a: &App) -> Option<DropHot> {
     let g = geo(a);
     let n = a.s.panes();
     let heights = &a.s.heights;
+    let count = a.s.pane_tab_list(from).len();
     // A move still ignores the pane it came from. A copy may land on that pane's own edge or centre.
-    let onto = (0..n).find(|&i| (copy || i != from) && inside(cell_rect(&g, heights, i), c.x, c.y))?;
+    // One tab out of several may also land on its own edge. Its centre stays a non-target.
+    let split_own = !copy && tab.is_some_and(|k| count >= 2 && k < count);
+    let onto = (0..n).find(|&i| {
+        let cell = cell_rect(&g, heights, i);
+        if !inside(cell, c.x, c.y) {
+            return false;
+        }
+        if copy || i != from {
+            return true;
+        }
+        split_own && pane_zone(cell, c.x, c.y).is_some_and(|z| z != DropZone::Center)
+    })?;
     let zone = pane_zone(cell_rect(&g, heights, onto), c.x, c.y)?;
-    let plan = drag_plan(copy, heights, &a.s.colr, &a.s.rowr, from, onto, zone)?;
+    let plan = drag_plan_tab(copy, heights, &a.s.colr, &a.s.rowr, from, onto, zone, tab.map(|k| (k, count)))?;
     let cells: Vec<RECT> = (0..n).map(|i| cell_rect(&g, heights, i)).collect();
     let preview = drop_preview(heights, &cells, onto, zone)?;
-    let blocked = matches!(plan, DragPlan::Copy(CopyDrop::Blocked));
+    let blocked = matches!(plan, DragPlan::Copy(CopyDrop::Blocked) | DragPlan::TabSplit(TabSplit::Blocked));
     Some(DropHot { onto, zone, preview, copy, blocked })
 }
 
-fn copy_hint(copy: bool, blocked: bool) -> String {
-    if !copy {
-        return String::new();
+fn drag_status(copy: bool, tab_move: bool, blocked: bool) -> String {
+    if copy {
+        return crate::tr(if blocked { crate::Key::CopyPaneBlocked } else { crate::Key::CopyPaneDrag }).to_string();
     }
-    crate::tr(if blocked { crate::Key::CopyPaneBlocked } else { crate::Key::CopyPaneDrag }).to_string()
+    if tab_move {
+        return crate::tr(if blocked { crate::Key::SplitTabBlocked } else { crate::Key::SplitTabDrag }).to_string();
+    }
+    String::new()
 }
 
 fn track_pane_drag() {
@@ -115,12 +133,14 @@ fn track_pane_drag() {
         let hot = hit_drop(a);
         let copy = hot.as_ref().is_some_and(|h| h.copy) || (hot.is_none() && ctrl_copy());
         let blocked = hot.as_ref().is_some_and(|h| h.blocked);
+        let from = a.pane_drag.as_ref().map(|d| d.from).unwrap_or(0);
+        let tab_move = !copy && a.pane_drag.as_ref().is_some_and(|d| d.tab.is_some()) && a.s.pane_tab_list(from).len() >= 2;
         if let Some(d) = a.pane_drag.as_mut() {
             d.copy = copy;
             d.blocked = blocked;
             d.hot = hot.as_ref().filter(|h| !h.blocked).map(|h| (h.onto, h.zone));
         }
-        let hint = copy_hint(copy, blocked);
+        let hint = drag_status(copy, tab_move, blocked);
         let hint_changed = a.drag_hint != hint;
         if hint_changed {
             a.drag_hint = hint;
@@ -206,10 +226,18 @@ pub(crate) unsafe fn pane_drag_move(h: HWND, x: i32, y: i32) {
                 return Some(PressStart::Reorder(pane, k));
             }
         }
-        let can_move = ctrl_copy() || a.s.panes() >= 2;
+        // One pane cannot start a whole-pane move. A tab body with another tab beside it can
+        // still leave the strip and split, and Ctrl can still copy.
+        let tabs = a.s.pane_tab_list(pane).len();
+        let splitting = matches!(grab, PaneGrab::Tab(_)) && tabs >= 2;
+        let can_move = ctrl_copy() || a.s.panes() >= 2 || splitting;
         if can_move {
             a.pane_press = None;
-            a.pane_drag = Some(PaneMove { hwnd: h, from: pane, hot: None, copy: false, blocked: false });
+            let tab = match grab {
+                PaneGrab::Tab(k) => Some(k),
+                _ => None,
+            };
+            a.pane_drag = Some(PaneMove { hwnd: h, from: pane, hot: None, copy: false, blocked: false, tab });
             return Some(PressStart::Move);
         }
         if let Some(p) = a.pane_press.as_mut() {
@@ -306,6 +334,8 @@ pub(crate) unsafe fn pane_drag_up(h: HWND) -> bool {
         if let Some((onto, zone)) = d.hot {
             if d.copy {
                 commit_pane_copy(d.from, onto, zone);
+            } else if let Some(tab) = d.tab {
+                commit_tab_split(d.from, tab, onto, zone);
             } else {
                 commit_pane_move(d.from, onto, zone);
             }
@@ -531,4 +561,187 @@ unsafe fn commit_tab_copy(src: usize, dst: usize) {
     note_save();
     set_active(dst);
     focus_view(dst);
+}
+
+struct PaneTabSnap {
+    folders: Vec<String>,
+    cur: usize,
+    locks: Vec<bool>,
+    names: Vec<String>,
+    path: String,
+}
+
+fn snap_pane_tabs(s: &Session, i: usize) -> PaneTabSnap {
+    PaneTabSnap {
+        folders: s.pane_folders.get(i).cloned().unwrap_or_default(),
+        cur: s.pane_cur.get(i).copied().unwrap_or(0),
+        locks: s.pane_locks.get(i).cloned().unwrap_or_default(),
+        names: s.pane_names.get(i).cloned().unwrap_or_default(),
+        path: s.paths.get(i).cloned().unwrap_or_default(),
+    }
+}
+
+fn restore_pane_tabs(s: &mut Session, i: usize, snap: &PaneTabSnap) {
+    s.ensure_pane_tabs();
+    if i >= MAXP {
+        return;
+    }
+    s.pane_folders[i] = snap.folders.clone();
+    s.pane_cur[i] = snap.cur;
+    s.pane_locks[i] = snap.locks.clone();
+    s.pane_names[i] = snap.names.clone();
+    if i < s.paths.len() {
+        s.paths[i] = snap.path.clone();
+    }
+}
+
+fn clear_tab_left(i: usize) {
+    app(|a| {
+        if let Some(p) = a.panes.get_mut(i).and_then(|p| p.as_mut()) {
+            p.tab_left = None;
+        }
+    });
+}
+
+/// Drop the cell `finish_tab_split` just added. Original ratios come back when the shape does.
+unsafe fn undo_split_pane(focus: usize, old_h: &[usize], old_c: &[f64], old_r: &[Vec<f64>]) {
+    let plan = app(|a| {
+        if focus >= a.s.panes() {
+            return None;
+        }
+        let change = close_pane_grid(&a.s.heights, focus)?;
+        let placed = place_grid(&change.slots, Some(focus), &a.home)?;
+        let ratios = (change.heights == old_h).then(|| (old_c.to_vec(), old_r.to_vec()));
+        Some((change.heights, placed.perm, placed.home, ratios))
+    });
+    let Some((heights, perm, home, ratios)) = plan else { return };
+    commit_layout(heights, Some((perm, home)), None, Some(focus), None, ratios);
+}
+
+/// Move one pane tab onto an edge. A centre drop, or a pane with one tab, is a whole-pane move.
+/// The new pane is opened before the tab leaves the source, so a folder that will not open
+/// leaves the source as it was.
+unsafe fn commit_tab_split(from: usize, tab: usize, onto: usize, zone: DropZone) {
+    enum Step {
+        Move,
+        Split {
+            heights: Vec<usize>,
+            colr: Vec<f64>,
+            rowr: Vec<Vec<f64>>,
+            slots: Vec<Option<usize>>,
+            showing: String,
+            moved: String,
+            old_h: Vec<usize>,
+            old_c: Vec<f64>,
+            old_r: Vec<Vec<f64>>,
+        },
+    }
+    let step = app(|a| {
+        if a.zoom.is_some() || from >= a.s.panes() {
+            return None;
+        }
+        let count = a.s.pane_tab_list(from).len();
+        match drag_plan_tab(false, &a.s.heights, &a.s.colr, &a.s.rowr, from, onto, zone, Some((tab, count))) {
+            Some(DragPlan::Move(_)) => Some(Step::Move),
+            Some(DragPlan::TabSplit(TabSplit::Split { heights, colr, rowr, slots })) => {
+                let list = a.s.pane_tab_list(from);
+                let moved = list.get(tab)?.clone();
+                Some(Step::Split {
+                    heights,
+                    colr,
+                    rowr,
+                    slots,
+                    showing: a.s.paths.get(from).cloned().unwrap_or_default(),
+                    moved,
+                    old_h: a.s.heights.clone(),
+                    old_c: a.s.colr.clone(),
+                    old_r: a.s.rowr.clone(),
+                })
+            }
+            _ => None,
+        }
+    });
+    match step {
+        Some(Step::Move) => commit_pane_move(from, onto, zone),
+        Some(Step::Split { heights, colr, rowr, slots, showing, moved, old_h, old_c, old_r }) => {
+            finish_tab_split(from, tab, showing, moved, heights, colr, rowr, slots, old_h, old_c, old_r);
+        }
+        None => {}
+    }
+}
+
+unsafe fn finish_tab_split(
+    from: usize,
+    tab: usize,
+    showing: String,
+    moved: String,
+    heights: Vec<usize>,
+    colr: Vec<f64>,
+    rowr: Vec<Vec<f64>>,
+    slots: Vec<Option<usize>>,
+    old_h: Vec<usize>,
+    old_c: Vec<f64>,
+    old_r: Vec<Vec<f64>>,
+) {
+    let Some(focus) = slots.iter().position(|s| s.is_none()) else { return };
+    let Some(src_after) = slots.iter().position(|s| *s == Some(from)) else { return };
+    let Some((perm, home, fresh)) = app(|a| {
+        let placed = place_grid(&slots, None, &a.home)?;
+        Some((placed.perm, placed.home, placed.fresh_old?))
+    }) else {
+        return;
+    };
+    // Same seed as a copy split: the new cell inherits this pane's folder, view, sort and columns.
+    commit_layout(heights, Some((perm, home)), Some((from, fresh)), None, Some(focus), Some((colr, rowr)));
+
+    let created = app(|a| a.s.paths.get(focus).cloned().unwrap_or_default());
+    if !super::recent::same_dir(&created, &moved) {
+        // Browse before the source gives the tab up. A failure closes the new cell and leaves the source.
+        let armed = app(|a| a.panes.get_mut(focus).and_then(|p| p.as_mut()).is_some_and(|p| arm_tab_left(p, &created)));
+        if !go_near(focus, &moved) {
+            if armed {
+                clear_tab_left(focus);
+            }
+            undo_split_pane(focus, &old_h, &old_c, &old_r);
+            _ = MessageBeep(MB_ICONWARNING);
+            return;
+        }
+    }
+
+    let (src_on, dst_on, snap, moved_tab) = app(|a| {
+        let src_on = a.s.pane_strip_on(src_after);
+        let dst_on = a.s.pane_strip_on(focus);
+        let snap = snap_pane_tabs(&a.s, src_after);
+        let moved_tab = a.s.move_pane_tab(src_after, tab, focus);
+        (src_on, dst_on, snap, moved_tab)
+    });
+    let Some(moved_tab) = moved_tab else {
+        undo_split_pane(focus, &old_h, &old_c, &old_r);
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    };
+
+    if let Some(to) = moved_tab.src_browse {
+        let armed = app(|a| a.panes.get_mut(src_after).and_then(|p| p.as_mut()).is_some_and(|p| arm_tab_left(p, &showing)));
+        if !go_near(src_after, &to) {
+            app(|a| restore_pane_tabs(&mut a.s, src_after, &snap));
+            if armed {
+                clear_tab_left(src_after);
+            }
+            undo_split_pane(focus, &old_h, &old_c, &old_r);
+            _ = MessageBeep(MB_ICONWARNING);
+            return;
+        }
+    }
+
+    app(|a| {
+        a.s.anchor();
+        let _ = pull_dirty(a);
+    });
+    apply_pane_tab_chrome(src_after, src_on);
+    apply_pane_tab_chrome(focus, dst_on);
+    refresh_save_button();
+    note_save();
+    set_active(focus);
+    focus_view(focus);
 }

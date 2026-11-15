@@ -462,7 +462,7 @@ fn bar_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe { DefWindowProcW(h, msg, wp, lp) }
 }
 
-/// The drop preview keeps the class brush as the accent. A blocked copy paints red here instead.
+/// The drop preview keeps the class brush as the accent. A blocked copy or tab split paints red here instead.
 unsafe fn paint_drop_overlay(h: HWND, msg: u32, wp: WPARAM, rgb: u32) -> LRESULT {
     let mut rc = RECT::default();
     _ = GetClientRect(h, &mut rc);
