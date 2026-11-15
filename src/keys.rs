@@ -117,6 +117,8 @@ const CMDS: &[Cmd] = &[
     // Ctrl+B is Favourites. Ctrl+Shift+B toggles the basket; Ctrl+Alt+B adds the selection.
     cmd("file.basket", FILE, crate::Key::FileBasket, 0x42, true, true, false, false, false),
     cmd("file.basket.add", FILE, crate::Key::AddSelectionToBasket, 0x42, true, false, true, false, false),
+    // Ctrl+S is Save this tab. Alt leaves that chord free for the important-mark toggle.
+    cmd("file.mark", FILE, crate::Key::MarkAsImportant, 0x53, true, false, true, false, false),
     // Show in folder, only while the pane is showing Recent files. Elsewhere the key is forwarded.
     cmd("file.reveal", FILE, crate::Key::ShowInFolder, 0x0D, true, false, false, false, false),
     cmd("sess.save", SESS, crate::Key::SaveThisTab, 0x53, true, false, false, false, false),

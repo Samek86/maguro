@@ -892,11 +892,17 @@ pub(crate) enum Key {
     SplitTabBlocked,
     VerticalTabs,
     VerticalTabsDesc,
+    MarkAsImportant,
+    RemoveImportantMark,
+    ShowImportantMarkStars,
+    ShowImportantMarkStarsDesc,
+    ImportantCount,
+    ImportantMarksFull,
 }
 
-pub(crate) const KEY_COUNT: usize = 887;
+pub(crate) const KEY_COUNT: usize = 893;
 
-const _: () = assert!((Key::VerticalTabsDesc as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::ImportantMarksFull as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1786,6 +1792,12 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Can't split this tab here: 4 columns, 4 rows in a column, or 16 panes",
     "Vertical tabs",
     "Window tabs in a column between the favourites panel and the panes. Off keeps them on the top row.",
+    "Mark as important",
+    "Remove important mark",
+    "Show important-mark stars",
+    "Stars on marked files and folders. Off hides the stars and keeps the marks. On by default.",
+    "{n} important",
+    "Important marks are full (20,000).",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2677,4 +2689,10 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "split_tab_blocked",
     "vertical_tabs",
     "vertical_tabs_desc",
+    "mark_as_important",
+    "remove_important_mark",
+    "show_important_mark_stars",
+    "show_important_mark_stars_desc",
+    "important_count",
+    "important_marks_full",
 ];

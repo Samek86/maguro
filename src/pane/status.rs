@@ -365,7 +365,8 @@ pub(crate) unsafe fn update_status() {
     let rev = SEL_REV[i].load(Ordering::Relaxed);
     let (show, net) = app(|a| (a.s.folder_sizes, a.s.folder_sizes_network));
     super::set_opts(show, net);
-    let key = format!("{i}|{path}|{n}|{sel}|{}|{spec}|{busy}|{zoom:?}|{rev}|{show}|{net}|{trust}", fv.GetFocusedItem().unwrap_or(-1));
+    let marked = crate::marks::count_in_folder(&path);
+    let key = format!("{i}|{path}|{n}|{sel}|{}|{spec}|{busy}|{zoom:?}|{rev}|{show}|{net}|{trust}|{marked}", fv.GetFocusedItem().unwrap_or(-1));
     if app(|a| a.status_key != key) {
         status_base(i, &path, main, &fv, n, sel, &spec, busy, zoom, trust);
         app(|a| a.status_key = key);
@@ -445,6 +446,10 @@ pub(crate) unsafe fn status_base(i: usize, path: &str, main: HWND, fv: &IFolderV
             }
         }
         parts.push(tf(Key::SelectedCount, &[("sel", &sel.to_string())]));
+    }
+    let marked = crate::marks::count_in_folder(path);
+    if marked > 0 {
+        parts.push(tf(Key::ImportantCount, &[("n", &marked.to_string())]));
     }
     if show {
         if !size_job().target.is_empty() {

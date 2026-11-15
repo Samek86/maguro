@@ -689,6 +689,7 @@ fn copy_shared(dst: &mut Session, src: &Session) {
     dst.remember_views = src.remember_views;
     dst.folder_sizes = src.folder_sizes;
     dst.folder_sizes_network = src.folder_sizes_network;
+    dst.show_mark_stars = src.show_mark_stars;
     dst.peek_image = src.peek_image;
     dst.peek_doc = src.peek_doc;
     dst.hotkey = src.hotkey;

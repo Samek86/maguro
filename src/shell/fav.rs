@@ -1219,6 +1219,9 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     insert_excel_idx(menu, &verbs);
     // Directly under Open in Terminal, with that row's enabled state.
     insert_term_admin_idx(menu, &verbs);
+    if !background && !items.is_empty() {
+        super::ctxmenu::insert_mark_item(menu, items);
+    }
     super::ctxmenu::dump_menu_items(if background { "background" } else if items.first().is_some_and(|(_, f)| !*f) { "folder" } else { "file" }, menu);
     super::ctxmenu::log_phase("total-pre", t_pre);
     MENU_BRIDGE.with(|b| {
@@ -1249,6 +1252,8 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
         if let Some(folder) = super::termadmin::folder() {
             super::termadmin::launch(owner, &folder);
         }
+    } else if cmd == super::ctxmenu::ID_CTX_MARK as i32 {
+        crate::marks::toggle_items(items);
     } else if cmd == ID_CTX_BATCH as i32 {
         // The pane's own menu can re-read the selection in view order. Search results pass their paths.
         if pane_selection {

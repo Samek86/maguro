@@ -364,6 +364,8 @@ pub(crate) struct Session {
     pub(crate) folder_sizes: bool,
     /// Also size UNC and mapped drives. Missing means off. WSL is sized either way.
     pub(crate) folder_sizes_network: bool,
+    /// Stars for important marks. Missing means on. Off hides the stars and keeps the marks.
+    pub(crate) show_mark_stars: bool,
     /// Quick look size in DIP after the user resizes, per kind. Empty means fit the file.
     /// The maximized rect is not stored. `peek_doc` is text and PDF together.
     pub(crate) peek_image: Option<(i32, i32)>,
@@ -566,6 +568,7 @@ impl Default for Session {
             remember_views: true,
             folder_sizes: true,
             folder_sizes_network: false,
+            show_mark_stars: true,
             peek_image: None,
             peek_doc: None,
             pane_folders: vec![Vec::new(); MAXP],
@@ -666,6 +669,7 @@ impl PartialEq for Session {
             && self.remember_views == o.remember_views
             && self.folder_sizes == o.folder_sizes
             && self.folder_sizes_network == o.folder_sizes_network
+            && self.show_mark_stars == o.show_mark_stars
             && self.peek_image == o.peek_image
             && self.peek_doc == o.peek_doc
             && self.hotkey == o.hotkey
@@ -1128,6 +1132,7 @@ impl Session {
                 "folderview" => s.remember_views = v.trim() != "0",
                 "foldersize" => s.folder_sizes = v.trim() != "0",
                 "foldersizenet" => s.folder_sizes_network = v.trim() == "1",
+                "markstars" => s.show_mark_stars = v.trim() != "0",
                 "hotkey" => s.hotkey = v.trim() != "0",
                 "dialogjump" => s.dialog_jump = v.trim() != "0",
                 "cliphotkey" => s.clip_hotkey = v.trim() != "0",
@@ -1263,7 +1268,7 @@ impl Session {
             o += &format!("bootf={}\n", self.boot_file);
         }
         o += &format!("autosave={}\ndot={}\nupcheck={}\n", self.autosave as u8, self.dot as u8, self.update_check as u8);
-        o += &format!("dblup={}\nhotkey={}\nlang={}\nsingle={}\nonewindow={}\neverything={}\nevasked={}\nremoteasked={}\nspacepreview={}\npeekwheelnav={}\nfolderview={}\nfoldersize={}\nfoldersizenet={}\ndialogjump={}\ncliphotkey={}\n", self.dblup as u8, self.hotkey as u8, self.lang.ini(), self.single as u8, self.one_window as u8, self.use_everything as u8, self.ev_asked as u8, self.remote_asked as u8, self.space_preview as u8, self.peek_wheel_nav as u8, self.remember_views as u8, self.folder_sizes as u8, self.folder_sizes_network as u8, self.dialog_jump as u8, self.clip_hotkey as u8);
+        o += &format!("dblup={}\nhotkey={}\nlang={}\nsingle={}\nonewindow={}\neverything={}\nevasked={}\nremoteasked={}\nspacepreview={}\npeekwheelnav={}\nfolderview={}\nfoldersize={}\nfoldersizenet={}\nmarkstars={}\ndialogjump={}\ncliphotkey={}\n", self.dblup as u8, self.hotkey as u8, self.lang.ini(), self.single as u8, self.one_window as u8, self.use_everything as u8, self.ev_asked as u8, self.remote_asked as u8, self.space_preview as u8, self.peek_wheel_nav as u8, self.remember_views as u8, self.folder_sizes as u8, self.folder_sizes_network as u8, self.show_mark_stars as u8, self.dialog_jump as u8, self.clip_hotkey as u8);
         if !self.winmerge_path.trim().is_empty() {
             o += &format!("winmerge={}\n", self.winmerge_path.trim());
         }

@@ -128,6 +128,8 @@ fn main() -> Result<()> {
         }
 
         OleInitialize(None)?; // OLE (not just COM) for drag & drop
+        // marks.json only. A second process that hands off and exits does not reach this.
+        crate::marks::load_live();
         if let Some(f) = session_arg(&args) {
             match std::fs::read_to_string(f) {
                 Ok(t) => {

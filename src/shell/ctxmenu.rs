@@ -86,6 +86,9 @@ const FIXED: &[(&str, u8)] = &[
 const BASE_END: u32 = 0x3000;
 const SLOT: u32 = 0x100;
 const VERB_BASE: u32 = 0x7000;
+/// Important-mark toggle. Outside the shell id range, same as the other Maguro rows.
+pub(crate) const ID_CTX_MARK: u32 = 0x8009;
+const MARK_COMMAND: &str = "maguro:mark";
 const VERB_END: u32 = 0x7F00;
 const KEY_CAP: usize = 16;
 
@@ -988,6 +991,23 @@ fn push_mark(names: &mut Vec<String>, text: &str) {
         return;
     }
     names.push(key);
+}
+
+/// One item at the top of the file or folder menu. The shell menu is left in place.
+pub(crate) unsafe fn insert_mark_item(menu: HMENU, items: &[(String, bool)]) {
+    if items.is_empty() {
+        return;
+    }
+    if let Some(i) = crate::menu_index(menu, ID_CTX_MARK as usize) {
+        let _ = DeleteMenu(menu, i, MF_BYPOSITION);
+    }
+    let (text, on) = crate::marks::menu_parts(items);
+    let mut flags = MF_STRING | MF_BYPOSITION;
+    if !on {
+        flags |= MF_GRAYED;
+    }
+    let label = HSTRING::from(text);
+    let _ = InsertMenuW(menu, 0, flags, ID_CTX_MARK as usize, &label);
 }
 
 /// Maguro appends its own commands at 0x8000 and above. The shell's range stops at 0x7FFF.
@@ -2354,6 +2374,18 @@ impl CtxHost {
             }
             verb_id += 1;
         }
+        if !self.paths.is_empty() && verb_id < VERB_END && verb_id < id_last {
+            let items: Vec<(String, bool)> = self.paths.iter().cloned().map(|p| (p, true)).collect();
+            let (text, on) = crate::marks::menu_parts(&items);
+            let mut flags = MF_STRING | MF_BYPOSITION;
+            if !on {
+                flags |= MF_GRAYED;
+            }
+            let label = HSTRING::from(text);
+            if InsertMenuW(menu, index_menu, flags, verb_id as usize, &label).is_ok() {
+                self.verbs.borrow_mut().push(VerbSlot { id: verb_id, command: MARK_COMMAND.into() });
+            }
+        }
         log_phase("verbs", t_verb);
         HRESULT(0x200)
     }
@@ -2371,6 +2403,11 @@ impl CtxHost {
         // popup_ctx queries with id 1, then passes menu_id - 1.
         let menu_id = offset.saturating_add(1);
         if let Some(slot) = self.verbs.borrow().iter().find(|v| v.id == menu_id) {
+            if slot.command == MARK_COMMAND {
+                let items: Vec<(String, bool)> = self.paths.iter().cloned().map(|p| (p, true)).collect();
+                crate::marks::toggle_items(&items);
+                return Ok(());
+            }
             run_command((*pici).hwnd, &slot.command, &self.paths);
             return Ok(());
         }
