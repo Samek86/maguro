@@ -214,6 +214,16 @@ While another app's Open or Save dialog is in front, **Ctrl+Alt+G** lists folder
 
 <p align="center"><img width="420" alt="Dialog Jump picking a Maguro folder" src="docs/images-v8/en/dialog_jump.png"></p>
 
+### 20. Important marks
+
+Right-click a file or folder → **Mark as important**, or press **Ctrl+Alt+S**. The same command is **Remove important mark** when the selection is already marked. If several items are selected and any of them is unmarked, Maguro marks the selection; if every one is already marked, it clears them. **Show important-mark stars** (on by default) draws or hides a small gold star on marked files and folders in the folder pane. Hiding the stars keeps the marks. The status bar shows how many are in the open folder, such as **2 important**. Maguro draws the star itself. It is not a shell icon overlay, and nothing is written to the registry. A marked folder does not mark the files inside it.
+
+<p align="center"><img width="720" alt="Gold stars on marked files and a folder" src="docs/images-v8/common/feature_marks.png"></p>
+
+The mark follows a rename, a move, and the Recycle Bin, including a restore while Maguro is running. A copy is not marked. A mark whose file cannot be found becomes missing and is dropped after 180 days, or sooner from the list. Gear menu → **Important list** (**Ctrl+Shift+I**) can search, open the folder, remove a mark, clean up missing items, and export or import marks. Settings export, import, and reset leave marks alone. Marks live in `marks.json` next to settings (`%APPDATA%\Maguro\marks.json`, or beside the exe when `portable.txt` is present), separate from `maguro.json`. The first save of each day copies the previous file to `marks.json.bak`. If `marks.json` cannot be read, Maguro leaves it unchanged and the list window says why and shows the path.
+
+<p align="center"><img width="640" alt="Important list with search, states, and export" src="docs/images-v8/common/feature_marks_list.png"></p>
+
 ### Themes & accent
 
 Light and dark that follow Windows, six accent swatches per theme or a custom colour (default cerulean `#0A9BD6`), and a settings window in English, 日本語, and 한국어.
@@ -263,6 +273,8 @@ Defaults. A chord that appears under Settings → Shortcuts can be changed there
 |  | Ctrl+Shift+B | File basket |
 |  | Ctrl+Alt+B | Add selection to basket |
 |  | Ctrl+Shift+W | Folder watch |
+|  | Ctrl+Alt+S | Mark as important, or remove the mark |
+|  | Ctrl+Shift+I | Important list |
 |  | Alt+Z | Open a clipboard folder as a new tab and bring Maguro forward, or a file with its default app |
 |  | Ctrl+Shift+R | Batch rename |
 |  | Ctrl+Alt+R | Recent files (Windows Recent, newest first) |
