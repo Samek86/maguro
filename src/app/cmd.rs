@@ -649,7 +649,7 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
     }
     if let Some(i) = crate::keys::lookup(vk, ctrl, shift, alt, win) {
         let id = crate::keys::id_of(i);
-        if matches!(id, "app.keys" | "view.peek" | "view.preview" | "app.front" | "dialog.jump" | "clip.open" | "view.gather" | "view.recentfiles" | "file.mkdir" | "file.winmerge" | "file.reveal" | "file.basket" | "file.basket.add" | "ws.load" | "ws.save" | "watch.open" | "tab.list") && m.lParam.0 & (1 << 30) != 0 {
+        if matches!(id, "app.keys" | "view.peek" | "view.preview" | "app.front" | "dialog.jump" | "clip.open" | "view.gather" | "view.recentfiles" | "file.mkdir" | "file.winmerge" | "file.reveal" | "file.basket" | "file.basket.add" | "file.mark" | "ws.load" | "ws.save" | "watch.open" | "tab.list") && m.lParam.0 & (1 << 30) != 0 {
             return true;
         }
         // Pane-tab chords stay out of the address bar (already returned) and out of every other focus,
@@ -822,6 +822,7 @@ unsafe fn dispatch(id: &str, vk: u16, a: usize, list: bool, shell: impl Fn() -> 
         "file.winmerge" => crate::winmerge::run_folders(app(|x| x.main), None),
         "file.basket" => crate::basket::toggle(),
         "file.basket.add" => crate::basket::add_active_selection(),
+        "file.mark" => crate::marks::toggle_pane(a),
         "file.reveal" => {
             if !crate::pane::recent::locked(a) {
                 return shell();

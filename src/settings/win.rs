@@ -1634,6 +1634,11 @@ fn flip(id: u8) {
             unsafe { toggle_default_folder_app(hwnd()) };
             return;
         }
+        // Off hides the future star overlay. The marks in marks.json stay.
+        TG_MARKS => {
+            app(|a| a.s.show_mark_stars ^= true);
+            crate::publish_shared();
+        }
         _ => return,
     }
     unsafe {

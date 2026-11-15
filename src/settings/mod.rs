@@ -75,6 +75,7 @@ const TG_SIDE_FAV: u8 = 28;
 const TG_SIDE_TREE: u8 = 29;
 const TG_CTX_LOG: u8 = 30;
 const TG_VTABS: u8 = 31;
+const TG_MARKS: u8 = 32;
 
 const CB_SETMINVISIBLE: u32 = 0x1701;
 const EM_SETCUEBANNER: u32 = 0x1501;
@@ -241,6 +242,7 @@ const VIEW: &[Spec] = &[
     Spec { title: crate::Key::ShowHiddenFiles, desc: crate::Key::SameAsCtrlH, live: true, ctl: Ctl::Toggle(TG_HIDDEN) },
     Spec { title: crate::Key::ShowFileExtensions2, desc: crate::Key::ThisIsWindowsOwnSettingSoExplorer, live: true, ctl: Ctl::Toggle(TG_EXT) },
     Spec { title: crate::Key::ShowFolderSizes, desc: crate::Key::StatusBarShowsTotalOfSelectedFolder, live: true, ctl: Ctl::Toggle(TG_FSIZE) },
+    Spec { title: crate::Key::ShowImportantMarkStars, desc: crate::Key::ShowImportantMarkStarsDesc, live: true, ctl: Ctl::Toggle(TG_MARKS) },
     Spec { title: crate::Key::FolderSizesForNetworkFolders, desc: crate::Key::UncAndMappedDrivesOffByDefault, live: true, ctl: Ctl::Toggle(TG_FSIZE_NET) },
     Spec { title: crate::Key::ShowLeftPanel, desc: crate::Key::FavouritesAndFolderTreeShareItDrag, live: true, ctl: Ctl::Toggle(TG_TREE) },
     Spec { title: crate::Key::LeftPanelOrder, desc: crate::Key::FavouritesOnTopOrFolderTreeOn, live: true, ctl: Ctl::SideOrder },
@@ -1357,6 +1359,7 @@ fn toggle_on(id: u8) -> bool {
         TG_REMEMBER => app(|a| a.s.remember_views),
         TG_FSIZE => app(|a| a.s.folder_sizes),
         TG_FSIZE_NET => app(|a| a.s.folder_sizes_network),
+        TG_MARKS => app(|a| a.s.show_mark_stars),
         TG_FAST => app(|a| a.s.fast_copy),
         TG_DIALOG => app(|a| a.s.dialog_jump),
         TG_CLIP => app(|a| a.s.clip_hotkey),

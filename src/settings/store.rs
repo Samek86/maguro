@@ -395,6 +395,9 @@ struct SettingsFile {
     /// Size UNC and mapped drives. Missing means off. Omitted while off.
     #[serde(default, skip_serializing_if = "is_off")]
     folder_sizes_network: bool,
+    /// Stars on important marks. Missing means on. Off keeps the marks. Omitted while on.
+    #[serde(default = "yes", skip_serializing_if = "is_on")]
+    show_mark_stars: bool,
     /// Quick look window size in DIP, per kind. Omitted until the user resizes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     peek: Option<PeekJson>,
@@ -554,6 +557,7 @@ impl SettingsFile {
             remember_folder_view: true,
             show_folder_sizes: true,
             folder_sizes_network: false,
+            show_mark_stars: true,
             peek: None,
             ev_asked: false,
             ev_sort: 1,
@@ -675,6 +679,7 @@ impl SettingsFile {
             remember_folder_view: s.remember_views,
             show_folder_sizes: s.folder_sizes,
             folder_sizes_network: s.folder_sizes_network,
+            show_mark_stars: s.show_mark_stars,
             peek: peek_json(s),
             ev_asked: s.ev_asked,
             ev_sort: crate::everything::ev_sort_ok(s.ev_sort),
@@ -755,6 +760,7 @@ impl SettingsFile {
         self.extra.remove("remember_folder_view");
         self.extra.remove("show_folder_sizes");
         self.extra.remove("folder_sizes_network");
+        self.extra.remove("show_mark_stars");
         self.extra.remove("fast_copy");
         self.extra.remove("layout_new");
         self.extra.remove("ctx_menu");
@@ -878,6 +884,7 @@ impl SettingsFile {
         s.remember_views = self.remember_folder_view;
         s.folder_sizes = self.show_folder_sizes;
         s.folder_sizes_network = self.folder_sizes_network;
+        s.show_mark_stars = self.show_mark_stars;
         s.peek_image = self.peek.as_ref().and_then(|p| peek_pair(p.image));
         s.peek_doc = self.peek.as_ref().and_then(|p| peek_pair(p.doc));
         s.ev_asked = self.ev_asked;
@@ -2449,6 +2456,23 @@ mod tests {
         assert_eq!(saved["folder_sizes_network"], true);
         assert_eq!(saved["future_flag"], 1);
         assert!(saved.get("extra").is_none());
+    }
+
+    #[test]
+    fn important_mark_stars_default_on_and_round_trip() {
+        assert!(Session::default().show_mark_stars);
+        assert!(adopt("{}").unwrap().show_mark_stars);
+        assert!(Session::parse("side=1\n").show_mark_stars);
+        assert!(!Session::parse("markstars=0").show_mark_stars);
+        assert!(Session::parse("markstars=1").show_mark_stars);
+        let mut s = Session::default();
+        s.show_mark_stars = false;
+        assert!(!Session::parse(&s.to_ini()).show_mark_stars);
+        let text = pretty(&SettingsFile::from_session(&s));
+        assert!(text.contains("\"show_mark_stars\": false"), "{text}");
+        assert!(!adopt(&text).unwrap().show_mark_stars);
+        let def = pretty(&SettingsFile::from_session(&Session::default()));
+        assert!(!def.contains("show_mark_stars"), "{def}");
     }
 
     #[test]
