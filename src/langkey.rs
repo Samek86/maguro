@@ -890,11 +890,13 @@ pub(crate) enum Key {
     PaneNumTip,
     SplitTabDrag,
     SplitTabBlocked,
+    VerticalTabs,
+    VerticalTabsDesc,
 }
 
-pub(crate) const KEY_COUNT: usize = 885;
+pub(crate) const KEY_COUNT: usize = 887;
 
-const _: () = assert!((Key::SplitTabBlocked as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::VerticalTabsDesc as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1782,6 +1784,8 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu",
     "Moving this tab. An edge splits it into a new pane; the centre moves the whole pane",
     "Can't split this tab here: 4 columns, 4 rows in a column, or 16 panes",
+    "Vertical tabs",
+    "Window tabs in a column between the favourites panel and the panes. Off keeps them on the top row.",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2671,4 +2675,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "pane_num_tip",
     "split_tab_drag",
     "split_tab_blocked",
+    "vertical_tabs",
+    "vertical_tabs_desc",
 ];

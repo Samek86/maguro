@@ -419,6 +419,8 @@ pub(crate) struct Session {
     pub(crate) bar: bool,              // tab-row icons and drive buttons
     /// Drive-letter buttons on the tab row. Off hides them and gives that width to the tabs. Missing means on.
     pub(crate) drive_buttons: bool,
+    /// Window tabs between the favourites panel and the panes. Off keeps the top row. Missing from the file means off.
+    pub(crate) vertical_tabs: bool,
     pub(crate) view_new: i32,          // FOLDERVIEWMODE for a pane that has none yet (see EXPLORER_VIEWS)
     pub(crate) view_icon: i32,         // icon size beside view_new; 0 = that mode's usual size (large icons are 96)
     pub(crate) start_new: u8,          // 0 This PC, 1 Desktop, 2 start_path
@@ -591,6 +593,7 @@ impl Default for Session {
             font_face: String::new(),
             bar: true,
             drive_buttons: true,
+            vertical_tabs: false,
             view_new: 4,
             view_icon: 0,
             start_new: 0,
@@ -684,6 +687,7 @@ impl PartialEq for Session {
             && self.font_face == o.font_face
             && self.bar == o.bar
             && self.drive_buttons == o.drive_buttons
+            && self.vertical_tabs == o.vertical_tabs
             && self.view_new == o.view_new
             && self.view_icon == o.view_icon
             && self.start_new == o.start_new
@@ -1064,6 +1068,7 @@ impl Session {
                 "font" => {}
                 "bar" => s.bar = v.trim() != "0",
                 "drivebuttons" => s.drive_buttons = v.trim() != "0",
+                "verticaltabs" => s.vertical_tabs = v.trim() == "1",
                 // Retired show/hide switch. The status line is always on. The key is ignored and not written back.
                 "stat" => {}
                 "viewnew" => s.view_new = match v.trim() {
@@ -1212,6 +1217,9 @@ impl Session {
         }
         if self.preview_on {
             o += "previewpane=1\n";
+        }
+        if self.vertical_tabs {
+            o += "verticaltabs=1\n";
         }
         if self.preview_w > 0 {
             o += &format!("previeww={}\n", self.preview_w);

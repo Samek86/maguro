@@ -250,7 +250,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     let min_w = pane_min_w(a.dpi);
                     let min_h = pane_min_h(a.dpi);
                     match d {
-                        Hit::Side => a.s.side = x - g.gap / 2,
+                        Hit::Side => a.s.side = side_drag_width(x, g.gap),
                         Hit::SideSplit => a.s.side_split = tree_share_at(y - g.gap / 2, g.top, g.bot - g.top, g.gap, side_min(a.dpi), a.s.fav_top),
                         Hit::Col(k) => {
                             let len = g.w - g.pad - g.gx;
@@ -659,13 +659,17 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 pub(crate) unsafe fn paint_main(h: HWND) {
     // Caption colours follow the theme on the same paint that fills the client.
     style_dialog_caption(h);
-    let (g, status, font, dpi, hot, accent) = app(|a| {
+    let (g, status, font, dpi, hot, accent, vertical) = app(|a| {
         let g = geo(a);
         let hot = a.gap_hot.filter(|_| a.drag.is_none()).and_then(|d| gap_line(&g, d, 2 * a.dpi / 96));
-        (g, a.status.clone(), a.font, a.dpi, hot.map(|r| (r, a.s.accent_now())), a.s.accent_now())
+        (g, a.status.clone(), a.font, a.dpi, hot.map(|r| (r, a.s.accent_now())), a.s.accent_now(), a.s.vertical_tabs)
     });
     buffered(h, |dc, rc| {
         paint_window(dc, rc);
+        // The top row is the toolbar once the tabs leave it. The strip used to paint this line.
+        if vertical && g.top > 0 {
+            fill(dc, RECT { left: 0, top: g.top - 1, right: g.w, bottom: g.top }, pal().line);
+        }
         if g.side > 0 {
             let side = side_rect(&g);
             fill(dc, side, side_ground());

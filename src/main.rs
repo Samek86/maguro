@@ -368,7 +368,7 @@ mod tests {
         // An older file has dark= and no theme=. That stays an explicit choice, and new keys keep defaults.
         let old = Session::parse("dark=1\ndblup=1\n");
         assert_eq!(old.theme, 2);
-        assert!(old.dark && old.bar && old.dot && old.drive_buttons && old.space_preview);
+        assert!(old.dark && old.bar && old.dot && old.drive_buttons && old.space_preview && !old.vertical_tabs);
         assert_eq!(old.layout_new, 0);
         let t = Session::parse("theme=auto\ndark=1\nfont=2\nbar=0\nstat=0\nviewnew=1\nstart=2\nstartp=C:\\Work\next=0\ntree=0\nedge=0\nconfirm=0\ndel=1\nnewname=note.txt\ndrop=1\nboot=1\nbootf=C:\\s.maguro\nautosave=1\ndot=0\nfav=C:\\WORK\tWork\n");
         assert_eq!(t.theme, 0);
