@@ -44,6 +44,7 @@ pub(crate) const ID_REVEAL: usize = 1123; // show the selected recent file in it
 pub(crate) const ID_SESS_SAVE: usize = 1130; // gear: save the current tab
 pub(crate) const ID_SESS_OPEN: usize = 1131; // gear: open a saved tab as a new tab
 pub(crate) const ID_WATCH: usize = 1132; // gear: folder watch
+pub(crate) const ID_MARKS_LIST: usize = 1137; // gear: important marks list
 pub(crate) const ID_SIDE_FAV: usize = 1135; // View: favourites half of the left panel
 pub(crate) const ID_SIDE_TREE: usize = 1136; // View: folder-tree half of the left panel
 pub(crate) const WM_WATCH: u32 = WM_APP + 75; // a watch thread posted a burst or a status (avoid preview 70-72)
