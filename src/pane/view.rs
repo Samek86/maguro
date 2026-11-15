@@ -581,7 +581,18 @@ pub(crate) unsafe fn end_drag() {
             relayout();
             redraw_all();
         });
-        note_save();
+        if kind == Hit::VTab {
+            // The session width changes only here. A timer armed by the previous edit would
+            // otherwise flush the old value while this drag is in progress, and the new value
+            // would wait out another debounce. Write it as the button goes up.
+            let main = app(|a| a.main);
+            if !main.0.is_null() {
+                _ = KillTimer(Some(main), TIMER_SAVE);
+            }
+            save_session();
+        } else {
+            note_save();
+        }
     }
 }
 
