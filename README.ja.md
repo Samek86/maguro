@@ -16,7 +16,7 @@
   <a href="https://github.com/Samek86/maguro"><img alt="プラットフォーム: Windows" src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white"></a>
   <a href="LICENSE"><img alt="ライセンス: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <a href="https://github.com/Samek86/maguro"><img alt="言語: Rust" src="https://img.shields.io/badge/language-Rust-000000?logo=rust&logoColor=white"></a>
-  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="リリース 0.2.22" src="https://img.shields.io/badge/release-0.2.22-0A9BD6"></a>
+  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="リリース 0.2.23" src="https://img.shields.io/badge/release-0.2.23-0A9BD6"></a>
 </p>
 
 <p align="center">
@@ -104,11 +104,15 @@
 
 <p align="center"><img width="760" alt="ウィンドウタブとペインタブ" src="docs/images-v8/ja/tabs.png"></p>
 
-### 3. タブの固定名・ロック・色
+### 3. 縦のウィンドウタブ
+
+ウィンドウのタブ一覧を、お気に入りパネルの右に縦に並べられます（設定 → 外観 → タブを縦に並べる。既定はオフ）。右端をドラッグして幅を変え、端をダブルクリックすると元の幅に戻ります。幅は記憶されます。
+
+### 4. タブの固定名・ロック・色
 
 タブをダブルクリック、または右クリック → 名前の変更で好きな名前を固定できます。ロックすれば誤って閉じにくくなります。色を付けると、関連する作業が一目で分かります。
 
-### 4. ペインをドラッグして移動 — Ctrl+ドラッグでコピー
+### 5. ペインをドラッグして移動 — Ctrl+ドラッグでコピー
 
 ペイン番号バッジかヘッダーをつまんでドラッグします。別ペインの中央に落とすと二つが入れ替わります。端に落とすとそのペインが分割されます。**Ctrl** を押しながらドラッグすると、今のペイン タブをコピーします。端では対象を分割してこのペインは残り、中央ではそのセルにペイン タブを追加します。
 
@@ -118,13 +122,13 @@
 </p>
 <p align="center"><img width="560" alt="Ctrl+ドラッグでペインを複製" src="docs/images-v8/common/panedrag_dup.png"></p>
 
-### 5. ペインごとの色
+### 6. ペインごとの色
 
 ペインごとにアクセント色を付けられます。ソースと行き先を間違えにくい、忙しいマルチペイン向きの仕込みです。
 
 <p align="center"><img width="760" alt="ペインごとの色" src="docs/images-v8/ja/pane_colors.png"></p>
 
-### 6. 速さのための設計
+### 7. 速さのための設計
 
 このポータブルデモでのコールドスタート実測は **607 ms**。ネットワークフォルダへの貼り付けやドラッグは robocopy を使えます（設定 → ファイル操作。既定はオフ）。右クリック → 高速貼り付けは常にこちらで、Maguro 独自の進捗と上書き／スキップ／キャンセルが出ます。
 
@@ -132,13 +136,13 @@
 
 <p align="center"><img width="760" alt="Everything 連携のペイン検索" src="docs/images-v8/ja/search.png"></p>
 
-### 7. お気に入り — フォルダもファイルも、グループで
+### 8. お気に入り — フォルダもファイルも、グループで
 
 サイドバーは上下半分。上がお気に入り、下がフォルダツリー。お気に入りにはエクスプローラーのクイックアクセスに加え、自分で作ったグループ（フォルダもファイルも入れられ、ドラッグで並べ替え）が入ります。Ctrl+B でクイック一覧。パネルにファイルやフォルダを落とすとピン留めされます。
 
 <p align="center"><img width="760" alt="グループ分けしたお気に入り" src="docs/images-v8/ja/favorites.png"></p>
 
-### 8. クイックプレビュー
+### 9. クイックプレビュー
 
 F3 でクイックルックを開きます。画像、PDF、Office、HTML、Markdown、コード、CSV、ZIP、HWP/HWPX（Hancom）などを表示します。「スペースでプレビュー」がオン（既定）なら Space でも開きます。Ctrl+ホイールで拡大（10–800%）、ドラッグでパン、ホイールでスクロール、←/→ で前後のファイルへ。クイックルックでは **F2** で名前変更、**Del** で表示中のファイルを削除できます。
 
@@ -147,62 +151,62 @@ F3 でクイックルックを開きます。画像、PDF、Office、HTML、Mark
   <img width="240" alt="クイックルック" src="docs/images-v8/ja/preview_peek.png">
 </p>
 
-### 9. カスタムできる右クリックメニュー
+### 10. カスタムできる右クリックメニュー
 
 設定 → 右クリックメニュー項目で、Maguro 独自コマンドの表示／非表示を選べます。メニューをすっきりさせても、全部戻しても構いません。
 
 <p align="center"><img width="560" alt="右クリックメニューの設定" src="docs/images-v8/ja/settings_ctxmenu.png"></p>
 
-### 10. 名前のプレビュー付き一括リネーム
+### 11. 名前のプレビュー付き一括リネーム
 
 ファイルを選んで Ctrl+Shift+R。検索／置換、連番、拡張子、プリセットを変えるたびに、確定前の新しい名前が一覧で更新されます。
 
 <p align="center"><img width="560" alt="名前プレビュー付き一括リネーム" src="docs/images-v8/ja/rename.png"></p>
 
-### 11. サーバー接続
+### 12. サーバー接続
 
 お気に入りパネル（またはグループ）を右クリック → **サーバー接続を追加…**。SMB と WebDAV は普通の Windows フォルダとして開きます。SFTP と FTP は rclone と WinFsp でマウントしたあと、プレビューも右クリックも高速コピーも他のフォルダと同じように使えます。パスワードは Windows 資格情報マネージャーだけに置き、`maguro.json` には書きません。
 
 <p align="center"><img width="420" alt="入力済みのサーバー接続ダイアログ" src="docs/images-v8/ja/servers.png"></p>
 
 
-### 12. Excel の読み取り専用オープンと A1・100%に整える
+### 13. Excel の読み取り専用オープンと A1・100%に整える
 
 `.xls`、`.xlsx`、`.xlsm`、`.csv` を右クリック → **読み取り専用で開く** でロックせずに Excel を開きます。**A1・100%に整える** は `.xlsx` と `.xlsm` だけです。選択を A1 へ、ズームを 100% へ、先頭シートの選択、`.bak.xlsx` バックアップの四つを個別に選べ、その選択は今回の起動中は覚えます。
 
 <p align="center"><img width="420" alt="Excel を A1・100%に整える" src="docs/images-v8/ja/feature_excel_readonly_tidy.png"></p>
 
-### 13. ファイルバスケット
+### 14. ファイルバスケット
 
 Ctrl+Shift+B で常に手前の小さなバスケットを開きます。ファイルをドロップするか Ctrl+Alt+B でアクティブペインの選択を入れ、あとから任意のペインへコピー／移動します。パスはセッションではなく `maguro.json` だけに残ります。元ファイルがなくても一覧に残り、削除するまで表示されます。
 
 <p align="center"><img width="420" alt="設定スタイルのコンパクト行のファイルバスケット" src="docs/images-v8/ja/feature_basket.png"></p>
 
-### 14. フォルダー監視
+### 15. フォルダー監視
 
 Ctrl+Shift+W でフォルダー監視を開きます。フォルダー・アクティブペインに加え、**個別ファイル**も追加できます。行のチェックボックスは設定と同じティックです。Maguro の実行中だけ変更を通知します。監視中のファイルが消えると「ファイルが見つかりません」と表示されます。
 
 <p align="center"><img width="560" alt="フォルダーとファイル行があるフォルダー監視" src="docs/images-v8/ja/feature_folder_watch.png"></p>
 
-### 15. クリップボードのパスを開く（Alt+Z）
+### 16. クリップボードのパスを開く（Alt+Z）
 
 Maguro が起動していれば **Alt+Z** で、ほかのアプリが前面でもクリップボードのパスを開きます。フォルダーは新しいタブになり、Maguro が前面に出ます。ファイルは既定のアプリで開きます。
 
 <p align="center"><img width="760" alt="クリップボードのパスを新しいタブで開いたところ" src="docs/images-v8/ja/feature_win_shift_v.png"></p>
 
-### 16. タブ一覧
+### 17. タブ一覧
 
 **Ctrl+Shift+L**、タブ行右端の一覧ボタン、またはタブ右クリックの **タブ一覧…** で、各タブの配置・ペイン・フォルダーを見ます。名前で絞り込み、Enter かダブルクリックで移動し、F2 で名前を変えます。各タブは代表フォルダーと残りの `+N` だけの一行から始まり、**Right** で展開、**Left** で折りたたみます。現在のタブは最初から開いています。フィルターは一致するタブだけを展開します。
 
 <p align="center"><img width="560" alt="各タブの配置・ペイン・フォルダーを示すタブ一覧" src="docs/images-v8/en/tab_list.png"></p>
 
-### 17. ワークスペース
+### 18. ワークスペース
 
 名前付きレイアウトを最大九つ。**Ctrl+Alt+1…9** でスロットを開き、**Ctrl+Alt+Shift+1…9** で今のタブ・ペイン・フォルダーをそのスロットに保存します。歯車メニュー → **ワークスペース** で保存・読み込み・名前の変更・消去ができます。スロットは `maguro.json` にあります。
 
 <p align="center"><img width="480" alt="歯車メニュー → ワークスペース" src="docs/images-v8/ja/workspaces.png"></p>
 
-### 18. ダイアログジャンプ
+### 19. ダイアログジャンプ
 
 ほかのアプリの開く／保存ダイアログが前面のとき、**Ctrl+Alt+G** で Maguro に開いているフォルダーを選び、ダイアログをそこに移します。仮想フォルダーは除きます。このキーは、そのようなダイアログが前面のときだけ登録されます。
 
