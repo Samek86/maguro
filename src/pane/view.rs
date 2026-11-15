@@ -158,6 +158,7 @@ unsafe fn addr_edit_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _a1: u
 }
 
 pub(crate) unsafe fn destroy_pane(i: usize) {
+    super::marks_overlay::on_destroy_pane(i);
     super::recent::clear_pane(i);
     pane_left(i);
     NAV_GEN.fetch_add(1, Ordering::SeqCst);
@@ -420,6 +421,7 @@ pub(crate) unsafe fn relayout() {
     if show_preview {
         arm_preview();
     }
+    super::marks_overlay::sync_visible();
 }
 
 // Splitter drag shows translucent guide bars where the boundaries will land; the panes move once, on release.

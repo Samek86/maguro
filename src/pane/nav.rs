@@ -2259,6 +2259,7 @@ pub(crate) unsafe fn commit_pane_view(i: usize, mode: i32, icon: i32) {
         });
         check_dirty();
         note_save();
+        super::marks_overlay::on_view_mode(i);
         return;
     };
     let mut snap = app(|a| {
@@ -2308,6 +2309,7 @@ pub(crate) unsafe fn commit_pane_view(i: usize, mode: i32, icon: i32) {
             }
         }
     });
+    super::marks_overlay::on_view_mode(i);
 }
 
 /// Put Name, Date modified, Size on the view once. A later timer may fix a floored width.
@@ -3449,6 +3451,7 @@ unsafe fn on_nav_impl(i: usize, pidl: *const ITEMIDLIST) {
     }
     super::recent::on_arrived(i, &parse);
     crate::shell::listsync::retarget(app(|a| a.main));
+    super::marks_overlay::on_arrived(i);
 }
 
 #[implement(IExplorerBrowserEvents)]
@@ -3507,6 +3510,7 @@ impl IExplorerBrowserEvents_Impl for Events_Impl {
             return Ok(());
         }
         set_nav_busy(i, true);
+        unsafe { super::marks_overlay::on_leaving(i) };
         pane_left(i);
         unsafe {
             // The shell is browsing. A share resolve still out for this pane is stale.
@@ -3552,6 +3556,7 @@ impl IExplorerBrowserEvents_Impl for Events_Impl {
         unsafe {
             forget_pane_list(i);
             schedule_pane_drop(i);
+            super::marks_overlay::on_view_mode(i);
         }
         Ok(())
     }

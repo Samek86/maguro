@@ -177,10 +177,12 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 } else if status_flag(h) == STATUS_PAUSED && this_process_foreground() {
                     resume_status_timer(h);
                 }
+                crate::pane::marks_overlay::on_main_size(kind);
             }
             WM_ENTERSIZEMOVE => {
                 app(|a| a.sizing = true);
                 kids_cancel(); // the '›' is about to move
+                crate::pane::marks_overlay::on_enter_size();
             }
             WM_EXITSIZEMOVE => {
                 app(|a| a.sizing = false);
@@ -188,6 +190,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 relayout();
                 redraw_all();
                 note_save();
+                crate::pane::marks_overlay::on_exit_size();
             }
             // Wake from sleep or hibernate. Both resume broadcasts arrive; the second finds
             // the probe already queued. Return immediately: the redirector is not touched here.
@@ -257,6 +260,8 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_TIMER if wp.0 == TIMER_TAB_HOVER => on_tab_hover_timer(h),
             WM_TIMER if wp.0 == TIMER_DLG_WATCH || wp.0 == TIMER_DLG_JUMP || wp.0 == TIMER_DLG_RETRY => crate::dialogjump::on_timer(wp.0),
             WM_TIMER if wp.0 == TIMER_LIST => crate::shell::listsync::on_timer(h),
+            WM_TIMER if crate::pane::marks_overlay::on_timer(h, wp.0) => {}
+            crate::pane::marks_overlay::WM_STAR => crate::pane::marks_overlay::on_snapshot(h),
             WM_SETCURSOR if wp.0 == h.0 as usize && (lp.0 & 0xffff) as u32 == HTCLIENT => {
                 let Some(d) = app(|a| a.drag).or_else(|| cursor_for(h)) else {
                     return DefWindowProcW(h, msg, wp, lp);
@@ -634,6 +639,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 fit_load();
                 let r = &*(lp.0 as *const RECT);
                 _ = SetWindowPos(h, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+                crate::pane::marks_overlay::on_dpi();
             }
             // Restart or sign-out does not send WM_CLOSE. Saving here keeps the last folders.
             WM_ENDSESSION if wp.0 != 0 => {
@@ -653,8 +659,14 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 return DefWindowProcW(h, msg, wp, lp);
             }
             WM_THEME_SYNC => theme_sync(),
-            WM_ENTERMENULOOP => settings::menu_enter(),
-            WM_EXITMENULOOP => settings::menu_exit(),
+            WM_ENTERMENULOOP => {
+                settings::menu_enter();
+                crate::pane::marks_overlay::note_menu(true);
+            }
+            WM_EXITMENULOOP => {
+                settings::menu_exit();
+                crate::pane::marks_overlay::note_menu(false);
+            }
             WM_ABOUT => about(h),
             WM_WATCH => crate::watch::on_ui_event(),
             WM_SHELL_CHANGE => crate::shell::listsync::on_shell(h, wp, lp),
@@ -721,6 +733,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     release_desk_handles(handles.0, handles.1, handles.2, handles.3, handles.4);
                 }
                 if window_count() == 0 {
+                    crate::pane::marks_overlay::shutdown();
                     crate::watch::shutdown();
                     crate::basket::close();
                     crate::tablist::close();

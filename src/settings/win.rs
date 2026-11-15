@@ -1638,6 +1638,7 @@ fn flip(id: u8) {
         TG_MARKS => {
             app(|a| a.s.show_mark_stars ^= true);
             crate::publish_shared();
+            unsafe { crate::pane::marks_overlay::on_setting() };
         }
         _ => return,
     }
