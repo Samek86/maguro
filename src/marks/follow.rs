@@ -6,10 +6,10 @@
 
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::store::{
-    read_file_identity, stamp_unix, FileIdentity, Store, StoreError, STATE_LOST, STATE_OK, STATE_RECYCLED,
+    read_file_identity, stamp_unix, FileIdentity, Mark, Store, StoreError, STATE_LOST, STATE_OK, STATE_RECYCLED,
 };
 
 /// How long a shell delete stays a candidate before it becomes `lost`.
@@ -17,6 +17,9 @@ pub(crate) const FOLLOW_WINDOW_MS: u64 = 2_000;
 /// One background pass, about ten seconds after startup, looks up at most this many rows.
 pub(crate) const SWEEP_LIMIT: usize = 500;
 const SWEEP_DELAY_SECS: u64 = 10;
+/// After a create or directory update, wait this long and look up recycled ids once.
+const RESTORE_PROBE_MS: u64 = 400;
+const RESTORE_PROBE_LIMIT: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OwnKind {
@@ -189,8 +192,19 @@ pub(crate) fn apply_own(store: &mut Store, op: &OwnOp) -> Result<bool, StoreErro
     match op.kind {
         OwnKind::Copy => Ok(false),
         OwnKind::Rename => {
+            let from_bin = in_recycle_bin(&op.src);
+            let to_bin = in_recycle_bin(&op.dest);
             let moved = store.retarget_tree(&op.src, &op.dest, None)?;
-            Ok(!moved.is_empty())
+            if moved.is_empty() {
+                return Ok(false);
+            }
+            if from_bin || to_bin {
+                let state = if to_bin { STATE_RECYCLED } else { STATE_OK };
+                for path in &moved {
+                    store.set_state(path, state, Some(None))?;
+                }
+            }
+            Ok(true)
         }
         OwnKind::Move => {
             let recycle = in_recycle_bin(&op.dest);
@@ -296,6 +310,103 @@ pub(crate) fn note_identity(store: &mut Store, path: &str, seen: &FileIdentity, 
         (Some(_), Some(_)) if state == STATE_OK => store.set_state(path, STATE_LOST, Some(Some(stamp.to_string()))),
         _ => Ok(false),
     }
+}
+
+fn restorable(mark: &Mark) -> bool {
+    !is_unc(&mark.path) && (mark.state == STATE_RECYCLED || mark.state == STATE_LOST)
+}
+
+fn fid_blank(fid: &Option<String>) -> bool {
+    match fid {
+        None => true,
+        Some(text) => text.trim().is_empty(),
+    }
+}
+
+fn same_path_noid(mark: &Mark, seen: &FileIdentity) -> bool {
+    restorable(mark) && mark.fid.is_none() && fid_blank(&seen.fid) && same_meas(mark.size, seen.size) && same_meas(mark.mtime, seen.mtime)
+}
+
+/// One recycled or lost row whose file id is `seen`. Two hits is not a match.
+/// A vol on both sides has to agree. A different id never falls through to the name.
+fn unique_fid(store: &Store, path: &str, fid: &str, vol: Option<&str>) -> Option<String> {
+    let mut hit: Option<String> = None;
+    for mark in store.iter() {
+        if !restorable(mark) || paths_equal(&mark.path, path) {
+            continue;
+        }
+        let Some(got) = mark.fid.as_deref() else { continue };
+        if !got.eq_ignore_ascii_case(fid) {
+            continue;
+        }
+        if let (Some(want), Some(have)) = (vol.map(str::trim).filter(|v| !v.is_empty()), mark.vol.as_deref()) {
+            if !want.eq_ignore_ascii_case(have) {
+                continue;
+            }
+        }
+        if hit.is_some() {
+            return None;
+        }
+        hit = Some(mark.path.clone());
+    }
+    hit
+}
+
+/// No id on the arrival or the row. The parked `$R` name does not match the restored name.
+fn unique_name(store: &Store, path: &str, seen: &FileIdentity) -> Option<String> {
+    let name = base_name(path);
+    if name.is_empty() {
+        return None;
+    }
+    let mut hit: Option<String> = None;
+    for mark in store.iter() {
+        if !restorable(mark) || mark.fid.is_some() || paths_equal(&mark.path, path) {
+            continue;
+        }
+        if !base_name(&mark.path).eq_ignore_ascii_case(&name) {
+            continue;
+        }
+        if !same_meas(mark.size, seen.size) || !same_meas(mark.mtime, seen.mtime) {
+            continue;
+        }
+        if hit.is_some() {
+            return None;
+        }
+        hit = Some(mark.path.clone());
+    }
+    hit
+}
+
+fn recycled_source(store: &Store, path: &str, seen: &FileIdentity) -> Option<String> {
+    let fid = seen.fid.as_deref().map(str::trim).filter(|fid| !fid.is_empty());
+    if let Some(fid) = fid {
+        return unique_fid(store, path, fid, seen.vol.as_deref());
+    }
+    unique_name(store, path, seen)
+}
+
+/// A file showed up outside the Recycle Bin. Move the recycled or lost row with the same id
+/// onto `path` and mark it `ok`. A different id stays where it is, and the new file is not marked.
+/// With no id, one name+size+mtime hit on a row that also has no id is accepted. Two hits match nothing.
+pub(crate) fn reattach_recycled(store: &mut Store, path: &str, seen: &FileIdentity) -> Result<bool, StoreError> {
+    if path.is_empty() || in_recycle_bin(path) {
+        return Ok(false);
+    }
+    let heal = store.get(path).is_some_and(|mark| same_path_noid(mark, seen));
+    if heal {
+        return store.set_state(path, STATE_OK, Some(None));
+    }
+    let Some(from) = recycled_source(store, path, seen) else {
+        return Ok(false);
+    };
+    let moved = store.retarget_tree(&from, path, None)?;
+    if moved.is_empty() {
+        return Ok(false);
+    }
+    for row in &moved {
+        store.set_state(row, STATE_OK, Some(None))?;
+    }
+    Ok(true)
 }
 
 /// The letter to open for `stored_vol`. The path's own letter wins when it still has that serial.
@@ -531,13 +642,26 @@ fn snap_affected(path: &str) -> Vec<RowSnap> {
 
 /// Shell notification already decoded to paths. `new_path` is set for a rename.
 pub(crate) fn on_shell_event(event: u32, old_path: &str, new_path: &str) {
-    use windows::Win32::UI::Shell::{SHCNE_CREATE, SHCNE_DELETE, SHCNE_MKDIR, SHCNE_RENAMEFOLDER, SHCNE_RENAMEITEM, SHCNE_RMDIR};
+    use windows::Win32::UI::Shell::{
+        SHCNE_CREATE, SHCNE_DELETE, SHCNE_MKDIR, SHCNE_RENAMEFOLDER, SHCNE_RENAMEITEM, SHCNE_RMDIR, SHCNE_UPDATEDIR,
+    };
     if event == SHCNE_RENAMEITEM.0 || event == SHCNE_RENAMEFOLDER.0 {
         on_renamed(old_path, new_path);
     } else if event == SHCNE_DELETE.0 || event == SHCNE_RMDIR.0 {
         on_deleted(old_path, event == SHCNE_RMDIR.0);
     } else if event == SHCNE_CREATE.0 || event == SHCNE_MKDIR.0 {
         on_created(old_path);
+    }
+    // `$Recycle.Bin` is not a watched folder, so the rename out of it often never arrives.
+    // A create or directory update in the open folder is the live signal. One debounced id probe
+    // covers the case where the item path is missing. Nothing is armed when no row is recycled.
+    let nudge = event == SHCNE_CREATE.0
+        || event == SHCNE_MKDIR.0
+        || event == SHCNE_UPDATEDIR.0
+        || event == SHCNE_RENAMEITEM.0
+        || event == SHCNE_RENAMEFOLDER.0;
+    if nudge {
+        request_recycled_probe();
     }
 }
 
@@ -546,17 +670,24 @@ fn on_renamed(from: &str, to: &str) {
         return;
     }
     let recycle = in_recycle_bin(to);
+    let mut moved = false;
     super::commit_edit(|store| {
-        let moved = store.retarget_tree(from, to, None).unwrap_or_default();
-        if moved.is_empty() {
+        let rows = store.retarget_tree(from, to, None).unwrap_or_default();
+        if rows.is_empty() {
             return false;
         }
         let state = if recycle { STATE_RECYCLED } else { STATE_OK };
-        for path in &moved {
+        for path in &rows {
             let _ = store.set_state(path, state, Some(None));
         }
+        moved = true;
         true
     });
+    // The mark may still be keyed at `$R…` when this rename's source path does not match it.
+    if !moved && !recycle {
+        let id = read_file_identity(Path::new(to));
+        super::commit_edit(|store| reattach_recycled(store, to, &id).unwrap_or(false));
+    }
     clear_pending_under(from);
 }
 
@@ -622,7 +753,11 @@ fn on_created(path: &str) {
     }
     let id = read_file_identity(Path::new(path));
     let stamp = now_stamp();
-    super::commit_edit(|store| note_identity(store, path, &id, &stamp).unwrap_or(false));
+    super::commit_edit(|store| {
+        let mut changed = note_identity(store, path, &id, &stamp).unwrap_or(false);
+        changed |= reattach_recycled(store, path, &id).unwrap_or(false);
+        changed
+    });
     let arrival = Arrival {
         path: path.to_string(),
         name: base_name(path),
@@ -742,7 +877,15 @@ pub(crate) fn on_own_rename(from: &str, to: &str) {
     if from.is_empty() || to.is_empty() {
         return;
     }
-    super::commit_edit(|store| apply_own(store, &OwnOp::new(OwnKind::Rename, from, to)).unwrap_or(false));
+    let mut changed = false;
+    super::commit_edit(|store| {
+        changed = apply_own(store, &OwnOp::new(OwnKind::Rename, from, to)).unwrap_or(false);
+        changed
+    });
+    if !changed && !in_recycle_bin(to) {
+        let id = read_file_identity(Path::new(to));
+        super::commit_edit(|store| reattach_recycled(store, to, &id).unwrap_or(false));
+    }
     clear_pending_under(from);
 }
 
@@ -751,19 +894,24 @@ pub(crate) fn on_own_move(from: &str, to: &str) {
         return;
     }
     let fresh = read_file_identity(Path::new(to));
+    let mut changed = false;
     super::commit_edit(|store| {
         let old_vol = store.get(from).and_then(|mark| mark.vol.clone());
         let cross = old_vol.as_ref().zip(fresh.vol.as_ref()).is_some_and(|(had, got)| !had.eq_ignore_ascii_case(got));
         let mut op = OwnOp::new(OwnKind::Move, from, to);
         if cross {
-            op.new_id = Some(fresh);
+            op.new_id = Some(fresh.clone());
         }
-        let changed = apply_own(store, &op).unwrap_or(false);
+        changed = apply_own(store, &op).unwrap_or(false);
         if changed && cross && !in_recycle_bin(to) {
             refresh_child_ids(store, to);
         }
         changed
     });
+    // The shell item's source path is not always the `$R` path stored on the row.
+    if !changed && !in_recycle_bin(to) {
+        super::commit_edit(|store| reattach_recycled(store, to, &fresh).unwrap_or(false));
+    }
     clear_pending_under(from);
 }
 
@@ -812,6 +960,107 @@ pub(crate) fn on_fast_moves(pairs: &[(String, String)]) {
     for (src, _) in pairs {
         clear_pending_under(src);
     }
+}
+
+struct ProbeGate {
+    generation: u64,
+    running: bool,
+}
+
+fn probe_gate() -> &'static Mutex<ProbeGate> {
+    static GATE: Mutex<ProbeGate> = Mutex::new(ProbeGate { generation: 0, running: false });
+    &GATE
+}
+
+fn restore_pending() -> bool {
+    super::with_store(|store| store.iter().any(|mark| mark.fid.is_some() && mark.vol.is_some() && (mark.state == STATE_RECYCLED || (mark.state == STATE_LOST && in_recycle_bin(&mark.path))) && !is_unc(&mark.path)))
+        .unwrap_or(false)
+}
+
+/// One worker, coalesced. It exits when the folder goes quiet and no newer event arrived.
+fn request_recycled_probe() {
+    if !restore_pending() {
+        return;
+    }
+    let mut gate = probe_gate().lock().unwrap_or_else(|e| e.into_inner());
+    gate.generation = gate.generation.wrapping_add(1);
+    if gate.running {
+        return;
+    }
+    gate.running = true;
+    let spawned = std::thread::Builder::new().name("marks-restore".into()).spawn(|| {
+        set_low_priority();
+        loop {
+            let seen = probe_gate().lock().unwrap_or_else(|e| e.into_inner()).generation;
+            std::thread::sleep(Duration::from_millis(RESTORE_PROBE_MS));
+            let latest = probe_gate().lock().unwrap_or_else(|e| e.into_inner()).generation;
+            if latest != seen {
+                continue;
+            }
+            if restore_pending() {
+                probe_recycled_outside_bin();
+            }
+            let mut gate = probe_gate().lock().unwrap_or_else(|e| e.into_inner());
+            if gate.generation == seen {
+                gate.running = false;
+                break;
+            }
+        }
+    });
+    if spawned.is_err() {
+        gate.running = false;
+    }
+}
+
+/// Open recycled ids. Only a hit outside the Recycle Bin is written. A miss stays recycled.
+fn probe_recycled_outside_bin() {
+    let mut rows = super::with_store(|store| {
+        let mut out = Vec::new();
+        for mark in store.iter() {
+            if is_unc(&mark.path) {
+                continue;
+            }
+            let parked = mark.state == STATE_RECYCLED || (mark.state == STATE_LOST && in_recycle_bin(&mark.path));
+            if !parked {
+                continue;
+            }
+            let (Some(vol), Some(fid)) = (mark.vol.clone(), mark.fid.clone()) else { continue };
+            out.push((mark.path.clone(), vol, fid, in_recycle_bin(&mark.path)));
+        }
+        out
+    })
+    .unwrap_or_default();
+    if rows.is_empty() {
+        return;
+    }
+    rows.sort_by_key(|row| !row.3);
+    rows.truncate(RESTORE_PROBE_LIMIT);
+    let mounted = mounted_volumes();
+    let mounted_ref: Vec<(char, &str)> = mounted.iter().map(|(letter, vol)| (*letter, vol.as_str())).collect();
+    let mut hits = Vec::new();
+    for (path, vol, fid, _) in &rows {
+        let root = match pick_volume_root(vol, path, &mounted_ref) {
+            VolumeRoot::Letter(letter) => format!("{letter}:\\"),
+            VolumeRoot::Unplugged => continue,
+        };
+        let hit = lookup_fid(root.as_str(), fid);
+        let IdHit::Found(ref found) = hit else { continue };
+        if in_recycle_bin(found) || paths_equal(found, path) {
+            continue;
+        }
+        hits.push((path.clone(), hit));
+    }
+    if hits.is_empty() {
+        return;
+    }
+    let stamp = now_stamp();
+    super::commit_edit(|store| {
+        let mut any = false;
+        for (path, hit) in &hits {
+            any |= apply_id_hit(store, path, hit.clone(), &stamp).unwrap_or(false);
+        }
+        any
+    });
 }
 
 pub(crate) fn arm_sweep() {
@@ -1180,6 +1429,109 @@ mod tests {
         assert_eq!(store.get(r"D:\box\dir\c.txt").unwrap().state, STATE_OK);
         assert_eq!(store.get(r"D:\box\dir\c.txt").unwrap().fid.as_deref(), Some("CR"));
         assert!(store.get(r"D:\box\dir\c.txt").unwrap().lost_since.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_live_restore_reattaches_the_same_file_id_without_the_startup_sweep() {
+        let dir = scratch("live-restore");
+        let original = r"D:\box\vg-recycle.txt";
+        let parked = r"D:\$Recycle.Bin\S-1-5-21\$RD24YVS.txt";
+        let mut store = store_at(&dir);
+        add(&mut store, original, ident("VOL", "FIDR", false));
+        apply_id_hit(&mut store, original, IdHit::Found(parked.into()), STAMP).unwrap();
+        let mark = store.get(parked).unwrap();
+        assert_eq!(mark.state, STATE_RECYCLED);
+        assert_eq!(mark.fid.as_deref(), Some("FIDR"));
+        assert!(store.get(original).is_none());
+
+        // The restored path is not the key. A path lookup must not heal this by itself.
+        assert!(!note_identity(&mut store, original, &ident("VOL", "FIDR", false), STAMP).unwrap());
+        assert_eq!(store.get(parked).unwrap().state, STATE_RECYCLED);
+
+        let mut other = ident("VOL", "OTHER", false);
+        other.size = Some(10);
+        other.mtime = Some(20);
+        assert!(!reattach_recycled(&mut store, original, &other).unwrap());
+        assert!(store.get(original).is_none());
+        assert_eq!(store.get(parked).unwrap().state, STATE_RECYCLED);
+        assert_eq!(store.get(parked).unwrap().fid.as_deref(), Some("FIDR"));
+
+        let wrong_vol = ident("NOPE", "FIDR", false);
+        assert!(!reattach_recycled(&mut store, original, &wrong_vol).unwrap());
+        assert_eq!(store.get(parked).unwrap().state, STATE_RECYCLED);
+
+        // No id, and the parked name is `$R…`, so name+size+mtime must not guess.
+        let mut nameless = ident("VOL", "FIDR", false);
+        nameless.fid = None;
+        nameless.vol = None;
+        assert!(!reattach_recycled(&mut store, original, &nameless).unwrap());
+        assert_eq!(store.get(parked).unwrap().fid.as_deref(), Some("FIDR"));
+
+        assert!(reattach_recycled(&mut store, original, &ident("VOL", "FIDR", false)).unwrap());
+        let mark = store.get(original).unwrap();
+        assert_eq!(mark.state, STATE_OK);
+        assert_eq!(mark.fid.as_deref(), Some("FIDR"));
+        assert_eq!(mark.vol.as_deref(), Some("VOL"));
+        assert!(mark.lost_since.is_none());
+        assert!(store.get(parked).is_none());
+
+        // A row with no id follows one name+size+mtime hit, and two hits follow neither.
+        let mut plain = store_at(&dir);
+        let mut bare = ident("VOL", "GONE", false);
+        bare.fid = None;
+        bare.vol = None;
+        add(&mut plain, r"D:\box\a.txt", bare.clone());
+        apply_recycle(&mut plain, r"D:\box\a.txt").unwrap();
+        let mut arrived = bare.clone();
+        arrived.dir = false;
+        assert!(reattach_recycled(&mut plain, r"E:\dst\a.txt", &arrived).unwrap());
+        assert_eq!(plain.get(r"E:\dst\a.txt").unwrap().state, STATE_OK);
+        assert!(plain.get(r"D:\box\a.txt").is_none());
+
+        let mut twins = store_at(&dir);
+        add(&mut twins, r"D:\box\a.txt", bare.clone());
+        add(&mut twins, r"D:\other\a.txt", bare.clone());
+        apply_recycle(&mut twins, r"D:\box\a.txt").unwrap();
+        apply_recycle(&mut twins, r"D:\other\a.txt").unwrap();
+        assert!(!reattach_recycled(&mut twins, r"E:\dst\a.txt", &arrived).unwrap());
+        assert_eq!(twins.get(r"D:\box\a.txt").unwrap().state, STATE_RECYCLED);
+        assert_eq!(twins.get(r"D:\other\a.txt").unwrap().state, STATE_RECYCLED);
+        assert!(twins.get(r"E:\dst\a.txt").is_none());
+
+        // Same path, no id: size and mtime still have to match. A different size stays recycled.
+        let mut same = store_at(&dir);
+        add(&mut same, r"D:\box\b.txt", bare.clone());
+        apply_recycle(&mut same, r"D:\box\b.txt").unwrap();
+        assert!(reattach_recycled(&mut same, r"D:\box\b.txt", &bare).unwrap());
+        assert_eq!(same.get(r"D:\box\b.txt").unwrap().state, STATE_OK);
+        let mut sized = bare.clone();
+        sized.size = Some(99);
+        let mut keep = store_at(&dir);
+        add(&mut keep, r"D:\box\c.txt", bare.clone());
+        apply_recycle(&mut keep, r"D:\box\c.txt").unwrap();
+        assert!(!reattach_recycled(&mut keep, r"D:\box\c.txt", &sized).unwrap());
+        assert_eq!(keep.get(r"D:\box\c.txt").unwrap().state, STATE_RECYCLED);
+
+        // A lost row in the bin follows the same id. A rename out of the bin becomes ok.
+        let mut lost = store_at(&dir);
+        add(&mut lost, original, ident("VOL", "FIDL", false));
+        apply_id_hit(&mut lost, original, IdHit::Found(parked.into()), STAMP).unwrap();
+        apply_lost(&mut lost, parked, STAMP).unwrap();
+        assert_eq!(lost.get(parked).unwrap().state, STATE_LOST);
+        assert!(reattach_recycled(&mut lost, original, &ident("VOL", "FIDL", false)).unwrap());
+        assert_eq!(lost.get(original).unwrap().state, STATE_OK);
+        assert_eq!(lost.get(original).unwrap().fid.as_deref(), Some("FIDL"));
+        assert!(lost.get(original).unwrap().lost_since.is_none());
+        assert!(lost.get(parked).is_none());
+
+        let mut renamed = store_at(&dir);
+        add(&mut renamed, original, ident("VOL", "FIDN", false));
+        apply_id_hit(&mut renamed, original, IdHit::Found(parked.into()), STAMP).unwrap();
+        apply_own(&mut renamed, &op(OwnKind::Rename, parked, original)).unwrap();
+        assert_eq!(renamed.get(original).unwrap().state, STATE_OK);
+        assert_eq!(renamed.get(original).unwrap().fid.as_deref(), Some("FIDN"));
+        assert!(renamed.get(parked).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
