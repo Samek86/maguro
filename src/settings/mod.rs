@@ -74,6 +74,7 @@ const TG_CLIP: u8 = 27;
 const TG_SIDE_FAV: u8 = 28;
 const TG_SIDE_TREE: u8 = 29;
 const TG_CTX_LOG: u8 = 30;
+const TG_VTABS: u8 = 31;
 
 const CB_SETMINVISIBLE: u32 = 0x1701;
 const EM_SETCUEBANNER: u32 = 0x1501;
@@ -228,6 +229,7 @@ const LOOK: &[Spec] = &[
     Spec { title: crate::Key::AccentColour, desc: crate::Key::LightAndDarkEachKeepTheirOwn, live: true, ctl: Ctl::Accent },
     Spec { title: crate::Key::ShowToolbar, desc: crate::Key::Blank, live: true, ctl: Ctl::Toggle(TG_BAR) },
     Spec { title: crate::Key::ShowDriveButtons, desc: crate::Key::CDEOnTabRowOff, live: true, ctl: Ctl::Toggle(TG_DRIVES) },
+    Spec { title: crate::Key::VerticalTabs, desc: crate::Key::VerticalTabsDesc, live: true, ctl: Ctl::Toggle(TG_VTABS) },
 ];
 const VIEW: &[Spec] = &[
     Spec { title: crate::Key::DefaultViewForNewPane, desc: crate::Key::UsedWhenPaneHasNoViewOf, live: true, ctl: Ctl::ViewMode },
@@ -1338,6 +1340,7 @@ fn toggle_on(id: u8) -> bool {
         TG_HIDDEN => unsafe { super::hidden() },
         TG_BAR => app(|a| a.s.bar),
         TG_DRIVES => app(|a| a.s.drive_buttons),
+        TG_VTABS => app(|a| a.s.vertical_tabs),
         TG_EXT => app(|a| a.s.ext),
         TG_TREE => app(|a| a.s.side_shown()),
         TG_SIDE_FAV => app(|a| a.s.show_fav()),

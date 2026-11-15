@@ -93,6 +93,25 @@ impl TabLay {
             .map(|(i, _)| i)
             .unwrap_or_else(|| self.body.iter().enumerate().rev().find(|(_, r)| r.right > r.left).map(|(i, _)| i + 1).unwrap_or(self.body.len()))
     }
+
+    /// Same as [`insert_at`], using the vertical midpoint. Past the last row, after that row.
+    pub(crate) fn insert_at_y(&self, y: i32) -> usize {
+        self.body
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.bottom > r.top && y < (r.top + r.bottom) / 2)
+            .map(|(i, _)| i)
+            .unwrap_or_else(|| self.body.iter().enumerate().rev().find(|(_, r)| r.bottom > r.top).map(|(i, _)| i + 1).unwrap_or(self.body.len()))
+    }
+}
+
+/// Index a vertical drag lands on. The first body whose midpoint is below `y`, else the last one with a height.
+pub(crate) fn vtab_drag_index(body: &[RECT], y: i32) -> usize {
+    body.iter()
+        .enumerate()
+        .find(|(_, r)| r.bottom > r.top && y < (r.top + r.bottom) / 2)
+        .map(|(i, _)| i)
+        .unwrap_or_else(|| body.iter().enumerate().rev().find(|(_, r)| r.bottom > r.top).map(|(i, _)| i).unwrap_or(0))
 }
 
 /// Index a horizontal drag lands on. The first body whose midpoint is to the right of `x`, else the last one with a width.
@@ -353,6 +372,134 @@ pub(crate) fn tab_lay(width: i32, n: usize, locked: &[bool], dpi: i32, scroll: u
 
 pub(crate) fn in_rect(r: RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}
+
+/// Width of the vertical window-tab strip at 96 DPI. The column stays this wide as the window grows.
+pub(crate) const VTAB_W: i32 = 180;
+
+pub(crate) fn vtab_width(dpi: i32) -> i32 {
+    VTAB_W * dpi.max(1) / 96
+}
+
+/// Height the vertical strip can use: below the toolbar row, above the status line.
+pub(crate) fn vtab_body_h(client_h: i32, dpi: i32) -> i32 {
+    let s = |v: i32| v * dpi.max(1) / 96;
+    let top = s(32);
+    let bot = (client_h - s(24)).max(top);
+    (bot - top).max(0)
+}
+
+/// `vertical == false` is [`tab_lay`] of `width`. `height` is ignored, so the top row does not move.
+pub(crate) fn window_tab_lay(vertical: bool, width: i32, height: i32, n: usize, locked: &[bool], dpi: i32, scroll: usize) -> TabLay {
+    if vertical {
+        vtab_lay(width, height, n, locked, dpi, scroll)
+    } else {
+        tab_lay(width, n, locked, dpi, scroll)
+    }
+}
+
+/// True when `text_px` does not fit in `room`, so the title is drawn with an ellipsis.
+pub(crate) fn title_clipped(text_px: i32, room: i32) -> bool {
+    room < text_px
+}
+
+/// Width of the title inside one tab. The insets match the rectangle [`paint_tabs`] draws into.
+pub(crate) fn tab_label_room(body: RECT, close: Option<RECT>, dpi: i32, colored: bool) -> i32 {
+    let s = |v: i32| v * dpi.max(1) / 96;
+    let nudge = if colored { s(5) } else { 0 };
+    let left = body.left + s(8) + nudge;
+    let right = close.map(|c| c.left).unwrap_or(body.right - s(8));
+    (right - left).max(0)
+}
+
+/// Hover text. A clipped title is the first line; the paths stay underneath, as on the top row.
+pub(crate) fn tab_hover_text(name: &str, paths: &str, clipped: bool) -> String {
+    if !clipped || name.is_empty() {
+        return paths.to_string();
+    }
+    if paths.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}\n{paths}")
+    }
+}
+
+/// Vertical window tabs. Each row is as tall as a tab on the top row, and as wide as the strip minus the pad.
+/// Tabs that fit stack from the top, with + under the last one. Otherwise + and the ▾ pin to the bottom
+/// and `scroll` chooses which rows are on screen. A tiny strip keeps every rect non-inverted.
+pub(crate) fn vtab_lay(width: i32, height: i32, n: usize, locked: &[bool], dpi: i32, scroll: usize) -> TabLay {
+    let s = |v: i32| v * dpi.max(1) / 96;
+    let n = n.max(1);
+    let width = width.max(1);
+    let height = height.max(0);
+    let (pad, gap, _, _, _, _) = tab_px(dpi);
+    let h = s(26);
+    let x = pad.min(width);
+    let tab_w = (width - pad * 2).max(0);
+    let row = |top: i32, bottom: i32| -> RECT {
+        if bottom <= top || tab_w <= 0 {
+            RECT { left: x, top, right: x, bottom: top }
+        } else {
+            RECT { left: x, top, right: x + tab_w, bottom }
+        }
+    };
+    let slot = |r: RECT| {
+        let cw = s(16);
+        RECT {
+            left: r.right - s(4) - cw,
+            top: r.top + (h - cw) / 2,
+            right: r.right - s(4),
+            bottom: r.top + (h - cw) / 2 + cw,
+        }
+    };
+    let mut body = vec![RECT::default(); n];
+    let mut close = vec![None; n];
+    let lock: Vec<bool> = (0..n).map(|i| locked.get(i).copied().unwrap_or(false)).collect();
+    let stack = n as i32 * h + gap * (n as i32 - 1);
+    let used = pad + stack + gap + h + pad;
+    if used <= height && tab_w > 0 {
+        let mut y = pad;
+        for i in 0..n {
+            let r = row(y, y + h);
+            if r.bottom > r.top {
+                close[i] = Some(slot(r));
+                body[i] = r;
+            }
+            y += h + gap;
+        }
+        return TabLay {
+            body,
+            close,
+            lock,
+            plus: row(y, y + h),
+            overflow: None,
+            first: 0,
+            count: n,
+        };
+    }
+    let over_bottom = (height - pad).max(0);
+    let over_top = (over_bottom - h).max(0);
+    let over = row(over_top, over_bottom);
+    let plus_bottom = (over.top - gap).max(0);
+    let plus_top = (plus_bottom - h).max(0);
+    let plus = row(plus_top, plus_bottom);
+    let limit = if plus.bottom > plus.top { plus.top } else { height };
+    let avail = (limit - gap - pad).max(0);
+    let stride = (h + gap).max(1);
+    let count = if h <= 0 { 0 } else { ((avail + gap) / stride) as usize }.min(n);
+    let first = if count == 0 { 0 } else { scroll.min(n - count) };
+    let mut y = pad;
+    for i in first..first + count {
+        let bottom = y + h;
+        let stop = if plus.bottom > plus.top { (plus.top - gap).max(y) } else { bottom };
+        let r = row(y, bottom.min(stop));
+        if r.bottom > r.top {
+            close[i] = Some(slot(r));
+            body[i] = r;
+        }
+        y += h + gap;
+    }
+    TabLay { body, close, lock, plus, overflow: Some(over), first, count }
 }
 
 pub(crate) fn tab_hit(lay: &TabLay, x: i32, y: i32) -> TabHit {
@@ -1051,8 +1198,13 @@ pub(crate) fn show_tab(index: usize) {
         }
         let locked: Vec<bool> = a.s.tabs.iter().map(|t| t.locked).collect();
         let n = locked.len().max(1);
-        let w = tab_area_width(rc.right, a.dpi, a.s.bar, drive_slots(a.s.drive_buttons, a.drives.len()));
-        let lay = tab_lay(w, n, &locked, a.dpi, a.tab_scroll);
+        let lay = if a.s.vertical_tabs {
+            let w = vtab_width(a.dpi).min(rc.right.max(1));
+            window_tab_lay(true, w, vtab_body_h(rc.bottom, a.dpi), n, &locked, a.dpi, a.tab_scroll)
+        } else {
+            let w = tab_area_width(rc.right, a.dpi, a.s.bar, drive_slots(a.s.drive_buttons, a.drives.len()));
+            window_tab_lay(false, w, rc.bottom, n, &locked, a.dpi, a.tab_scroll)
+        };
         let index = index.min(n - 1);
         a.tab_scroll = if lay.overflow.is_none() { 0 } else { scroll_to_show(lay.first, index, lay.count.max(1), n) };
     });
@@ -1125,10 +1277,15 @@ pub(crate) fn current_tab_lay() -> TabLay {
         let mut rc = RECT::default();
         unsafe { _ = GetClientRect(a.tabs_hwnd, &mut rc) };
         let locked: Vec<bool> = a.s.tabs.iter().map(|t| t.locked).collect();
-        let strip_h = 32 * a.dpi / 96;
-        let btn_top = (strip_h - tool_icon_px(a.dpi).1) / 2;
-        let icons = icon_slots(rc.right.max(1), btn_top, a.dpi, drive_slots(a.s.drive_buttons, a.drives.len()), a.s.bar);
-        let lay = tab_lay(icons.tab_w, locked.len().max(1), &locked, a.dpi, a.tab_scroll);
+        let n = locked.len().max(1);
+        let lay = if a.s.vertical_tabs {
+            window_tab_lay(true, rc.right.max(1), rc.bottom.max(0), n, &locked, a.dpi, a.tab_scroll)
+        } else {
+            let strip_h = 32 * a.dpi / 96;
+            let btn_top = (strip_h - tool_icon_px(a.dpi).1) / 2;
+            let icons = icon_slots(rc.right.max(1), btn_top, a.dpi, drive_slots(a.s.drive_buttons, a.drives.len()), a.s.bar);
+            window_tab_lay(false, icons.tab_w, rc.bottom, n, &locked, a.dpi, a.tab_scroll)
+        };
         a.tab_scroll = lay.first;
         lay
     })
@@ -1155,7 +1312,7 @@ fn tab_text(a: &App, i: usize) -> (String, String) {
 }
 
 pub(crate) unsafe fn paint_tabs(h: HWND) {
-    let (active, names, colors, mut hot, mut hot_close, hot_plus, hot_over, dpi, font, icon, accent) = app(|a| {
+    let (active, names, colors, mut hot, mut hot_close, hot_plus, hot_over, dpi, font, icon, accent, vertical) = app(|a| {
         (
             a.s.tab,
             (0..a.s.tabs.len()).map(|i| tab_text(a, i).0).collect::<Vec<_>>(),
@@ -1168,6 +1325,7 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
             a.font,
             a.icon_font,
             a.s.accent_now(),
+            a.s.vertical_tabs,
         )
     });
     // A file drag warms the tab under the pointer without touching mouse-hover state.
@@ -1179,7 +1337,16 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
     buffered(h, |dc, rc| {
         let s = |v: i32| v * dpi / 96;
         fill(dc, rc, pal().bg);
-        fill(dc, RECT { top: rc.bottom - 1, ..rc }, pal().line);
+        if vertical {
+            // Both edges. The column sits between the side panel and the panes, and `pal().line`
+            // is the same hairline the plates use, in either theme. A one-pixel strip is just that line.
+            if rc.right > rc.left {
+                fill(dc, RECT { right: rc.left + 1, ..rc }, pal().line);
+                fill(dc, RECT { left: rc.right - 1, ..rc }, pal().line);
+            }
+        } else {
+            fill(dc, RECT { top: rc.bottom - 1, ..rc }, pal().line);
+        }
         for (i, r) in lay.body.iter().enumerate() {
             if r.right <= r.left {
                 continue;
@@ -1199,7 +1366,12 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
             if !on {
                 frame(dc, *r, 1, pal().line);
             }
-            if on {
+            if on && vertical {
+                // The active mark is the left edge. A colour label already paints that stripe.
+                if col.is_none() {
+                    fill(dc, RECT { right: r.left + s(3), ..*r }, accent);
+                }
+            } else if on {
                 fill(dc, RECT { bottom: r.top + s(2), ..*r }, col.unwrap_or(accent));
                 fill(dc, RECT { top: r.bottom - 1, bottom: r.bottom, ..*r }, pal().card);
             }
@@ -1291,6 +1463,36 @@ unsafe fn tab_lock_screen(i: usize) -> Option<RECT> {
     Some(crate::ui::tip_screen_rect(tabs, r))
 }
 
+/// Beside a vertical tab, under a tab on the top row. The tip never covers the title.
+fn tab_tip_side() -> TipSide {
+    if app(|a| a.s.vertical_tabs) { TipSide::Right } else { TipSide::Below }
+}
+
+/// The drawn title does not show every character. Measure uses the same font as the strip.
+unsafe fn tab_name_clipped(i: usize) -> bool {
+    let (name, font, dpi, colored, tabs) = app(|a| {
+        let name = tab_text(a, i).0;
+        let colored = a.s.tabs.get(i).and_then(|t| t.color).is_some();
+        (name, a.font, a.dpi, colored, a.tabs_hwnd)
+    });
+    if name.is_empty() || tabs.0.is_null() {
+        return false;
+    }
+    let lay = current_tab_lay();
+    let Some(body) = lay.body.get(i).copied().filter(|r| r.right > r.left && r.bottom > r.top) else {
+        return false;
+    };
+    let close = lay.close.get(i).copied().flatten();
+    let room = tab_label_room(body, close, dpi, colored);
+    let dc = GetDC(Some(tabs));
+    if dc.is_invalid() {
+        return title_clipped(1, room);
+    }
+    let px = text_width(dc, font, &name.encode_utf16().collect::<Vec<_>>());
+    let _ = ReleaseDC(Some(tabs), dc);
+    title_clipped(px, room)
+}
+
 /// "Locked" beside the lock glyph. Anchored below the glyph with a 4px gap.
 unsafe fn lock_tooltip(show: bool, tab: Option<usize>) {
     let (tip, tabs, added) = app(|a| (a.tip, a.tabs_hwnd, a.tab_lock_tip));
@@ -1307,7 +1509,7 @@ unsafe fn lock_tooltip(show: bool, tab: Option<usize>) {
     let Some(item) = tab_lock_screen(i) else { return };
     let label = tr(crate::Key::Locked2);
     let key = 0x7000_0000_0000_0000u64 | (i as u64);
-    let (now, _) = crate::ui::tip_enter(tabs, LOCK_ID, key, label, item, crate::ui::TipSide::Below, added);
+    let (now, _) = crate::ui::tip_enter(tabs, LOCK_ID, key, label, item, tab_tip_side(), added);
     app(|a| a.tab_lock_tip = now);
 }
 
@@ -1319,7 +1521,9 @@ unsafe fn path_tooltip(tab: Option<usize>) {
         return;
     }
     let text = tab.filter(|_| app(|a| a.tab_drag.is_none())).and_then(|i| {
-        let body = app(|a| tab_text(a, i).1);
+        let (name, paths) = app(|a| tab_text(a, i));
+        let clipped = tab_name_clipped(i);
+        let body = tab_hover_text(&name, &paths, clipped);
         (!body.is_empty()).then_some((i, body))
     });
     let Some((i, text)) = text else {
@@ -1339,7 +1543,7 @@ unsafe fn path_tooltip(tab: Option<usize>) {
         key,
         &text,
         item,
-        crate::ui::TipSide::Below,
+        tab_tip_side(),
         added,
     );
     app(|a| a.tab_path_tip = now);
@@ -1413,16 +1617,21 @@ fn tabs_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if let Some(from) = from {
                     let mut rc = RECT::default();
                     _ = GetClientRect(h, &mut rc);
+                    let vertical = app(|a| a.s.vertical_tabs);
                     // Reorder only while the pointer stays in this strip, and only across tabs that are on screen.
-                    if y >= 0 && y < rc.bottom {
+                    let inside = if vertical { x >= 0 && x < rc.right } else { y >= 0 && y < rc.bottom };
+                    if inside {
                         let lay = current_tab_lay();
-                        let edge = lay.overflow.map(|r| r.left).unwrap_or(lay.plus.right);
-                        if x < edge {
-                            let to = lay.drag_target(x);
-                            if to != from && to < app(|a| a.s.tabs.len()) {
-                                reorder_tab(from, to);
-                                app(|a| a.tab_drag = Some(to));
-                            }
+                        let (to, before_buttons) = if vertical {
+                            let edge = lay.overflow.map(|r| r.top).unwrap_or(lay.plus.bottom);
+                            (vtab_drag_index(&lay.body, y), y < edge)
+                        } else {
+                            let edge = lay.overflow.map(|r| r.left).unwrap_or(lay.plus.right);
+                            (lay.drag_target(x), x < edge)
+                        };
+                        if before_buttons && to != from && to < app(|a| a.s.tabs.len()) {
+                            reorder_tab(from, to);
+                            app(|a| a.tab_drag = Some(to));
                         }
                     }
                 }
@@ -1733,6 +1942,98 @@ mod tests {
             assert_ne!(list.bottom - list.top, plus.bottom - plus.top);
             assert_ne!(list.right - list.left, plus.right - plus.left);
         }
+    }
+
+    fn same_lay(a: &TabLay, b: &TabLay) -> bool {
+        a.body == b.body && a.close == b.close && a.lock == b.lock && a.plus == b.plus && a.overflow == b.overflow && a.first == b.first && a.count == b.count
+    }
+
+    #[test]
+    fn vertical_off_matches_the_horizontal_layout() {
+        let locked = [false, true, false, false];
+        for (w, n, scroll, dpi) in [(800, 3, 0, 96), (240, 12, 0, 96), (240, 12, 5, 96), (100, 2, 0, 96), (480, 12, 3, 192), (1600, 4, 0, 144)] {
+            let flags = &locked[..n.min(locked.len())];
+            let row = tab_lay(w, n, flags, dpi, scroll);
+            let via = window_tab_lay(false, w, 400, n, flags, dpi, scroll);
+            assert!(same_lay(&row, &via), "w={w} n={n} scroll={scroll} dpi={dpi}");
+        }
+    }
+
+    #[test]
+    fn vertical_strip_stacks_rows_and_scrolls_when_they_do_not_fit() {
+        assert_eq!(vtab_width(96), 180);
+        assert_eq!(vtab_width(144), 270);
+        assert_eq!(vtab_width(192), 360);
+        assert_eq!(vtab_body_h(600, 96), 544);
+        assert_eq!(vtab_body_h(40, 96), 0);
+        assert_eq!(vtab_body_h(800, 192), 688);
+
+        let fit = vtab_lay(180, 600, 3, &[false, true, false], 96, 9);
+        assert!(fit.overflow.is_none());
+        assert_eq!((fit.first, fit.count), (0, 3));
+        assert_eq!(fit.body[0], RECT { left: 6, top: 6, right: 174, bottom: 32 });
+        assert_eq!(fit.body[1].top, 34);
+        assert_eq!(fit.body[2], RECT { left: 6, top: 62, right: 174, bottom: 88 });
+        assert_eq!(fit.body[0].bottom - fit.body[0].top, 26);
+        assert_eq!(fit.plus, RECT { left: 6, top: 90, right: 174, bottom: 116 });
+        assert!(fit.lock[1] && !fit.lock[0]);
+        let c0 = fit.close[0].unwrap();
+        assert!(c0.left >= fit.body[0].left && c0.right <= fit.body[0].right);
+        assert!(c0.top >= fit.body[0].top && c0.bottom <= fit.body[0].bottom);
+        assert_eq!(tab_hit(&fit, 20, 10), TabHit::Tab(0));
+        assert_eq!(tab_hit(&fit, c0.left + 1, c0.top + 1), TabHit::Close(0));
+        let c1 = fit.close[1].unwrap();
+        assert_eq!(tab_hit(&fit, c1.left + 1, c1.top + 1), TabHit::Lock(1));
+        assert_eq!(tab_hit(&fit, 40, 100), TabHit::Plus);
+        assert_eq!(tab_hit(&fit, 2, 10), TabHit::Empty);
+        assert_eq!(vtab_drag_index(&fit.body, 10), 0);
+        assert_eq!(vtab_drag_index(&fit.body, 19), 1);
+        assert_eq!(vtab_drag_index(&fit.body, 40), 1);
+        assert_eq!(vtab_drag_index(&fit.body, 200), 2);
+        assert_eq!(fit.insert_at_y(10), 0);
+        assert_eq!(fit.insert_at_y(200), 3);
+
+        // 220px shows five rows; + and ▾ sit under them. Scroll 4 starts at tab 4.
+        let over = vtab_lay(180, 220, 12, &[false; 12], 96, 4);
+        let o = over.overflow.expect("overflow");
+        assert_eq!((over.first, over.count), (4, 5));
+        assert!(over.body[3].bottom <= over.body[3].top);
+        assert!(over.body[4].bottom > over.body[4].top);
+        assert!(over.body[8].bottom > over.body[8].top);
+        assert!(over.body[9].bottom <= over.body[9].top);
+        assert!(over.body[8].bottom <= over.plus.top);
+        assert!(over.plus.bottom <= o.top);
+        assert_eq!(o.bottom, 214);
+        assert_eq!(tab_hit(&over, 40, o.top + 2), TabHit::Overflow);
+        assert_eq!(vtab_drag_index(&over.body, over.body[4].top + 1), 4);
+        assert_eq!(over.insert_at_y(o.bottom + 4), 9);
+        let hi = vtab_lay(360, 440, 12, &[false; 12], 192, 4);
+        assert_eq!((hi.first, hi.count), (4, 5));
+        assert_eq!(hi.body[4].bottom - hi.body[4].top, 52);
+        assert_eq!(hi.body[4].right - hi.body[4].left, 336);
+
+        let crushed = vtab_lay(1, 0, 4, &[false; 4], 96, 3);
+        assert_eq!(crushed.count, 0);
+        for r in crushed.body.iter().chain([&crushed.plus]).chain(crushed.overflow.iter()) {
+            assert!(r.right >= r.left && r.bottom >= r.top);
+        }
+    }
+
+    #[test]
+    fn a_clipped_title_is_the_first_line_of_the_hover_text() {
+        assert!(!title_clipped(80, 80));
+        assert!(title_clipped(81, 80));
+        assert!(!title_clipped(0, 0));
+        assert!(title_clipped(1, 0));
+        let body = RECT { left: 6, top: 6, right: 174, bottom: 32 };
+        let close = RECT { left: 154, top: 11, right: 170, bottom: 27 };
+        assert_eq!(tab_label_room(body, Some(close), 96, false), 140);
+        assert_eq!(tab_label_room(body, Some(close), 96, true), 135);
+        assert_eq!(tab_label_room(body, None, 96, false), 152);
+        assert_eq!(tab_hover_text("Photos", "C:\\Photos", false), "C:\\Photos");
+        assert_eq!(tab_hover_text("Photos 2026 archive", "C:\\Photos", true), "Photos 2026 archive\nC:\\Photos");
+        assert_eq!(tab_hover_text("Photos 2026 archive", "", true), "Photos 2026 archive");
+        assert_eq!(tab_hover_text("", "C:\\Photos", true), "C:\\Photos");
     }
 }
 

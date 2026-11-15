@@ -341,7 +341,7 @@ pub(crate) unsafe fn relayout() {
         if !preview_h.0.is_null() && g.preview > 0 {
             moves.push((preview_h, g.preview_rect()));
         }
-        moves.push((a.tabs_hwnd, RECT { left: 0, top: strip_top, right: g.w, bottom: strip_top + strip_h }));
+        moves.push((a.tabs_hwnd, tab_strip_rect(g.w, g.top, g.bot, a.s.vertical_tabs, g.vtab, g.side, g.gap)));
         let full = RECT { left: g.gx, top: g.top, right: g.grid_right(), bottom: g.bot };
         let mut shown = Vec::new();
         for (i, p) in a.panes.iter().enumerate().take(a.s.panes()) {
@@ -383,7 +383,8 @@ pub(crate) unsafe fn relayout() {
         // Invalidate it or the tabs keep the previous width until the window is resized.
         _ = InvalidateRect(Some(strip), None, true);
     }
-    // The strip is full width underneath the icons. Raise the visible ones so they take the click.
+    // Top row: the strip sits under the icons. Vertical tabs move the strip to between the side
+    // panel and the panes; the buttons stay on this row either way. Raise the visible ones so they take the click.
     for id in [ID_TB_LIST, ID_TB_LAYOUT, ID_TB_SAVE, ID_TB_LOAD, ID_TB_FAV, ID_TB_BASKET, ID_TB_WATCH, ID_TB_SET] {
         if let Ok(b) = GetDlgItem(Some(main), id) {
             if show_bar || id == ID_TB_SET || id == ID_TB_LIST {

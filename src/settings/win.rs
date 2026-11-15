@@ -1482,6 +1482,19 @@ fn flip(id: u8) {
             }
             return;
         }
+        TG_VTABS => {
+            app(|a| a.s.vertical_tabs ^= true);
+            unsafe {
+                crate::save_session();
+                crate::across_windows(|| {
+                    crate::show_active_tab();
+                    crate::relayout();
+                    crate::redraw_all();
+                });
+                redraw();
+            }
+            return;
+        }
         TG_DRIVES => {
             app(|a| a.s.drive_buttons ^= true);
             unsafe {
