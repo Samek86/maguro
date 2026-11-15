@@ -488,7 +488,7 @@ pub(crate) unsafe fn end_drag() {
     if matches!(kind, Hit::SideSplit) {
         note_save();
     }
-    if matches!(kind, Hit::Preview) {
+    if matches!(kind, Hit::Preview | Hit::VTab) {
         publish_shared();
         across_windows(|| {
             relayout();

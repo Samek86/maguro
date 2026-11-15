@@ -374,11 +374,84 @@ pub(crate) fn in_rect(r: RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
-/// Width of the vertical window-tab strip at 96 DPI. The column stays this wide as the window grows.
-pub(crate) const VTAB_W: i32 = 180;
+/// Grip on the strip's right edge, in DIP. It matches the tab pad, so it stays clear of the close box.
+pub(crate) const VTAB_EDGE_DIP: i32 = 6;
 
+/// Default strip width at `dpi`. A width the user dragged is [`vtab_pref_px`].
 pub(crate) fn vtab_width(dpi: i32) -> i32 {
     VTAB_W * dpi.max(1) / 96
+}
+
+/// Largest DIP for a client `client_w` px wide: the smaller of 600 and half that client.
+/// Both limits are in DIP. A non-positive client keeps the 600 cap.
+pub(crate) fn vtab_max_dip(client_w: i32, dpi: i32) -> i32 {
+    let dpi = i64::from(dpi.max(1));
+    let half = if client_w <= 0 { i64::from(VTAB_MAX_DIP) } else { i64::from(client_w) * 96 / (dpi * 2) };
+    half.clamp(0, i64::from(VTAB_MAX_DIP)) as i32
+}
+
+/// Pixel width from the stored DIP, capped by 600 and by half the client. Not yet cut for the panes.
+pub(crate) fn vtab_pref_px(stored_dip: i32, dpi: i32, client_w: i32) -> i32 {
+    let dpi = dpi.max(1);
+    let stored = vtab_stored_dip(Some(i64::from(stored_dip)));
+    let max = vtab_max_dip(client_w, dpi);
+    let dip = if max < VTAB_MIN_DIP { max.max(0) } else { stored.min(max) };
+    (i64::from(dip) * i64::from(dpi) / 96) as i32
+}
+
+/// `pref` limited to the pixels the panes can spare.
+pub(crate) fn vtab_fit_px(pref: i32, room_px: i32) -> i32 {
+    pref.max(0).min(room_px.max(0))
+}
+
+/// On-screen strip width. `0` when vertical tabs are off.
+/// `room_px` is what is left after the side panel, the right pad, and the pane minimums.
+/// A tight window may return less than 100 DIP.
+pub(crate) fn vtab_display_px(vertical: bool, stored_dip: i32, dpi: i32, client_w: i32, room_px: i32) -> i32 {
+    if !vertical {
+        return 0;
+    }
+    vtab_fit_px(vtab_pref_px(stored_dip, dpi, client_w), room_px)
+}
+
+/// DIP to store while the right edge is at main-window `edge_x`.
+/// The cursor stops at `room_px`. The value stays in 100..=min(600, half the client).
+/// A window whose half is under 100 DIP still stores 100; [`vtab_display_px`] draws it narrower.
+pub(crate) fn vtab_drag_dip(edge_x: i32, left: i32, dpi: i32, client_w: i32, room_px: i32) -> i32 {
+    let dpi = dpi.max(1);
+    let px = (edge_x - left).clamp(0, room_px.max(0));
+    let dip = (i64::from(px) * 96 / i64::from(dpi)) as i32;
+    let max = vtab_max_dip(client_w, dpi);
+    if max < VTAB_MIN_DIP {
+        return VTAB_MIN_DIP;
+    }
+    dip.clamp(VTAB_MIN_DIP, max)
+}
+
+/// Grip thickness in px. At least one pixel, so a hit test still has an edge.
+pub(crate) fn vtab_edge_px(dpi: i32) -> i32 {
+    (VTAB_EDGE_DIP * dpi.max(1) / 96).max(1)
+}
+
+/// Grip width from the layout pad. `pad` is 8 DIP scaled and the grip is 6 DIP, so this is `pad * 6 / 8`.
+pub(crate) fn vtab_edge_from_pad(pad: i32) -> i32 {
+    if pad <= 0 {
+        return 0;
+    }
+    (pad * VTAB_EDGE_DIP / 8).max(1)
+}
+
+/// True when `(x, y)` is on the vertical strip's right-edge grip.
+/// Off, a non-positive `edge`, or an empty strip is never a hit, so the top row has no grip.
+pub(crate) fn vtab_edge_hit(vertical: bool, strip: RECT, edge: i32, x: i32, y: i32) -> bool {
+    if !vertical || edge <= 0 || strip.right <= strip.left || strip.bottom <= strip.top {
+        return false;
+    }
+    if y < strip.top || y >= strip.bottom {
+        return false;
+    }
+    let left = strip.right.saturating_sub(edge).max(strip.left);
+    x >= left && x < strip.right
 }
 
 /// Height the vertical strip can use: below the toolbar row, above the status line.
@@ -1199,7 +1272,7 @@ pub(crate) fn show_tab(index: usize) {
         let locked: Vec<bool> = a.s.tabs.iter().map(|t| t.locked).collect();
         let n = locked.len().max(1);
         let lay = if a.s.vertical_tabs {
-            let w = vtab_width(a.dpi).min(rc.right.max(1));
+            let w = geo(a).vtab.max(1);
             window_tab_lay(true, w, vtab_body_h(rc.bottom, a.dpi), n, &locked, a.dpi, a.tab_scroll)
         } else {
             let w = tab_area_width(rc.right, a.dpi, a.s.bar, drive_slots(a.s.drive_buttons, a.drives.len()));
@@ -1312,7 +1385,7 @@ fn tab_text(a: &App, i: usize) -> (String, String) {
 }
 
 pub(crate) unsafe fn paint_tabs(h: HWND) {
-    let (active, names, colors, mut hot, mut hot_close, hot_plus, hot_over, dpi, font, icon, accent, vertical) = app(|a| {
+    let (active, names, colors, mut hot, mut hot_close, hot_plus, hot_over, dpi, font, icon, accent, vertical, edge_hot) = app(|a| {
         (
             a.s.tab,
             (0..a.s.tabs.len()).map(|i| tab_text(a, i).0).collect::<Vec<_>>(),
@@ -1326,6 +1399,7 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
             a.icon_font,
             a.s.accent_now(),
             a.s.vertical_tabs,
+            a.s.vertical_tabs && a.gap_hot == Some(Hit::VTab) && a.drag.is_none(),
         )
     });
     // A file drag warms the tab under the pointer without touching mouse-hover state.
@@ -1343,6 +1417,11 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
             if rc.right > rc.left {
                 fill(dc, RECT { right: rc.left + 1, ..rc }, pal().line);
                 fill(dc, RECT { left: rc.right - 1, ..rc }, pal().line);
+            }
+            // The main window's hover line sits under this child. Paint the grip here.
+            if edge_hot {
+                let t = (2 * dpi / 96).max(1);
+                fill(dc, RECT { left: rc.right.saturating_sub(t), ..rc }, accent);
             }
         } else {
             fill(dc, RECT { top: rc.bottom - 1, ..rc }, pal().line);
@@ -1569,6 +1648,60 @@ pub(crate) unsafe fn place_tab_edit() {
     place_edit(edit, RECT { left, top: r.top, right, bottom: r.bottom }, true);
 }
 
+thread_local! {
+    static GRIP_CLICK: Cell<(u32, i32, i32)> = const { Cell::new((0, 0, 0)) };
+}
+
+/// Second press on the grip within the system double-click time. Capture moves the
+/// first mouse-up to the main window, so the strip may not see `WM_LBUTTONDBLCLK`.
+unsafe fn grip_second_click(x: i32, y: i32) -> bool {
+    let now = windows::Win32::System::SystemInformation::GetTickCount();
+    let (then, px, py) = GRIP_CLICK.with(|c| c.get());
+    GRIP_CLICK.with(|c| c.set((now, x, y)));
+    if then == 0 {
+        return false;
+    }
+    let ms = GetDoubleClickTime();
+    let (cx, cy) = (GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK));
+    now.wrapping_sub(then) <= ms && (x - px).abs() * 2 <= cx.max(1) && (y - py).abs() * 2 <= cy.max(1)
+}
+
+/// Right-edge grip, in this strip's client coordinates. Off when the tabs are on the top row.
+unsafe fn on_vtab_grip(h: HWND, x: i32, y: i32) -> bool {
+    if !app(|a| a.s.vertical_tabs) {
+        return false;
+    }
+    let mut rc = RECT::default();
+    _ = GetClientRect(h, &mut rc);
+    let edge = app(|a| vtab_edge_px(a.dpi));
+    vtab_edge_hit(true, rc, edge, x, y)
+}
+
+/// Double-click on the grip. Other windows share the width, same as the vertical-tabs switch.
+unsafe fn reset_vtab_width() {
+    app(|a| a.s.vertical_tabs_width = VTAB_W);
+    publish_shared();
+    relayout();
+    redraw_all();
+    across_windows(|| {
+        relayout();
+        redraw_all();
+    });
+    note_save();
+}
+
+/// The strip owns the pixels, so the click starts here. The main window then tracks it like the side splitter.
+unsafe fn begin_vtab_drag() {
+    let main = app(|a| a.main);
+    gap_hover(main, None);
+    app(|a| {
+        a.tab_press = None;
+        a.tab_drag = None;
+        a.drag = Some(Hit::VTab);
+    });
+    SetCapture(main);
+}
+
 pub(crate) extern "system" fn tabs_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     crate::crash::catch_wnd(std::panic::AssertUnwindSafe(|| tabs_proc_inner(h, msg, wp, lp)))
 }
@@ -1583,8 +1716,46 @@ fn tabs_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_SIZE => place_tab_edit(),
             WM_ERASEBKGND => return LRESULT(1),
+            WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
+                let resize = app(|a| a.drag == Some(Hit::VTab)) || {
+                    let mut pt = POINT::default();
+                    _ = GetCursorPos(&mut pt);
+                    _ = ScreenToClient(h, &mut pt);
+                    on_vtab_grip(h, pt.x, pt.y)
+                };
+                if resize {
+                    SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
+                    return LRESULT(1);
+                }
+                return DefWindowProcW(h, msg, wp, lp);
+            }
             WM_MOUSEMOVE => {
                 let (x, y) = xy(lp);
+                if on_vtab_grip(h, x, y) && app(|a| a.tab_drag.is_none() && a.drag.is_none()) {
+                    let paint = app(|a| {
+                        let paint = a.tab_hot.is_some() || a.tab_hot_close || a.tab_hot_plus || a.tab_hot_over;
+                        a.tab_hot = None;
+                        a.tab_hot_close = false;
+                        a.tab_hot_plus = false;
+                        a.tab_hot_over = false;
+                        paint
+                    });
+                    let was = app(|a| a.gap_hot);
+                    gap_hover(app(|a| a.main), Some(Hit::VTab));
+                    if paint || was != Some(Hit::VTab) {
+                        tabs_invalidate();
+                    }
+                    lock_tooltip(false, None);
+                    path_tooltip(None);
+                    SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
+                    let mut t = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
+                    _ = TrackMouseEvent(&mut t);
+                    return LRESULT(0);
+                }
+                if app(|a| a.gap_hot == Some(Hit::VTab)) {
+                    gap_hover(app(|a| a.main), None);
+                    tabs_invalidate();
+                }
                 let hit = tab_mouse(x, y);
                 let (hot, close, plus, over) = match hit {
                     TabHit::Tab(i) | TabHit::Lock(i) => (Some(i), false, false, false),
@@ -1643,6 +1814,9 @@ fn tabs_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 _ = TrackMouseEvent(&mut t);
             }
             WM_MOUSELEAVE => {
+                if app(|a| a.gap_hot == Some(Hit::VTab)) {
+                    gap_hover(app(|a| a.main), None);
+                }
                 lock_tooltip(false, None);
                 path_tooltip(None);
                 app(|a| {
@@ -1656,6 +1830,16 @@ fn tabs_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_LBUTTONDOWN => {
                 let (x, y) = xy(lp);
                 end_rename(true);
+                if on_vtab_grip(h, x, y) {
+                    lock_tooltip(false, None);
+                    path_tooltip(None);
+                    if grip_second_click(x, y) {
+                        reset_vtab_width();
+                    } else {
+                        begin_vtab_drag();
+                    }
+                    return LRESULT(0);
+                }
                 match tab_mouse(x, y) {
                     TabHit::Tab(i) | TabHit::Close(i) | TabHit::Lock(i) => {
                         // The lock occupies the close slot and does not arm a close.
@@ -1690,12 +1874,19 @@ fn tabs_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
             WM_LBUTTONDBLCLK => {
-                if let TabHit::Tab(i) = tab_mouse(xy(lp).0, xy(lp).1) {
+                let (x, y) = xy(lp);
+                if on_vtab_grip(h, x, y) {
+                    reset_vtab_width();
+                } else if let TabHit::Tab(i) = tab_mouse(x, y) {
                     begin_rename(i);
                 }
             }
             WM_MBUTTONUP => {
-                let hit = tab_mouse(xy(lp).0, xy(lp).1);
+                let (x, y) = xy(lp);
+                if on_vtab_grip(h, x, y) {
+                    return LRESULT(0);
+                }
+                let hit = tab_mouse(x, y);
                 if middle_closes(&current_tab_lay(), hit) {
                     if let TabHit::Tab(i) | TabHit::Close(i) = hit {
                         close_tab(i);
@@ -1704,6 +1895,9 @@ fn tabs_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_RBUTTONUP => {
                 let (x, y) = xy(lp);
+                if on_vtab_grip(h, x, y) {
+                    return LRESULT(0);
+                }
                 let i = match tab_mouse(x, y) {
                     TabHit::Tab(i) | TabHit::Close(i) | TabHit::Lock(i) => i,
                     _ => app(|a| a.s.tab),
@@ -2034,6 +2228,91 @@ mod tests {
         assert_eq!(tab_hover_text("Photos 2026 archive", "C:\\Photos", true), "Photos 2026 archive\nC:\\Photos");
         assert_eq!(tab_hover_text("Photos 2026 archive", "", true), "Photos 2026 archive");
         assert_eq!(tab_hover_text("", "C:\\Photos", true), "C:\\Photos");
+    }
+
+    #[test]
+    fn vertical_strip_width_clamps_to_the_window_and_the_grip_is_only_the_right_edge() {
+        use crate::{vtab_stored_dip, VTAB_MAX_DIP, VTAB_MIN_DIP, VTAB_W};
+        assert_eq!(vtab_stored_dip(None), VTAB_W);
+        assert_eq!(vtab_stored_dip(Some(i64::from(VTAB_W))), VTAB_W);
+        assert_eq!(vtab_stored_dip(Some(320)), 320);
+        assert_eq!(vtab_stored_dip(Some(i64::from(VTAB_MIN_DIP))), VTAB_MIN_DIP);
+        assert_eq!(vtab_stored_dip(Some(i64::from(VTAB_MAX_DIP))), VTAB_MAX_DIP);
+        assert_eq!(vtab_stored_dip(Some(99)), VTAB_MIN_DIP);
+        assert_eq!(vtab_stored_dip(Some(601)), VTAB_MAX_DIP);
+        assert_eq!(vtab_stored_dip(Some(-4)), VTAB_MIN_DIP);
+        assert_eq!(vtab_stored_dip(Some(i64::MAX)), VTAB_MAX_DIP);
+
+        assert_eq!(vtab_max_dip(2000, 96), VTAB_MAX_DIP);
+        assert_eq!(vtab_max_dip(1200, 96), VTAB_MAX_DIP);
+        assert_eq!(vtab_max_dip(1000, 96), 500);
+        assert_eq!(vtab_max_dip(800, 96), 400);
+        assert_eq!(vtab_max_dip(1600, 192), 400);
+        assert_eq!(vtab_max_dip(800, 144), 266);
+        assert_eq!(vtab_max_dip(100, 96), 50);
+        assert_eq!(vtab_max_dip(0, 96), VTAB_MAX_DIP);
+        assert_eq!(vtab_max_dip(-10, 192), VTAB_MAX_DIP);
+
+        assert_eq!(vtab_pref_px(VTAB_W, 96, 2000), 180);
+        assert_eq!(vtab_pref_px(VTAB_W, 192, 4000), 360);
+        assert_eq!(vtab_pref_px(VTAB_W, 144, 2000), 270);
+        assert_eq!(vtab_pref_px(500, 96, 800), 400);
+        assert_eq!(vtab_pref_px(900, 96, 2000), VTAB_MAX_DIP);
+        assert_eq!(vtab_pref_px(50, 96, 2000), VTAB_MIN_DIP);
+        assert_eq!(vtab_pref_px(VTAB_W, 96, 100), 50);
+
+        assert_eq!(vtab_display_px(false, 320, 96, 2000, 2000), 0);
+        assert_eq!(vtab_display_px(true, VTAB_W, 96, 2000, 2000), 180);
+        assert_eq!(vtab_display_px(true, VTAB_W, 96, 2000, 120), 120);
+        assert_eq!(vtab_display_px(true, VTAB_W, 96, 2000, 0), 0);
+        assert_eq!(vtab_display_px(true, 400, 96, 800, 800), 400);
+        assert_eq!(vtab_display_px(true, 400, 96, 800, 150), 150);
+        assert_eq!(vtab_display_px(true, VTAB_W, 192, 4000, 4000), 360);
+
+        let left = 248;
+        assert_eq!(vtab_drag_dip(left + 180, left, 96, 2000, 800), 180);
+        assert_eq!(vtab_drag_dip(left + 50, left, 96, 2000, 800), VTAB_MIN_DIP);
+        assert_eq!(vtab_drag_dip(left + 700, left, 96, 2000, 800), VTAB_MAX_DIP);
+        assert_eq!(vtab_drag_dip(left + 500, left, 96, 800, 800), 400);
+        assert_eq!(vtab_drag_dip(left + 400, left, 192, 4000, 2000), 200);
+        assert_eq!(vtab_drag_dip(left + 150, left, 96, 2000, 150), 150);
+        assert_eq!(vtab_drag_dip(left + 50, left, 96, 2000, 50), VTAB_MIN_DIP);
+        assert_eq!(vtab_drag_dip(left + 10, left, 96, 100, 80), VTAB_MIN_DIP);
+        assert_eq!(vtab_drag_dip(left - 20, left, 96, 2000, 800), VTAB_MIN_DIP);
+
+        for dpi in [96, 120, 144, 192] {
+            let pad = 8 * dpi / 96;
+            assert_eq!(vtab_edge_from_pad(pad), vtab_edge_px(dpi), "dpi {dpi}");
+        }
+        assert_eq!(vtab_edge_px(96), 6);
+        assert_eq!(vtab_edge_px(192), 12);
+        assert_eq!(vtab_edge_from_pad(0), 0);
+
+        let strip = RECT { left: 248, top: 32, right: 428, bottom: 576 };
+        let edge = vtab_edge_px(96);
+        assert!(vtab_edge_hit(true, strip, edge, 427, 40));
+        assert!(vtab_edge_hit(true, strip, edge, 422, 575));
+        assert!(!vtab_edge_hit(true, strip, edge, 421, 40));
+        assert!(!vtab_edge_hit(true, strip, edge, 428, 40));
+        assert!(!vtab_edge_hit(true, strip, edge, 244, 40));
+        assert!(!vtab_edge_hit(true, strip, edge, 427, 31));
+        assert!(!vtab_edge_hit(true, strip, edge, 427, 576));
+        assert!(!vtab_edge_hit(false, strip, edge, 427, 40));
+        assert!(!vtab_edge_hit(true, strip, 0, 427, 40));
+        assert!(!vtab_edge_hit(true, RECT { right: 248, ..strip }, edge, 247, 40));
+
+        for (width, dpi) in [(100, 96), (180, 96), (320, 96), (600, 96), (200, 192), (360, 144)] {
+            let lay = vtab_lay(width, 400, 2, &[false, true], dpi, 0);
+            let edge = vtab_edge_px(dpi);
+            let strip = RECT { left: 0, top: 0, right: width, bottom: 400 };
+            for c in lay.close.into_iter().flatten() {
+                assert!(c.right <= width - edge, "close {c:?} overlaps the {edge}px grip at {width}px dpi {dpi}");
+                assert!(!vtab_edge_hit(true, strip, edge, c.left, c.top));
+                assert!(!vtab_edge_hit(true, strip, edge, c.right - 1, (c.top + c.bottom) / 2));
+            }
+            assert!(vtab_edge_hit(true, strip, edge, width - 1, 20));
+            assert!(!vtab_edge_hit(true, strip, edge, width - edge - 1, 20));
+        }
     }
 }
 

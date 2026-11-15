@@ -70,6 +70,30 @@ fn is_zero_i32(v: &i32) -> bool {
     *v == 0
 }
 
+fn vtab_width_default() -> i32 {
+    crate::VTAB_W
+}
+
+fn is_vtab_default(v: &i32) -> bool {
+    *v == crate::VTAB_W
+}
+
+fn vtab_dip_json(v: &Value) -> i32 {
+    let n = match v {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().filter(|f| f.is_finite()).map(|f| f.trunc() as i64)),
+        _ => None,
+    };
+    crate::vtab_stored_dip(n)
+}
+
+fn de_vtab_width<'de, D>(d: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Value::deserialize(d)?;
+    Ok(vtab_dip_json(&v))
+}
+
 fn is_zero_usize(v: &usize) -> bool {
     *v == 0
 }
@@ -257,6 +281,9 @@ struct SettingsFile {
     /// Window tabs between the favourites panel and the panes. Missing means off. Omitted while off, so an older file stays unchanged.
     #[serde(default, skip_serializing_if = "is_off")]
     vertical_tabs: bool,
+    /// Vertical window-tab strip width in DIP. Missing or 180 omits the key. Out of range clamps on load.
+    #[serde(default = "vtab_width_default", skip_serializing_if = "is_vtab_default", deserialize_with = "de_vtab_width")]
+    vertical_tabs_width: i32,
     #[serde(default = "view_details")]
     view_new: i32,
     /// Icon size for `view_new`. Missing or 0 is that mode's usual size (large icons stay 96).
@@ -486,6 +513,7 @@ impl SettingsFile {
             bar: true,
             drive_buttons: true,
             vertical_tabs: false,
+            vertical_tabs_width: vtab_width_default(),
             view_new: 4,
             view_icon: 0,
             start: 0,
@@ -606,6 +634,7 @@ impl SettingsFile {
             bar: s.bar,
             drive_buttons: s.drive_buttons,
             vertical_tabs: s.vertical_tabs,
+            vertical_tabs_width: crate::vtab_stored_dip(Some(i64::from(s.vertical_tabs_width))),
             view_new: s.view_new,
             view_icon: s.view_icon,
             start: s.start_new.min(2),
@@ -721,6 +750,7 @@ impl SettingsFile {
         self.extra.remove("preview_pane");
         self.extra.remove("preview_width");
         self.extra.remove("vertical_tabs");
+        self.extra.remove("vertical_tabs_width");
         self.extra.remove("peek_wheel_nav");
         self.extra.remove("remember_folder_view");
         self.extra.remove("show_folder_sizes");
@@ -807,6 +837,7 @@ impl SettingsFile {
         s.bar = self.bar;
         s.drive_buttons = self.drive_buttons;
         s.vertical_tabs = self.vertical_tabs;
+        s.vertical_tabs_width = crate::vtab_stored_dip(Some(i64::from(self.vertical_tabs_width)));
         let mode = crate::known_view_mode(self.view_new);
         s.view_icon = if mode == self.view_new { self.view_icon.max(0) } else { 0 };
         s.view_new = mode;
@@ -2321,6 +2352,45 @@ mod tests {
         file.merge_forward(&file.clone());
         let saved: Value = serde_json::from_str(&pretty(&file)).unwrap();
         assert_eq!(saved["vertical_tabs"], true);
+    }
+
+    #[test]
+    fn vertical_tabs_width_defaults_to_180_and_round_trips() {
+        use crate::{VTAB_MAX_DIP, VTAB_MIN_DIP, VTAB_W};
+        assert_eq!(Session::default().vertical_tabs_width, VTAB_W);
+        assert_eq!(adopt(r#"{"version":1}"#).unwrap().vertical_tabs_width, VTAB_W);
+        assert_eq!(Session::parse("side=1\n").vertical_tabs_width, VTAB_W);
+        assert_eq!(Session::parse("verticaltabsw=").vertical_tabs_width, VTAB_W);
+        assert_eq!(Session::parse("verticaltabsw=nope").vertical_tabs_width, VTAB_W);
+        assert_eq!(Session::parse("verticaltabsw=50").vertical_tabs_width, VTAB_MIN_DIP);
+        assert_eq!(Session::parse("verticaltabsw=9000").vertical_tabs_width, VTAB_MAX_DIP);
+        assert_eq!(Session::parse("verticaltabsw=320").vertical_tabs_width, 320);
+        assert!(!Session::default().to_ini().contains("verticaltabsw"));
+        assert!(!Session::parse("verticaltabsw=180").to_ini().contains("verticaltabsw"));
+        let mut s = Session::default();
+        s.vertical_tabs_width = 320;
+        assert!(s.to_ini().contains("verticaltabsw=320\n"));
+        assert_eq!(Session::parse(&s.to_ini()).vertical_tabs_width, 320);
+        let text = pretty(&SettingsFile::from_session(&s));
+        assert!(text.contains("\"vertical_tabs_width\": 320"), "{text}");
+        assert!(!text.contains("verticaltabsw"));
+        assert_eq!(adopt(&text).unwrap().vertical_tabs_width, 320);
+        assert!(!pretty(&SettingsFile::from_session(&Session::default())).contains("vertical_tabs_width"));
+        assert_eq!(adopt(r#"{"version":1,"vertical_tabs_width":50}"#).unwrap().vertical_tabs_width, VTAB_MIN_DIP);
+        assert_eq!(adopt(r#"{"version":1,"vertical_tabs_width":900}"#).unwrap().vertical_tabs_width, VTAB_MAX_DIP);
+        assert_eq!(adopt(r#"{"version":1,"vertical_tabs_width":180.9}"#).unwrap().vertical_tabs_width, VTAB_W);
+        assert_eq!(adopt(r#"{"version":1,"vertical_tabs_width":"wide"}"#).unwrap().vertical_tabs_width, VTAB_W);
+        assert_eq!(adopt(r#"{"version":1,"vertical_tabs_width":null}"#).unwrap().vertical_tabs_width, VTAB_W);
+        let mut kept = Session::default();
+        kept.vertical_tabs_width = 240;
+        kept.take_layout(&Session { vertical_tabs_width: 400, ..Session::default() });
+        assert_eq!(kept.vertical_tabs_width, 240);
+        let mut file = SettingsFile::from_session(&s);
+        file.extra.insert("vertical_tabs_width".into(), serde_json::json!(10));
+        file.merge_forward(&file.clone());
+        let saved: Value = serde_json::from_str(&pretty(&file)).unwrap();
+        assert_eq!(saved["vertical_tabs_width"], 320);
+        assert!(saved.get("extra").is_none());
     }
 
     #[test]

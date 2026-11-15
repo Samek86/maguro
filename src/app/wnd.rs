@@ -224,7 +224,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     return DefWindowProcW(h, msg, wp, lp);
                 };
                 let c = match d {
-                    Hit::Side | Hit::Col(_) | Hit::Preview => IDC_SIZEWE,
+                    Hit::Side | Hit::Col(_) | Hit::Preview | Hit::VTab => IDC_SIZEWE,
                     Hit::Row(..) | Hit::SideSplit => IDC_SIZENS,
                 };
                 SetCursor(LoadCursorW(None, c).ok());
@@ -273,12 +273,26 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                             let px = (g.w - g.pad - left).max(1);
                             a.s.preview_w = preview_dip(px, a.dpi);
                         }
+                        Hit::VTab => {
+                            let left = vtab_left(g.side, g.gap);
+                            let room = vtab_room_px(g.w, left, g.pad, g.gap, a.s.heights.len() as i32, min_w);
+                            a.s.vertical_tabs_width = vtab_drag_dip(x, left, a.dpi, g.w, room);
+                        }
                     }
-                    a.s.side = kept_side(a.s.side_shown(), a.s.side, geo(a).side);
-                    Some(())
+                    // The strip drag must not write the side panel's temporary clamp back.
+                    // A wide strip only borrows that room; narrowing it restores the panel.
+                    if d != Hit::VTab {
+                        a.s.side = kept_side(a.s.side_shown(), a.s.side, geo(a).side);
+                    }
+                    Some(d)
                 });
-                if moved.is_some() {
-                    show_bars(); // panes stay put until release: relaying out 16 Explorer views per mouse move is ~120ms
+                if let Some(kind) = moved {
+                    // Panes stay put until release: relaying out Explorer views per mouse move is ~120ms.
+                    // The guide bar tracks the new edge, same as the side-panel splitter.
+                    show_bars();
+                    if kind == Hit::VTab {
+                        SetCursor(LoadCursorW(None, IDC_SIZEWE).ok());
+                    }
                 }
             }
             WM_LBUTTONUP => {
@@ -295,18 +309,19 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     Some(Hit::Col(_)) => a.s.colr = even(a.s.heights.len()),
                     Some(Hit::Row(c, _)) => a.s.rowr[c] = even(a.s.heights[c]),
                     Some(Hit::Preview) => a.s.preview_w = 0,
+                    Some(Hit::VTab) => a.s.vertical_tabs_width = VTAB_W,
                     None => {}
                 });
                 if matches!(d, Some(Hit::SideSplit)) {
                     note_save();
                 }
-                if matches!(d, Some(Hit::Preview)) {
+                if matches!(d, Some(Hit::Preview | Hit::VTab)) {
                     publish_shared();
                     note_save();
                 }
                 relayout();
                 redraw_all();
-                if matches!(d, Some(Hit::Preview)) {
+                if matches!(d, Some(Hit::Preview | Hit::VTab)) {
                     across_windows(|| {
                         relayout();
                         redraw_all();

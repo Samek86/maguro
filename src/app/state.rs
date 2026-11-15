@@ -654,6 +654,7 @@ fn copy_shared(dst: &mut Session, src: &Session) {
     dst.bar = src.bar;
     dst.drive_buttons = src.drive_buttons;
     dst.vertical_tabs = src.vertical_tabs;
+    dst.vertical_tabs_width = src.vertical_tabs_width;
     dst.view_new = src.view_new;
     dst.view_icon = src.view_icon;
     dst.start_new = src.start_new;
