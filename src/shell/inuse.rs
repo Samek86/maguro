@@ -797,11 +797,143 @@ impl IFileOperationProgressSink_Impl for InUseSink_Impl {
     }
 }
 
+#[implement(IFileOperationProgressSink)]
+struct MarkSink;
+
+impl IFileOperationProgressSink_Impl for MarkSink_Impl {
+    fn StartOperations(&self) -> Result<()> {
+        Ok(())
+    }
+    fn FinishOperations(&self, _hrresult: HRESULT) -> Result<()> {
+        Ok(())
+    }
+    fn PreRenameItem(&self, _dwflags: u32, _psiitem: windows_core::Ref<IShellItem>, _psznewname: &PCWSTR) -> Result<()> {
+        Ok(())
+    }
+    fn PostRenameItem(&self, _dwflags: u32, psiitem: windows_core::Ref<IShellItem>, psznewname: &PCWSTR, hrrename: HRESULT, psinewlycreated: windows_core::Ref<IShellItem>) -> Result<()> {
+        if hrrename.is_ok() {
+            if let Some(src) = shell_path(&psiitem) {
+                if let Some(dest) = sink_dest(&src, None, &pcw_string(psznewname), shell_path(&psinewlycreated)) {
+                    crate::marks::follow::on_own_rename(&src, &dest);
+                }
+            }
+        }
+        Ok(())
+    }
+    fn PreMoveItem(&self, _dwflags: u32, _psiitem: windows_core::Ref<IShellItem>, _psidestinationfolder: windows_core::Ref<IShellItem>, _psznewname: &PCWSTR) -> Result<()> {
+        Ok(())
+    }
+    fn PostMoveItem(
+        &self,
+        _dwflags: u32,
+        psiitem: windows_core::Ref<IShellItem>,
+        psidestinationfolder: windows_core::Ref<IShellItem>,
+        psznewname: &PCWSTR,
+        hrmove: HRESULT,
+        psinewlycreated: windows_core::Ref<IShellItem>,
+    ) -> Result<()> {
+        if hrmove.is_ok() {
+            if let Some(src) = shell_path(&psiitem) {
+                if let Some(dest) = sink_dest(&src, shell_path(&psidestinationfolder), &pcw_string(psznewname), shell_path(&psinewlycreated)) {
+                    crate::marks::follow::on_own_move(&src, &dest);
+                }
+            }
+        }
+        Ok(())
+    }
+    fn PreCopyItem(&self, _dwflags: u32, _psiitem: windows_core::Ref<IShellItem>, _psidestinationfolder: windows_core::Ref<IShellItem>, _psznewname: &PCWSTR) -> Result<()> {
+        Ok(())
+    }
+    fn PostCopyItem(
+        &self,
+        _dwflags: u32,
+        _psiitem: windows_core::Ref<IShellItem>,
+        _psidestinationfolder: windows_core::Ref<IShellItem>,
+        _psznewname: &PCWSTR,
+        _hrcopy: HRESULT,
+        _psinewlycreated: windows_core::Ref<IShellItem>,
+    ) -> Result<()> {
+        // A copy keeps the mark on the original. The new file is not marked.
+        if _hrcopy.is_ok() {
+            if let Some(src) = shell_path(&_psiitem) {
+                let dest = sink_dest(&src, shell_path(&_psidestinationfolder), &pcw_string(_psznewname), shell_path(&_psinewlycreated));
+                crate::marks::follow::on_own_copy(&src, dest.as_deref().unwrap_or(""));
+            }
+        }
+        Ok(())
+    }
+    fn PreDeleteItem(&self, _dwflags: u32, _psiitem: windows_core::Ref<IShellItem>) -> Result<()> {
+        Ok(())
+    }
+    fn PostDeleteItem(&self, _dwflags: u32, psiitem: windows_core::Ref<IShellItem>, hrdelete: HRESULT, psinewlycreated: windows_core::Ref<IShellItem>) -> Result<()> {
+        if hrdelete.is_ok() {
+            if let Some(src) = shell_path(&psiitem) {
+                crate::marks::follow::on_own_delete(&src, psinewlycreated.as_ref().is_some());
+            }
+        }
+        Ok(())
+    }
+    fn PreNewItem(&self, _dwflags: u32, _psidestinationfolder: windows_core::Ref<IShellItem>, _psznewname: &PCWSTR) -> Result<()> {
+        Ok(())
+    }
+    fn PostNewItem(
+        &self,
+        _dwflags: u32,
+        _psidestinationfolder: windows_core::Ref<IShellItem>,
+        _psznewname: &PCWSTR,
+        _psztemplatename: &PCWSTR,
+        _dwfileattributes: u32,
+        _hrnew: HRESULT,
+        _psinewitem: windows_core::Ref<IShellItem>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn UpdateProgress(&self, _iworktotal: u32, _iworksofar: u32) -> Result<()> {
+        Ok(())
+    }
+    fn ResetTimer(&self) -> Result<()> {
+        Ok(())
+    }
+    fn PauseTimer(&self) -> Result<()> {
+        Ok(())
+    }
+    fn ResumeTimer(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Destination path from the created item, or from the folder plus the new name.
+fn sink_dest(src: &str, folder: Option<String>, new_name: &str, created: Option<String>) -> Option<String> {
+    if let Some(path) = created {
+        if !path.is_empty() {
+            return Some(path);
+        }
+    }
+    let name = if new_name.is_empty() {
+        std::path::Path::new(src).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    } else {
+        new_name.to_string()
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let folder = folder.unwrap_or_else(|| std::path::Path::new(src).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
+    if folder.is_empty() {
+        return None;
+    }
+    Some(format!("{}\\{name}", folder.trim_end_matches(['\\', '/'])))
+}
+
 pub(crate) unsafe fn perform_watched(op: &IFileOperation) -> (Result<()>, Vec<String>) {
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let sink: IFileOperationProgressSink = InUseSink { recorded: recorded.clone() }.into();
+    let marks: IFileOperationProgressSink = MarkSink.into();
     let cookie = op.Advise(&sink).ok();
+    let mark_cookie = op.Advise(&marks).ok();
     let result = op.PerformOperations();
+    if let Some(c) = mark_cookie {
+        let _ = op.Unadvise(c);
+    }
     if let Some(c) = cookie {
         let _ = op.Unadvise(c);
     }

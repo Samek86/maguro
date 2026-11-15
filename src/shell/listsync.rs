@@ -802,7 +802,13 @@ pub(crate) unsafe fn disarm(hwnd: HWND) {
 pub(crate) unsafe fn on_shell(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
     let Some((event, item, item2)) = read_change(wp, lp) else { return };
     let event = event as u32;
-    let Some(kind) = shell_note(event) else { return };
+    crate::marks::follow::on_shell_event(event, &item, &item2);
+    let Some(kind) = shell_note(event) else {
+        if crate::marks::follow::wait_ms().is_some() {
+            arm_list_timer(hwnd);
+        }
+        return;
+    };
     let folders = event_folders(kind, &item, &item2);
     if folders.is_empty() {
         return;
@@ -815,6 +821,9 @@ pub(crate) unsafe fn on_shell(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
         .filter(|f| keep_note(kind, is_echo(f, now)) && !panes_showing(&shown, std::slice::from_ref(f)).is_empty())
         .collect();
     if add.is_empty() {
+        if crate::marks::follow::wait_ms().is_some() {
+            arm_list_timer(hwnd);
+        }
         return;
     }
     {
@@ -831,6 +840,7 @@ pub(crate) unsafe fn on_shell(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
 
 pub(crate) unsafe fn on_timer(hwnd: HWND) {
     let _ = KillTimer(Some(hwnd), TIMER_LIST);
+    crate::marks::follow::expire_due();
     let now = mono_ms();
     let (due, again) = {
         let mut wins = guard(wins());
@@ -879,7 +889,8 @@ fn soonest(hwnd: HWND, now: u64) -> Option<u64> {
         let h = guard(held());
         (!h.queue.is_empty() && h.hwnd == hwnd.0 as isize).then_some(RESTORE_MS)
     };
-    scheduled.flatten().into_iter().chain(restore).chain(edit).min()
+    let follow = crate::marks::follow::wait_ms();
+    scheduled.flatten().into_iter().chain(restore).chain(edit).chain(follow).min()
 }
 
 fn drift_for(folders: &[(String, Drift)], path: &str) -> Drift {
@@ -1199,6 +1210,9 @@ unsafe fn look_at(v: &View, show_hidden: bool, drift: Drift) -> Look {
     let Some(disk) = disk_names(&v.path, show_hidden, &spec_of(v)) else {
         return Look::Blind { view: before as i64, disk: -1 };
     };
+    if !disk.cut {
+        crate::marks::follow::on_listed(&v.path, &disk.present);
+    }
     if disk.cut {
         return Look::Blind { view: before as i64, disk: -1 };
     }

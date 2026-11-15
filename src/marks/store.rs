@@ -28,15 +28,26 @@ const MUTEX_NAME: &str = r"Local\Maguro.marks";
 /// 100-ns ticks from 1601-01-01 to 1970-01-01.
 const FILETIME_UNIX_EPOCH: u64 = 11_644_473_600_000_0000;
 
-const STATE_OK: &str = "ok";
-const STATE_LOST: &str = "lost";
-const STATE_RECYCLED: &str = "recycled";
+pub(crate) const STATE_OK: &str = "ok";
+pub(crate) const STATE_LOST: &str = "lost";
+pub(crate) const STATE_RECYCLED: &str = "recycled";
 
 #[derive(Clone, Debug)]
 enum Mutation {
     Add(Mark),
     Remove(String),
     UpdatePath { from: String, path: String },
+    /// `lost_since` / identity fields: `None` leaves the value, `Some` writes it (including clearing with `Some(None)`).
+    Patch {
+        key: String,
+        state: Option<String>,
+        lost_since: Option<Option<String>>,
+        vol: Option<Option<String>>,
+        fid: Option<Option<String>>,
+        size: Option<Option<u64>>,
+        mtime: Option<Option<u64>>,
+        dir: Option<bool>,
+    },
 }
 
 /// vol/fid come from `GetFileInformationByHandleEx(FileIdInfo)`.
@@ -444,6 +455,10 @@ fn ymd_from_unix_days(days: i64) -> (i32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y as i32, m as u32, d as u32)
+}
+
+pub(crate) fn stamp_unix(unix: i64) -> String {
+    format_unix_z(unix)
 }
 
 fn format_unix_z(unix: i64) -> String {
@@ -873,6 +888,162 @@ impl Store {
             self.by_folder.remove(parent);
         }
     }
+
+    /// The path itself when it is marked, plus every marked path under it.
+    pub(crate) fn affected_paths(&self, path: &str) -> Vec<String> {
+        let Some(key) = path_key(path) else { return Vec::new() };
+        let prefix = child_prefix(&key);
+        self.entries.iter().filter(|e| e.key == key || e.key.starts_with(&prefix)).map(|e| e.path.clone()).collect()
+    }
+
+    /// Move `from` and every marked path under it onto `to`. Nothing is written when a destination
+    /// is already a different mark. `identity`, when set, replaces the root row's id (cross-volume).
+    pub(crate) fn retarget_tree(&mut self, from: &str, to: &str, identity: Option<&FileIdentity>) -> Result<Vec<String>, StoreError> {
+        if self.blocked {
+            return Err(StoreError::Blocked);
+        }
+        let Some(from_key) = path_key(from) else { return Err(StoreError::BadPath) };
+        if path_key(to).is_none() {
+            return Err(StoreError::BadPath);
+        }
+        let prefix = child_prefix(&from_key);
+        let rows: Vec<(String, String)> = self
+            .entries
+            .iter()
+            .filter_map(|e| {
+                let dest = if e.key == from_key {
+                    Some(to.trim().to_string())
+                } else if e.key.starts_with(&prefix) {
+                    super::follow::rewrite_prefix(&e.path, from, to)
+                } else {
+                    None
+                };
+                dest.map(|d| (e.path.clone(), d))
+            })
+            .collect();
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let moving: HashSet<String> = rows.iter().filter_map(|(src, _)| path_key(src)).collect();
+        let mut dest_keys = HashSet::new();
+        for (_, dest) in &rows {
+            let Some(dest_key) = path_key(dest) else { return Err(StoreError::BadPath) };
+            if !dest_keys.insert(dest_key.clone()) {
+                return Ok(Vec::new());
+            }
+            if self.entries.iter().any(|e| e.key == dest_key && !moving.contains(&e.key)) {
+                return Ok(Vec::new());
+            }
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        let root_moved = rows.iter().any(|(src, _)| path_key(src).as_deref() == Some(from_key.as_str()));
+        for (src, dest) in &rows {
+            self.update_path(src, dest)?;
+            out.push(dest.clone());
+        }
+        if root_moved {
+            if let Some(id) = identity {
+                self.patch_identity(to, id)?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// `lost_since`: `None` keeps it, `Some(None)` clears it, `Some(Some(s))` sets it.
+    /// Returns whether the row changed.
+    pub(crate) fn set_state(&mut self, path: &str, state: &str, lost_since: Option<Option<String>>) -> Result<bool, StoreError> {
+        if self.blocked {
+            return Err(StoreError::Blocked);
+        }
+        let Some((key, _, _)) = locate(path) else { return Err(StoreError::BadPath) };
+        let Some(pos) = self.entries.iter().position(|e| e.key == key) else { return Ok(false) };
+        let next_lost = match &lost_since {
+            None => self.entries[pos].lost_since.clone(),
+            Some(value) => value.clone(),
+        };
+        if self.entries[pos].state == state && self.entries[pos].lost_since == next_lost {
+            return Ok(false);
+        }
+        self.entries[pos].state = state.to_string();
+        self.entries[pos].lost_since = next_lost;
+        self.mutations.push(Mutation::Patch {
+            key,
+            state: Some(state.to_string()),
+            lost_since,
+            vol: None,
+            fid: None,
+            size: None,
+            mtime: None,
+            dir: None,
+        });
+        self.dirty = true;
+        Ok(true)
+    }
+
+    /// Write vol/fid/size/mtime/dir. A file id that already belongs to another row is left alone.
+    pub(crate) fn patch_identity(&mut self, path: &str, id: &FileIdentity) -> Result<bool, StoreError> {
+        if self.blocked {
+            return Err(StoreError::Blocked);
+        }
+        let Some((key, _, _)) = locate(path) else { return Err(StoreError::BadPath) };
+        let Some(pos) = self.entries.iter().position(|e| e.key == key) else { return Ok(false) };
+        let vol = clean_id(id.vol.clone());
+        let fid = clean_id(id.fid.clone());
+        let taken = match (&vol, &fid) {
+            (Some(v), Some(f)) => self.by_id.get(&(v.clone(), f.clone())).is_some_and(|&other| other != pos),
+            _ => false,
+        };
+        let (vol, fid) = if taken { (self.entries[pos].vol.clone(), self.entries[pos].fid.clone()) } else { (vol, fid) };
+        let mark = &self.entries[pos];
+        if mark.vol == vol && mark.fid == fid && mark.size == id.size && mark.mtime == id.mtime && mark.dir == id.dir {
+            return Ok(false);
+        }
+        let mark = &mut self.entries[pos];
+        mark.vol = vol.clone();
+        mark.fid = fid.clone();
+        mark.size = id.size;
+        mark.mtime = id.mtime;
+        mark.dir = id.dir;
+        self.rebind_id(pos);
+        self.mutations.push(Mutation::Patch {
+            key,
+            state: None,
+            lost_since: None,
+            vol: Some(vol),
+            fid: Some(fid),
+            size: Some(id.size),
+            mtime: Some(id.mtime),
+            dir: Some(id.dir),
+        });
+        self.dirty = true;
+        Ok(true)
+    }
+
+    pub(crate) fn forget_tree(&mut self, path: &str) -> Result<usize, StoreError> {
+        if self.blocked {
+            return Err(StoreError::Blocked);
+        }
+        let rows = self.affected_paths(path);
+        let n = rows.len();
+        for row in rows {
+            self.remove(&row)?;
+        }
+        Ok(n)
+    }
+
+    fn rebind_id(&mut self, index: usize) {
+        self.by_id.retain(|_, slot| *slot != index);
+        let mark = &self.entries[index];
+        if let (Some(vol), Some(fid)) = (&mark.vol, &mark.fid) {
+            if !vol.is_empty() && !fid.is_empty() {
+                self.by_id.insert((vol.clone(), fid.clone()), index);
+            }
+        }
+    }
+}
+
+fn child_prefix(key: &str) -> String {
+    if key.ends_with('\\') { key.to_string() } else { format!("{key}\\") }
 }
 
 fn apply_mutations(entries: &mut Vec<Mark>, mutations: &[Mutation]) {
@@ -896,6 +1067,30 @@ fn apply_mutations(entries: &mut Vec<Mark>, mutations: &[Mutation]) {
                 slot.key = to_key;
                 slot.parent = to_parent;
                 slot.name = to_name;
+            }
+            Mutation::Patch { key, state, lost_since, vol, fid, size, mtime, dir } => {
+                let Some(slot) = entries.iter_mut().find(|e| &e.key == key) else { continue };
+                if let Some(state) = state {
+                    slot.state = state.clone();
+                }
+                if let Some(lost_since) = lost_since {
+                    slot.lost_since = lost_since.clone();
+                }
+                if let Some(vol) = vol {
+                    slot.vol = vol.clone();
+                }
+                if let Some(fid) = fid {
+                    slot.fid = fid.clone();
+                }
+                if let Some(size) = size {
+                    slot.size = *size;
+                }
+                if let Some(mtime) = mtime {
+                    slot.mtime = *mtime;
+                }
+                if let Some(dir) = dir {
+                    slot.dir = *dir;
+                }
             }
         }
     }
