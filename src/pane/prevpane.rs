@@ -1048,6 +1048,7 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         bind_hwnd(h);
         match msg {
+            WM_NCHITTEST if crate::nchit_passes_to_splitter(h, lp) => return LRESULT(HTTRANSPARENT as isize),
             WM_ERASEBKGND => return LRESULT(1),
             WM_PAINT => paint_preview(h),
             WM_SIZE => sync_host(h),
@@ -1430,6 +1431,7 @@ fn preview_host_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
     unsafe {
         bind_hwnd(h);
         match msg {
+            WM_NCHITTEST if crate::nchit_passes_to_splitter(h, lp) => return LRESULT(HTTRANSPARENT as isize),
             WM_ERASEBKGND => return LRESULT(1),
             WM_PAINT => {
                 let font = app(|a| a.font);

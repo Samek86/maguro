@@ -121,6 +121,24 @@ pub(crate) unsafe fn cursor_for(h: HWND) -> Option<Hit> {
     app(|a| hit(&geo(a), pt.x, pt.y))
 }
 
+/// `WM_NCHITTEST` for a child that should let a plate splitter through.
+/// The point is in screen pixels. It is tested in the main window's client.
+/// The vertical-tab grip stays on the strip window. A nested `app()` is skipped.
+pub(crate) unsafe fn nchit_passes_to_splitter(child: HWND, lp: LPARAM) -> bool {
+    let mut pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
+    app_try(|a| {
+        if a.main.0.is_null() || !ScreenToClient(a.main, &mut pt).as_bool() {
+            return false;
+        }
+        match hit(&geo(a), pt.x, pt.y) {
+            Some(Hit::VTab) if child == a.tabs_hwnd => false,
+            Some(_) => true,
+            None => false,
+        }
+    })
+    .unwrap_or(false)
+}
+
 pub(crate) extern "system" fn main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     crate::crash::catch_wnd(std::panic::AssertUnwindSafe(|| main_proc_inner(h, msg, wp, lp)))
 }
@@ -831,6 +849,7 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
         };
         match msg {
+            WM_NCHITTEST if nchit_passes_to_splitter(h, lp) => return LRESULT(HTTRANSPARENT as isize),
             WM_TIMER if wp.0 == TIMER_SETTLE => settle_cols(h),
             WM_TIMER if wp.0 == TIMER_SPIN => spin_tick(h),
             WM_TIMER if wp.0 == TIMER_DROP => on_pane_drop_timer(h),

@@ -374,8 +374,27 @@ pub(crate) fn in_rect(r: RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
-/// Grip on the strip's right edge, in DIP. It matches the tab pad, so it stays clear of the close box.
+/// Clear space inside the vertical strip, DIP, on every side.
+/// Top and bottom have no stroke, so this is the inset. Left and right add [`VTAB_HAIRLINE_PX`].
+/// The row gap stays the top-row tab gap (2 DIP). That is the rhythm inside the strip, not a plate splitter.
+pub(crate) const VTAB_PAD_DIP: i32 = 4;
+
+/// Hairline `paint_tabs` draws on the strip's left and right, in device pixels. It does not scale.
+pub(crate) const VTAB_HAIRLINE_PX: i32 = 1;
+
+/// Grip thickness, DIP. It covers the plate gap after the strip and the strip's own right edge.
+/// The close box stays in the tab, clear of this band.
 pub(crate) const VTAB_EDGE_DIP: i32 = 6;
+
+/// Pad inside the vertical strip, scaled. Top and bottom use this alone.
+pub(crate) fn vtab_pad_px(dpi: i32) -> i32 {
+    VTAB_PAD_DIP * dpi.max(1) / 96
+}
+
+/// Left and right content inset: the hairline, then [`vtab_pad_px`].
+pub(crate) fn vtab_inset_x(dpi: i32) -> i32 {
+    VTAB_HAIRLINE_PX + vtab_pad_px(dpi)
+}
 
 /// Default strip width at `dpi`. A width the user dragged is [`vtab_pref_px`].
 pub(crate) fn vtab_width(dpi: i32) -> i32 {
@@ -483,7 +502,7 @@ pub(crate) fn vtab_edge_px(dpi: i32) -> i32 {
     (VTAB_EDGE_DIP * dpi.max(1) / 96).max(1)
 }
 
-/// Grip width from the layout pad. `pad` is 8 DIP scaled and the grip is 6 DIP, so this is `pad * 6 / 8`.
+/// Grip width from the outer pad. The pad is 8 DIP and the grip is 6 DIP, so this is `pad * 6 / 8`.
 pub(crate) fn vtab_edge_from_pad(pad: i32) -> i32 {
     if pad <= 0 {
         return 0;
@@ -491,17 +510,35 @@ pub(crate) fn vtab_edge_from_pad(pad: i32) -> i32 {
     (pad * VTAB_EDGE_DIP / 8).max(1)
 }
 
-/// True when `(x, y)` is on the vertical strip's right-edge grip.
+/// How much of `gap` actually sits between the strip and the grid.
+/// A clipped strip does not push the grip across the window.
+pub(crate) fn vtab_gap_after(strip_right: i32, grid_left: i32, gap: i32) -> i32 {
+    (grid_left - strip_right).max(0).min(gap.max(0))
+}
+
+/// Full grip, in the same coordinates as `strip`. It ends at the far side of `gap`
+/// and is `edge` wide, but it never starts before the strip.
+pub(crate) fn vtab_grip_span(strip: RECT, edge: i32, gap: i32) -> (i32, i32) {
+    let right = strip.right.saturating_add(gap.max(0));
+    let left = right.saturating_sub(edge.max(0)).max(strip.left);
+    (left, right)
+}
+
+/// True when `(x, y)` is on the part of the grip the strip window owns.
+/// The plate gap after `strip.right` belongs to the main window. `gap` still shrinks
+/// the inside portion so the two together stay `edge` wide.
 /// Off, a non-positive `edge`, or an empty strip is never a hit, so the top row has no grip.
-pub(crate) fn vtab_edge_hit(vertical: bool, strip: RECT, edge: i32, x: i32, y: i32) -> bool {
+pub(crate) fn vtab_edge_hit(vertical: bool, strip: RECT, edge: i32, gap: i32, x: i32, y: i32) -> bool {
     if !vertical || edge <= 0 || strip.right <= strip.left || strip.bottom <= strip.top {
         return false;
     }
     if y < strip.top || y >= strip.bottom {
         return false;
     }
-    let left = strip.right.saturating_sub(edge).max(strip.left);
-    x >= left && x < strip.right
+    let (mut left, mut right) = vtab_grip_span(strip, edge, gap);
+    right = right.min(strip.right);
+    left = left.max(strip.left);
+    left < right && x >= left && x < right
 }
 
 /// Height the vertical strip can use: below the toolbar row, above the status line.
@@ -547,7 +584,11 @@ pub(crate) fn tab_hover_text(name: &str, paths: &str, clipped: bool) -> String {
     }
 }
 
-/// Vertical window tabs. Each row is as tall as a tab on the top row, and as wide as the strip minus the pad.
+/// Vertical window tabs. Each row is as tall as a tab on the top row.
+/// Top and bottom inset by [`vtab_pad_px`]. Left and right inset by [`vtab_inset_x`]
+/// so the clear space inside the hairline matches that pad.
+/// The row gap is the top-row tab gap (2 DIP), not the 4 DIP plate gap: a wider row gap
+/// only shortens the list, and the horizontal row uses the same 2 DIP.
 /// Tabs that fit stack from the top, with + under the last one. Otherwise + and the ▾ pin to the bottom
 /// and `scroll` chooses which rows are on screen. A tiny strip keeps every rect non-inverted.
 pub(crate) fn vtab_lay(width: i32, height: i32, n: usize, locked: &[bool], dpi: i32, scroll: usize) -> TabLay {
@@ -555,10 +596,12 @@ pub(crate) fn vtab_lay(width: i32, height: i32, n: usize, locked: &[bool], dpi: 
     let n = n.max(1);
     let width = width.max(1);
     let height = height.max(0);
-    let (pad, gap, _, _, _, _) = tab_px(dpi);
+    let (_, gap, _, _, _, _) = tab_px(dpi);
+    let pad_y = vtab_pad_px(dpi);
+    let pad_x = vtab_inset_x(dpi);
     let h = s(26);
-    let x = pad.min(width);
-    let tab_w = (width - pad * 2).max(0);
+    let x = pad_x.min(width);
+    let tab_w = (width - pad_x * 2).max(0);
     let row = |top: i32, bottom: i32| -> RECT {
         if bottom <= top || tab_w <= 0 {
             RECT { left: x, top, right: x, bottom: top }
@@ -579,9 +622,9 @@ pub(crate) fn vtab_lay(width: i32, height: i32, n: usize, locked: &[bool], dpi: 
     let mut close = vec![None; n];
     let lock: Vec<bool> = (0..n).map(|i| locked.get(i).copied().unwrap_or(false)).collect();
     let stack = n as i32 * h + gap * (n as i32 - 1);
-    let used = pad + stack + gap + h + pad;
+    let used = pad_y + stack + gap + h + pad_y;
     if used <= height && tab_w > 0 {
-        let mut y = pad;
+        let mut y = pad_y;
         for i in 0..n {
             let r = row(y, y + h);
             if r.bottom > r.top {
@@ -600,18 +643,18 @@ pub(crate) fn vtab_lay(width: i32, height: i32, n: usize, locked: &[bool], dpi: 
             count: n,
         };
     }
-    let over_bottom = (height - pad).max(0);
+    let over_bottom = (height - pad_y).max(0);
     let over_top = (over_bottom - h).max(0);
     let over = row(over_top, over_bottom);
     let plus_bottom = (over.top - gap).max(0);
     let plus_top = (plus_bottom - h).max(0);
     let plus = row(plus_top, plus_bottom);
     let limit = if plus.bottom > plus.top { plus.top } else { height };
-    let avail = (limit - gap - pad).max(0);
+    let avail = (limit - gap - pad_y).max(0);
     let stride = (h + gap).max(1);
     let count = if h <= 0 { 0 } else { ((avail + gap) / stride) as usize }.min(n);
     let first = if count == 0 { 0 } else { scroll.min(n - count) };
-    let mut y = pad;
+    let mut y = pad_y;
     for i in first..first + count {
         let bottom = y + h;
         let stop = if plus.bottom > plus.top { (plus.top - gap).max(y) } else { bottom };
@@ -1464,9 +1507,10 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
         if vertical {
             // Both edges. The column sits between the side panel and the panes, and `pal().line`
             // is the same hairline the plates use, in either theme. A one-pixel strip is just that line.
-            if rc.right > rc.left {
-                fill(dc, RECT { right: rc.left + 1, ..rc }, pal().line);
-                fill(dc, RECT { left: rc.right - 1, ..rc }, pal().line);
+            let hair = VTAB_HAIRLINE_PX;
+            if rc.right - rc.left > hair {
+                fill(dc, RECT { right: rc.left + hair, ..rc }, pal().line);
+                fill(dc, RECT { left: rc.right - hair, ..rc }, pal().line);
             }
             // The main window's hover line sits under this child. Paint the grip here.
             if edge_hot {
@@ -1723,8 +1767,12 @@ unsafe fn on_vtab_grip(h: HWND, x: i32, y: i32) -> bool {
     }
     let mut rc = RECT::default();
     _ = GetClientRect(h, &mut rc);
-    let edge = app(|a| vtab_edge_px(a.dpi));
-    vtab_edge_hit(true, rc, edge, x, y)
+    let (edge, after) = app(|a| {
+        let g = geo(a);
+        let strip = tab_strip_rect(g.w, g.top, g.bot, true, g.vtab, g.side, g.gap);
+        (vtab_edge_px(a.dpi), vtab_gap_after(strip.right, g.gx, g.gap))
+    });
+    vtab_edge_hit(true, rc, edge, after, x, y)
 }
 
 /// Double-click on the grip. Other windows share the width, same as the vertical-tabs switch.
@@ -1776,6 +1824,8 @@ fn tabs_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_SIZE => place_tab_edit(),
             WM_ERASEBKGND => return LRESULT(1),
+            // The side splitter's slop reaches a few pixels into this column. The grip stays here.
+            WM_NCHITTEST if crate::nchit_passes_to_splitter(h, lp) => return LRESULT(HTTRANSPARENT as isize),
             WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
                 let resize = app(|a| a.drag == Some(Hit::VTab)) || {
                     let mut pt = POINT::default();
@@ -2225,11 +2275,13 @@ mod tests {
         let fit = vtab_lay(180, 600, 3, &[false, true, false], 96, 9);
         assert!(fit.overflow.is_none());
         assert_eq!((fit.first, fit.count), (0, 3));
-        assert_eq!(fit.body[0], RECT { left: 6, top: 6, right: 174, bottom: 32 });
-        assert_eq!(fit.body[1].top, 34);
-        assert_eq!(fit.body[2], RECT { left: 6, top: 62, right: 174, bottom: 88 });
+        // 1px hairline + 4px pad on the sides. Top has no hairline, so it is 4. The row gap stays 2.
+        assert_eq!(fit.body[0], RECT { left: 5, top: 4, right: 175, bottom: 30 });
+        assert_eq!(fit.body[1].top - fit.body[0].bottom, 2);
+        assert_eq!(fit.body[1].top, 32);
+        assert_eq!(fit.body[2], RECT { left: 5, top: 60, right: 175, bottom: 86 });
         assert_eq!(fit.body[0].bottom - fit.body[0].top, 26);
-        assert_eq!(fit.plus, RECT { left: 6, top: 90, right: 174, bottom: 116 });
+        assert_eq!(fit.plus, RECT { left: 5, top: 88, right: 175, bottom: 114 });
         assert!(fit.lock[1] && !fit.lock[0]);
         let c0 = fit.close[0].unwrap();
         assert!(c0.left >= fit.body[0].left && c0.right <= fit.body[0].right);
@@ -2257,14 +2309,17 @@ mod tests {
         assert!(over.body[9].bottom <= over.body[9].top);
         assert!(over.body[8].bottom <= over.plus.top);
         assert!(over.plus.bottom <= o.top);
-        assert_eq!(o.bottom, 214);
+        assert_eq!(o.bottom, 216);
         assert_eq!(tab_hit(&over, 40, o.top + 2), TabHit::Overflow);
         assert_eq!(vtab_drag_index(&over.body, over.body[4].top + 1), 4);
         assert_eq!(over.insert_at_y(o.bottom + 4), 9);
         let hi = vtab_lay(360, 440, 12, &[false; 12], 192, 4);
         assert_eq!((hi.first, hi.count), (4, 5));
         assert_eq!(hi.body[4].bottom - hi.body[4].top, 52);
-        assert_eq!(hi.body[4].right - hi.body[4].left, 336);
+        assert_eq!(hi.body[4].right - hi.body[4].left, 342);
+        assert_eq!(hi.body[5].top - hi.body[4].bottom, 4, "row gap stays 2 DIP, scaled");
+        assert_eq!(hi.body[4].top, vtab_pad_px(192));
+        assert_eq!(hi.body[4].left, vtab_inset_x(192));
 
         let crushed = vtab_lay(1, 0, 4, &[false; 4], 96, 3);
         assert_eq!(crushed.count, 0);
@@ -2350,28 +2405,59 @@ mod tests {
 
         let strip = RECT { left: 248, top: 32, right: 428, bottom: 576 };
         let edge = vtab_edge_px(96);
-        assert!(vtab_edge_hit(true, strip, edge, 427, 40));
-        assert!(vtab_edge_hit(true, strip, edge, 422, 575));
-        assert!(!vtab_edge_hit(true, strip, edge, 421, 40));
-        assert!(!vtab_edge_hit(true, strip, edge, 428, 40));
-        assert!(!vtab_edge_hit(true, strip, edge, 244, 40));
-        assert!(!vtab_edge_hit(true, strip, edge, 427, 31));
-        assert!(!vtab_edge_hit(true, strip, edge, 427, 576));
-        assert!(!vtab_edge_hit(false, strip, edge, 427, 40));
-        assert!(!vtab_edge_hit(true, strip, 0, 427, 40));
-        assert!(!vtab_edge_hit(true, RECT { right: 248, ..strip }, edge, 247, 40));
+        assert!(vtab_edge_hit(true, strip, edge, 0, 427, 40));
+        assert!(vtab_edge_hit(true, strip, edge, 0, 422, 575));
+        assert!(!vtab_edge_hit(true, strip, edge, 0, 421, 40));
+        assert!(!vtab_edge_hit(true, strip, edge, 0, 428, 40));
+        assert!(!vtab_edge_hit(true, strip, edge, 0, 244, 40));
+        assert!(!vtab_edge_hit(true, strip, edge, 0, 427, 31));
+        assert!(!vtab_edge_hit(true, strip, edge, 0, 427, 576));
+        assert!(!vtab_edge_hit(false, strip, edge, 0, 427, 40));
+        assert!(!vtab_edge_hit(true, strip, 0, 0, 427, 40));
+        assert!(!vtab_edge_hit(true, RECT { right: 248, ..strip }, edge, 0, 247, 40));
+
+        // The plate gap is part of the same 6px grip. The strip owns only what is inside it.
+        assert_eq!(vtab_pad_px(96), 4);
+        assert_eq!(vtab_pad_px(144), 6);
+        assert_eq!(vtab_pad_px(192), 8);
+        assert_eq!(vtab_inset_x(96), 5);
+        assert_eq!(vtab_inset_x(144), 7);
+        assert_eq!(vtab_inset_x(192), 9);
+        for dpi in [96, 144, 192] {
+            let gap = crate::plate_gap_px(dpi);
+            let edge = vtab_edge_px(dpi);
+            let width = vtab_width(dpi);
+            let strip = RECT { left: 0, top: 0, right: width, bottom: 400 };
+            let (left, right) = vtab_grip_span(strip, edge, gap);
+            assert_eq!(right - left, edge, "dpi {dpi}");
+            assert_eq!(right, width + gap, "dpi {dpi}");
+            assert!(vtab_edge_hit(true, strip, edge, gap, width - 1, 20), "dpi {dpi}");
+            let inside = edge - gap;
+            assert!(!vtab_edge_hit(true, strip, edge, gap, width - inside - 1, 20), "dpi {dpi}");
+            assert!(!vtab_edge_hit(true, strip, edge, gap, width, 20), "the gap is not the strip's");
+            assert_eq!(vtab_gap_after(width, width + gap, gap), gap);
+            assert_eq!(vtab_gap_after(width, width + gap + 40, gap), gap);
+            assert_eq!(vtab_gap_after(width, width, gap), 0);
+        }
 
         for (width, dpi) in [(100, 96), (180, 96), (320, 96), (600, 96), (200, 192), (360, 144)] {
             let lay = vtab_lay(width, 400, 2, &[false, true], dpi, 0);
             let edge = vtab_edge_px(dpi);
+            let gap = crate::plate_gap_px(dpi);
             let strip = RECT { left: 0, top: 0, right: width, bottom: 400 };
+            let inside = (edge - gap).max(0);
             for c in lay.close.into_iter().flatten() {
-                assert!(c.right <= width - edge, "close {c:?} overlaps the {edge}px grip at {width}px dpi {dpi}");
-                assert!(!vtab_edge_hit(true, strip, edge, c.left, c.top));
-                assert!(!vtab_edge_hit(true, strip, edge, c.right - 1, (c.top + c.bottom) / 2));
+                assert!(c.right <= width - edge, "close {c:?} overlaps a {edge}px inside grip at {width}px dpi {dpi}");
+                assert!(c.right <= width - inside, "close {c:?} overlaps the grip at {width}px dpi {dpi}");
+                assert!(!vtab_edge_hit(true, strip, edge, gap, c.left, c.top));
+                assert!(!vtab_edge_hit(true, strip, edge, gap, c.right - 1, (c.top + c.bottom) / 2));
             }
-            assert!(vtab_edge_hit(true, strip, edge, width - 1, 20));
-            assert!(!vtab_edge_hit(true, strip, edge, width - edge - 1, 20));
+            assert!(vtab_edge_hit(true, strip, edge, 0, width - 1, 20));
+            assert!(!vtab_edge_hit(true, strip, edge, 0, width - edge - 1, 20));
+            if inside > 0 {
+                assert!(vtab_edge_hit(true, strip, edge, gap, width - 1, 20));
+                assert!(!vtab_edge_hit(true, strip, edge, gap, width - inside - 1, 20));
+            }
         }
     }
 

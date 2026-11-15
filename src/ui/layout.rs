@@ -136,19 +136,50 @@ pub(crate) fn client_min(heights: &[usize], dpi: i32, tree_on: bool, bar: bool, 
     client_min_for(heights, dpi, tree_on, bar, preview_on, false)
 }
 
+/// Outer margin of the main client, DIP. Not a splitter. The plate gap is [`PLATE_GAP_DIP`].
+pub(crate) const OUTER_PAD_DIP: i32 = 8;
+
+/// Visual gap between plates: the side panel, the vertical tab strip, file panes, and the preview.
+/// DIP, scaled by the DPI. The side panel's favourites/tree divider uses the same gap.
+pub(crate) const PLATE_GAP_DIP: i32 = 4;
+
+/// DIP added on each safe side of a plate gap when hit-testing.
+/// 2 DIP is the pane's Explorer inset, and header controls start at 4 DIP, so this slop
+/// stays off scrollbars and off those controls. A row splitter does not use the lower side:
+/// that side is the next pane's header.
+pub(crate) const SPLIT_HIT_EXTRA_DIP: i32 = 2;
+
+pub(crate) fn outer_pad_px(dpi: i32) -> i32 {
+    OUTER_PAD_DIP * dpi.max(1) / 96
+}
+
+pub(crate) fn plate_gap_px(dpi: i32) -> i32 {
+    PLATE_GAP_DIP * dpi.max(1) / 96
+}
+
+/// Slop for a gap that is already in px. `gap` of 4 DIP scaled yields 2 DIP scaled.
+pub(crate) fn split_hit_extra(gap: i32) -> i32 {
+    if gap <= 0 {
+        return 0;
+    }
+    gap.saturating_mul(SPLIT_HIT_EXTRA_DIP) / PLATE_GAP_DIP
+}
+
 /// Same minimum as [`client_min`]. `vertical` puts the tab strip between the side panel and the grid.
 /// The icon row already spans the full width, so the strip is only on the content side.
-/// With the panel closed the grid starts on the strip's right edge, so that minimum has no left pad.
+/// With the panel closed the strip sits on the window edge (it is a plate, like the side panel).
+/// The grid still keeps one plate gap after the strip. The outer pad is only for a client with no left plate.
 pub(crate) fn client_min_for(heights: &[usize], dpi: i32, tree_on: bool, bar: bool, preview_on: bool, vertical: bool) -> (i32, i32) {
     let s = |v: i32| v * dpi.max(1) / 96;
-    let (pad, gap) = (s(8), s(8));
+    let (pad, gap) = (outer_pad_px(dpi), plate_gap_px(dpi));
     let cols = heights.len().max(1) as i32;
     let rows = heights.iter().copied().max().unwrap_or(1).max(1) as i32;
     let grid_w = cols * pane_min_w(dpi) + gap * (cols - 1).max(0);
     let grid_h = rows * pane_min_h(dpi) + gap * (rows - 1).max(0);
     let vtab = if vertical { super::tabs::vtab_width(dpi) } else { 0 };
     let left = if vtab > 0 {
-        if tree_on { s(120) + gap + vtab } else { vtab }
+        let strip_at = if tree_on { s(120) + gap } else { 0 };
+        strip_at + vtab + gap
     } else if tree_on {
         s(120) + gap
     } else {
@@ -170,17 +201,18 @@ pub(crate) fn side_drag_width(x: i32, gap: i32) -> i32 {
 
 /// Left edge of the vertical tab strip.
 /// An open side panel keeps the window edge; the strip starts after that panel and its splitter.
-/// A closed panel (`side <= 0`) puts the strip on the window edge.
+/// A closed panel (`side <= 0`) puts the strip on the window edge. The outer pad is for content
+/// with no left plate. The strip is a plate, the same way the side panel keeps x = 0.
 pub(crate) fn vtab_left(side: i32, gap: i32) -> i32 {
     if side > 0 { side + gap } else { 0 }
 }
 
 /// Widest the vertical strip can be without taking a pane below `pane_min`.
-/// `left` is the strip's left edge. Each column keeps `pane_min`, with `gap` between columns.
+/// `left` is the strip's left edge. `gap` sits between columns and once more between the strip and the grid.
 pub(crate) fn vtab_room_px(client_w: i32, left: i32, pad: i32, gap: i32, cols: i32, pane_min: i32) -> i32 {
     let cols = cols.max(1);
     let grid = cols.saturating_mul(pane_min.max(0)) + gap.max(0).saturating_mul(cols - 1);
-    (client_w - left - pad.max(0) - grid).max(0)
+    (client_w - left - pad.max(0) - gap.max(0) - grid).max(0)
 }
 
 /// The vertical-tab edge moves the strip and the panes on each pointer move.
@@ -194,9 +226,10 @@ pub(crate) fn drag_places_live(d: Hit) -> bool {
 /// `client_w` is the main window's client width, which may be zero while the window is creating.
 pub(crate) fn vtab_and_side(vertical: bool, dip: i32, dpi: i32, client_w: i32, side_shown: bool, side_stored: i32, cols: i32) -> (i32, i32) {
     let s = |v: i32| v * dpi / 96;
-    let (pad, gap) = (s(8), s(8));
+    let (pad, gap) = (outer_pad_px(dpi), plate_gap_px(dpi));
     let want = if vertical { super::tabs::vtab_pref_px(dip, dpi, client_w.max(0)) } else { 0 };
-    let side = if side_shown { side_stored.clamp(s(120), (client_w - want - gap - pad - s(240)).max(s(120))) } else { 0 };
+    // One gap before the strip and one after it, then the right pad and 240 DIP of panes.
+    let side = if side_shown { side_stored.clamp(s(120), (client_w - want - gap - gap - pad - s(240)).max(s(120))) } else { 0 };
     let left = vtab_left(side, gap);
     let room = vtab_room_px(client_w, left, pad, gap, cols, pane_min_w(dpi));
     let vtab = if want > 0 {
@@ -209,13 +242,13 @@ pub(crate) fn vtab_and_side(vertical: bool, dip: i32, dpi: i32, client_w: i32, s
 
 /// Left edge of the file grid.
 /// `vtab == 0` is the top-row layout: the pad, or the side panel plus the gap.
-/// A vertical strip sits between the side panel and the grid, and the grid starts on the strip's right edge.
+/// A vertical strip sits between the side panel and the grid, and one plate gap follows the strip.
 pub(crate) fn grid_left(vtab: i32, side: i32, gap: i32, pad: i32) -> i32 {
     let vtab = vtab.max(0);
     if vtab == 0 {
         if side > 0 { side + gap } else { pad }
     } else {
-        vtab_left(side, gap) + vtab
+        vtab_left(side, gap) + vtab + gap.max(0)
     }
 }
 
@@ -460,7 +493,7 @@ pub(crate) fn geo(a: &App) -> Geo {
     let mut rc = RECT::default();
     unsafe { _ = GetClientRect(a.main, &mut rc) };
     let s = |v: i32| v * a.dpi / 96;
-    let (pad, gap) = (s(8), s(8));
+    let (pad, gap) = (outer_pad_px(a.dpi), plate_gap_px(a.dpi));
     // While the edge is dragged, `shown` is the DIP already given to the windows.
     // The session field stays at the width from before the press until the gesture ends.
     let dip = a.vtab_live.map(|l| l.shown).unwrap_or(a.s.vertical_tabs_width);
@@ -1062,47 +1095,131 @@ pub(crate) fn gap_line(g: &Geo, d: Hit, t: i32) -> Option<RECT> {
     }
 }
 
+/// Favourites/tree divider. The visual gap, plus slop into the favourites half only.
+/// The folder tree is a system tree-view; its scrollbar stays clickable.
+fn side_split_hit(g: &Geo, extra: i32, x: i32, y: i32) -> bool {
+    let Some(gap) = side_gap_rect(g) else { return false };
+    if x < gap.left || x >= gap.right {
+        return false;
+    }
+    let (y0, y1) = if g.fav_top { (gap.top - extra, gap.bottom) } else { (gap.top, gap.bottom + extra) };
+    y >= y0 && y < y1
+}
+
+/// Full vertical-tab grip in parent coordinates: `edge` px ending at the grid, covering the gap.
+fn vtab_grip_bounds(g: &Geo) -> Option<(i32, i32)> {
+    if g.vtab <= 0 {
+        return None;
+    }
+    let strip = tab_strip_rect(g.w, g.top, g.bot, true, g.vtab, g.side, g.gap);
+    if strip.right <= strip.left || strip.bottom <= strip.top {
+        return None;
+    }
+    let edge = super::tabs::vtab_edge_from_pad(g.pad);
+    let after = super::tabs::vtab_gap_after(strip.right, g.gx, g.gap);
+    let (left, right) = super::tabs::vtab_grip_span(strip, edge, after);
+    (left < right).then_some((left, right))
+}
+
+/// Side-panel splitter. The visual gap, plus slop that does not enter the tab grip or the tab bodies.
+fn side_hit_xs(g: &Geo, extra: i32, grip_left: Option<i32>) -> Option<(i32, i32)> {
+    if g.side <= 0 {
+        return None;
+    }
+    let gap_r = if g.vtab > 0 { vtab_left(g.side, g.gap) } else { g.gx };
+    let mut x0 = (g.side - extra).max(0);
+    let mut x1 = gap_r + extra;
+    if g.vtab > 0 {
+        let strip_left = vtab_left(g.side, g.gap);
+        x1 = x1.min(strip_left + extra);
+        if let Some(gl) = grip_left {
+            x1 = x1.min(gl);
+        }
+    }
+    if x1 <= g.side {
+        x0 = g.side;
+        x1 = gap_r;
+    }
+    (x0 < x1).then_some((x0, x1))
+}
+
+/// Column splitter under `x`. The visual gap plus `extra` on both sides.
+/// Overlapping slop belongs to the nearer gap. The left one wins a tie.
+/// `min_x` keeps the slop off the vertical-tab grip, which ends at the grid.
+fn col_at(xs: &[(i32, i32)], x: i32, extra: i32, min_x: i32) -> Option<usize> {
+    let mut best: Option<(usize, i32)> = None;
+    for (k, w) in xs.windows(2).enumerate() {
+        let (gap_l, gap_r) = (w[0].1, w[1].0);
+        let hit_l = (gap_l - extra).max(min_x);
+        let hit_r = gap_r + extra;
+        if x >= hit_l && x < hit_r {
+            let dist = (x - (gap_l + (gap_r - gap_l) / 2)).abs();
+            match best {
+                Some((_, d)) if d <= dist => {}
+                _ => best = Some((k, dist)),
+            }
+        }
+    }
+    best.map(|(k, _)| k)
+}
+
+/// Row splitter under `y`. Slop goes up into the pane above (its bottom padding, outside the
+/// horizontal scrollbar) and stops at the next pane's top, which is the header.
+fn row_at(ys: &[(i32, i32)], y: i32, extra: i32) -> Option<usize> {
+    let mut best: Option<(usize, i32)> = None;
+    for (k, w) in ys.windows(2).enumerate() {
+        let (gap_t, gap_b) = (w[0].1, w[1].0);
+        let hit_t = gap_t - extra;
+        let hit_b = gap_b;
+        if y >= hit_t && y < hit_b {
+            let dist = (y - (gap_t + (gap_b - gap_t) / 2)).abs();
+            match best {
+                Some((_, d)) if d <= dist => {}
+                _ => best = Some((k, dist)),
+            }
+        }
+    }
+    best.map(|(k, _)| k)
+}
+
+/// Priority, first match: favourites divider, vertical-tab grip, side panel, preview, column, row.
+/// Column wins the corner where a column slop and a row slop cross, same as the visual gap cross.
+/// A zoomed pane has no column or row splitter. The preview and the side panel stay.
 pub(crate) fn hit(g: &Geo, x: i32, y: i32) -> Option<Hit> {
     if y < g.top || y >= g.bot {
         return None;
     }
-    if let Some(gap) = side_gap_rect(g) {
-        if x >= gap.left && x < gap.right && y >= gap.top && y < gap.bottom {
-            return Some(Hit::SideSplit);
-        }
+    let extra = split_hit_extra(g.gap);
+    if side_split_hit(g, extra, x, y) {
+        return Some(Hit::SideSplit);
     }
-    // The side splitter is the gap after the panel. A vertical strip starts at the far side of that
-    // gap, so the hit stops there instead of running through the tabs to the grid.
-    if g.side > 0 {
-        let gap_r = if g.vtab > 0 { vtab_left(g.side, g.gap) } else { g.gx };
-        if x >= g.side && x < gap_r {
-            return Some(Hit::Side);
-        }
-    }
-    // The strip's right edge, a few px inside the column. The side gap above stays the panel splitter.
-    if g.vtab > 0 {
-        let strip = tab_strip_rect(g.w, g.top, g.bot, true, g.vtab, g.side, g.gap);
-        if super::tabs::vtab_edge_hit(true, strip, super::tabs::vtab_edge_from_pad(g.pad), x, y) {
+    let grip = vtab_grip_bounds(g);
+    if let Some((left, right)) = grip {
+        if x >= left && x < right {
             return Some(Hit::VTab);
+        }
+    }
+    if let Some((x0, x1)) = side_hit_xs(g, extra, grip.map(|(l, _)| l)) {
+        if x >= x0 && x < x1 {
+            return Some(Hit::Side);
         }
     }
     // The preview stays while a pane is zoomed, so its splitter is tested before that early return.
     if g.preview > 0 {
         let left = g.w - g.pad - g.preview;
-        if x >= left - g.gap && x < left {
+        if x >= left - g.gap - extra && x < left + extra {
             return Some(Hit::Preview);
         }
     }
     if x < g.gx || g.zoom {
         return None;
     }
-    let between = |v: &[(i32, i32)], p: i32| v.windows(2).position(|w| p >= w[0].1 && p < w[1].0);
-    if let Some(k) = between(&g.xs, x) {
+    if let Some(k) = col_at(&g.xs, x, extra, g.gx) {
         return Some(Hit::Col(k));
     }
     // row gaps belong to one column: rows no longer line up across columns
     let c = g.xs.iter().position(|&(a, b)| x >= a && x < b)?;
-    between(&g.ys[c], y).map(|k| Hit::Row(c, k))
+    row_at(&g.ys[c], y, extra).map(|k| Hit::Row(c, k))
 }
 
 // ---------- layout picker: click = even grid, press and drag across columns = rows per column, presets ----------
@@ -1487,16 +1604,19 @@ mod tests {
     #[test]
     fn client_min_is_the_current_layout_plus_chrome() {
         // 2×2, tree, toolbar, status, 96 dpi.
-        // side 120 + gap 8 + two panes 280 + gap 8 + pad 8 = 424, but the icon row is wider:
-        // tab reserve 116 + gap 4 + list 32 + gap 4 + layout 70 + six 32px icons and six 4px gaps + pad 8 = 450.
-        assert_eq!(client_min(&[2, 2], 96, true, true, false), (450, 304));
+        // side 120 + gap 4 + two panes 280 + gap 4 + pad 8 = 416, but the icon row is wider (450).
+        // Height is the tab strip, two panes, one 4px gap, and the status line: 32 + 244 + 24.
+        assert_eq!(client_min(&[2, 2], 96, true, true, false), (450, 300));
         // one pane, no tree, toolbar hidden: the gear row is wider than the pane.
         // 96 dpi: tab reserve 116 + gap 4 + list 32 + gap 4 + gear 32 + pad 8 = 196.
-        // Height is the tab strip, one pane, and the status line: 32 + 120 + 24.
+        // Height is the tab strip, one pane, and the status line: 32 + 120 + 24. No plate gap in that sum.
         assert_eq!(client_min(&[1], 96, false, false, false), (196, 176));
         let (w, h) = client_min(&[1, 1, 1], 192, false, true, false);
-        assert_eq!(client_min(&[2, 2], 96, true, true, true), (424 + 8 + 280, 304));
-        assert_eq!((w, h), (904, 352));
+        // Preview adds one gap and the 280 DIP plate. 120+4+280+4+8 + 4+280 = 700. Height matches the 2×2 above.
+        assert_eq!(client_min(&[2, 2], 96, true, true, true), (700, 300));
+        // Three columns at 192 DPI: two gaps shrank from 16 to 8 (888). The icon row is 900, so that wins.
+        // One row, so the height does not include a plate gap: 64 + 240 + 48.
+        assert_eq!((w, h), (900, 352));
         assert_eq!((pane_min_w(96), pane_min_h(96), pane_min_w(192), pane_min_h(144)), (140, 120, 280, 180));
     }
 
@@ -1550,11 +1670,14 @@ mod tests {
             ys: vec![vec![(66, 700)]],
             zoom: false,
         };
-        // plate left = 1000 - 8 - 280 = 712. Gap is [704, 712).
+        // plate left = 1000 - 8 - 280 = 712. Visual gap is [704, 712). Slop is 4, so the hit is [700, 716).
         assert_eq!(g.grid_right(), 704);
         assert_eq!(hit(&g, 706, 400), Some(Hit::Preview));
+        assert_eq!(hit(&g, 700, 400), Some(Hit::Preview));
+        assert_eq!(hit(&g, 715, 400), Some(Hit::Preview));
+        assert_eq!(hit(&g, 699, 400), None);
+        assert_eq!(hit(&g, 716, 400), None);
         assert_eq!(hit(&g, 720, 400), None);
-        assert_eq!(hit(&g, 700, 400), None);
         let zoomed = Geo { zoom: true, ..g.clone() };
         assert_eq!(hit(&zoomed, 706, 400), Some(Hit::Preview));
         assert!(gap_line(&zoomed, Hit::Preview, 2).is_some());
@@ -1662,7 +1785,8 @@ mod tests {
         }
         // Neither: no plate, so the grid starts at the pad.
         assert_eq!(side_tree_h(0, plate_h, 0.5, gap, min, false, false), 0);
-        assert_eq!(client_min(&[2, 2, 2], 96, false, false, false).0 + 120, client_min(&[2, 2, 2], 96, true, false, false).0);
+        // The panel is 120. It replaces the 8px outer pad and adds a 4px gap, so the width grows by 116.
+        assert_eq!(client_min(&[2, 2, 2], 96, false, false, false).0 + 116, client_min(&[2, 2, 2], 96, true, false, false).0);
     }
 
     #[test]
@@ -1723,25 +1847,29 @@ mod tests {
         for (h, tree, bar, preview) in [(&[2usize, 2][..], true, true, false), (&[1][..], false, false, false), (&[1, 1, 1][..], false, true, true)] {
             assert_eq!(client_min_for(h, 96, tree, bar, preview, false), client_min(h, 96, tree, bar, preview));
         }
-        // On, side panel open: panel, splitter, strip, then the grid flush with the strip.
+        // On, side panel open: panel, gap, strip, gap, then the grid.
         assert_eq!(vtab_left(240, 8), 248);
         assert_eq!(vtab_left(0, 8), 0);
         assert_eq!(vtab_left(-4, 8), 0);
         let open = tab_strip_rect(800, 32, 576, true, 180, 240, 8);
         assert_eq!(open, RECT { left: 248, top: 32, right: 428, bottom: 576 });
-        assert_eq!(grid_left(180, 240, 8, 8), open.right);
-        // On, side panel closed: the strip is the left edge, and the grid starts at its right. No extra pad.
+        assert_eq!(grid_left(180, 240, 8, 8), open.right + 8);
+        // On, side panel closed: the strip is the left edge. The grid keeps the gap. No outer pad.
         let shut = tab_strip_rect(800, 32, 576, true, 180, 0, 8);
         assert_eq!(shut, RECT { left: 0, top: 32, right: 180, bottom: 576 });
-        assert_eq!(grid_left(180, 0, 8, 8), shut.right);
+        assert_eq!(grid_left(180, 0, 8, 8), shut.right + 8);
+        assert_eq!(vtab_left(0, 4), 0);
+        assert_eq!(grid_left(180, 0, 4, 8), 184);
+        assert_eq!(grid_left(0, 0, 4, 8), 8, "horizontal, no panel: the outer pad stays 8");
+        assert_eq!(grid_left(0, 240, 4, 8), 244);
         // A short client clips the column and does not invert it. A panel that eats the client
         // collapses the column at the right edge instead of turning it back into the top row.
         assert_eq!(tab_strip_rect(100, 32, 576, true, 180, 0, 8), RECT { left: 0, top: 32, right: 100, bottom: 576 });
         assert_eq!(tab_strip_rect(100, 32, 576, true, 180, 240, 8), RECT { left: 100, top: 32, right: 100, bottom: 576 });
-        // 2×2 with the side panel is icon-bound at 450. Panel + splitter + strip + grid is 604.
-        // One pane and no panel is the strip plus that pane plus the right pad: 328.
-        assert_eq!(client_min_for(&[2, 2], 96, true, true, false, true), (604, 304));
-        assert_eq!(client_min_for(&[1], 96, false, false, false, true), (328, 176));
+        // 2×2 with the side panel: 120+4+180+4 + two panes 280 + gap 4 + pad 8 = 600.
+        // One pane and no panel is the strip, the gap, that pane, and the right pad: 332.
+        assert_eq!(client_min_for(&[2, 2], 96, true, true, false, true), (600, 300));
+        assert_eq!(client_min_for(&[1], 96, false, false, false, true), (332, 176));
         let shifted = Geo { vtab: 180, gx: 428, ..plate(false, 300) };
         assert_eq!(side_rect(&shifted), RECT { left: 0, top: 66, right: 240, bottom: 700 });
         let (tree, _) = side_panes(&shifted, 2);
@@ -1760,11 +1888,13 @@ mod tests {
 
     #[test]
     fn vertical_strip_edge_is_its_own_grip_and_stops_before_the_pane_minimum() {
-        assert_eq!(vtab_room_px(1000, 248, 8, 8, 1, 140), 604);
-        assert_eq!(vtab_room_px(1000, 248, 8, 8, 2, 140), 456);
+        // The gap after the strip is reserved as well as the pad and the panes.
+        assert_eq!(vtab_room_px(1000, 248, 8, 8, 1, 140), 596);
+        assert_eq!(vtab_room_px(1000, 248, 8, 8, 2, 140), 448);
         assert_eq!(vtab_room_px(300, 248, 8, 8, 1, 140), 0);
-        assert_eq!(vtab_room_px(1000, 0, 8, 8, 1, 140), 852);
-        assert_eq!(vtab_room_px(1000, 248, 8, 8, 0, 140), 604);
+        assert_eq!(vtab_room_px(1000, 0, 8, 8, 1, 140), 844);
+        assert_eq!(vtab_room_px(1000, 248, 8, 8, 0, 140), 596);
+        assert_eq!(vtab_room_px(1000, 248, 8, 4, 1, 140), 600);
 
         let g = Geo { vtab: 180, gx: 428, ..plate(false, 300) };
         assert_eq!(hit(&g, 244, 400), Some(Hit::Side));
@@ -1801,6 +1931,124 @@ mod tests {
         assert_eq!(hit(&closed, 170, 400), None);
         assert_eq!(hit(&closed, 2, 400), None);
         assert_eq!(gap_line(&closed, Hit::Side, 2), None);
+    }
+
+    #[test]
+    fn plate_gap_is_4_and_splitter_slop_misses_the_other_grips() {
+        assert_eq!((plate_gap_px(96), plate_gap_px(144), plate_gap_px(192)), (4, 6, 8));
+        assert_eq!((outer_pad_px(96), outer_pad_px(144), outer_pad_px(192)), (8, 12, 16));
+        assert_eq!(split_hit_extra(plate_gap_px(96)), 2);
+        assert_eq!(split_hit_extra(plate_gap_px(144)), 3);
+        assert_eq!(split_hit_extra(plate_gap_px(192)), 4);
+        assert_eq!(split_hit_extra(0), 0);
+        assert_eq!(super::tabs::vtab_edge_from_pad(outer_pad_px(144)), super::tabs::vtab_edge_px(144));
+        assert_eq!(super::tabs::vtab_edge_from_pad(outer_pad_px(192)), super::tabs::vtab_edge_px(192));
+
+        // side 240, gap 4, strip 180. Strip is [244, 424), grid at 428. Grip is the 6px [422, 428).
+        let g = Geo {
+            w: 1200,
+            h: 800,
+            top: 32,
+            vtab: 180,
+            bot: 776,
+            pad: 8,
+            gap: 4,
+            side: 240,
+            tree_h: 300,
+            fav_top: false,
+            show_fav: true,
+            show_tree: true,
+            gx: 428,
+            preview: 0,
+            xs: vec![(428, 700), (704, 1192)],
+            ys: vec![vec![(32, 400), (404, 776)], vec![(32, 776)]],
+            zoom: false,
+        };
+        let strip = tab_strip_rect(g.w, g.top, g.bot, true, g.vtab, g.side, g.gap);
+        assert_eq!((strip.left, strip.right), (244, 424));
+        assert_eq!(grid_left(g.vtab, g.side, g.gap, g.pad), g.gx);
+        // Side gap [240, 244), slop [238, 246). 246 stays in the strip pad; tabs start at 249.
+        assert_eq!(hit(&g, 237, 200), None);
+        assert_eq!(hit(&g, 238, 200), Some(Hit::Side));
+        assert_eq!(hit(&g, 245, 200), Some(Hit::Side));
+        assert_eq!(hit(&g, 246, 200), None);
+        assert_eq!(hit(&g, 421, 200), None);
+        assert_eq!(hit(&g, 422, 200), Some(Hit::VTab));
+        assert_eq!(hit(&g, 427, 200), Some(Hit::VTab));
+        assert_eq!(hit(&g, 428, 200), None);
+        // Column gap [700, 704). Slop [698, 706). 697 is the last Explorer pixel (inset 2). 708 is a header button.
+        assert_eq!(hit(&g, 697, 200), None);
+        assert_eq!(hit(&g, 698, 200), Some(Hit::Col(0)));
+        assert_eq!(hit(&g, 705, 200), Some(Hit::Col(0)));
+        assert_eq!(hit(&g, 706, 200), None);
+        assert_eq!(hit(&g, 708, 40), None);
+        // Row gap [400, 404). Slop goes up to 398 and stops at the next header.
+        assert_eq!(hit(&g, 500, 397), None);
+        assert_eq!(hit(&g, 500, 398), Some(Hit::Row(0, 0)));
+        assert_eq!(hit(&g, 500, 403), Some(Hit::Row(0, 0)));
+        assert_eq!(hit(&g, 500, 404), None);
+        assert_eq!(hit(&g, 699, 399), Some(Hit::Col(0)));
+        let split = side_gap_rect(&g).unwrap();
+        assert_eq!(split.bottom - split.top, 4);
+        assert_eq!(hit(&g, 100, split.top - 1), None);
+        assert_eq!(hit(&g, 100, split.top), Some(Hit::SideSplit));
+        assert_eq!(hit(&g, 100, split.bottom + 1), Some(Hit::SideSplit));
+        assert_eq!(hit(&g, 100, split.bottom + 2), None);
+        let zoomed = Geo { zoom: true, ..g.clone() };
+        assert_eq!(hit(&zoomed, 700, 200), None);
+        assert_eq!(hit(&zoomed, 500, 399), None);
+        assert_eq!(hit(&zoomed, 241, 200), Some(Hit::Side));
+
+        // Horizontal: no strip grip, and the outer pad is not a splitter. The pane gap is 4.
+        let off = Geo {
+            vtab: 0,
+            side: 0,
+            tree_h: 0,
+            show_fav: false,
+            show_tree: false,
+            gx: 8,
+            xs: vec![(8, 400), (404, 800)],
+            ys: vec![vec![(32, 400), (404, 776)]],
+            ..g.clone()
+        };
+        assert_eq!(hit(&off, 4, 200), None);
+        assert_eq!(hit(&off, 401, 200), Some(Hit::Col(0)));
+        assert_eq!(gap_line(&off, Hit::VTab, 2), None);
+
+        // A 3px strip: the grip and the side slop meet at x = 105 and do not share a pixel.
+        let narrow = Geo {
+            vtab: 3,
+            side: 100,
+            gx: 111,
+            tree_h: 0,
+            show_fav: false,
+            show_tree: false,
+            xs: vec![(111, 400)],
+            ys: vec![vec![(32, 776)]],
+            ..g.clone()
+        };
+        assert_eq!(hit(&narrow, 104, 200), Some(Hit::Side));
+        assert_eq!(hit(&narrow, 105, 200), Some(Hit::VTab));
+        assert_eq!(hit(&narrow, 110, 200), Some(Hit::VTab));
+        assert_eq!(hit(&narrow, 111, 200), None);
+
+        // Panel closed: the strip keeps the window edge. The grip is the 6px in front of the grid.
+        let shut = Geo {
+            vtab: 180,
+            side: 0,
+            tree_h: 0,
+            gx: 184,
+            show_fav: false,
+            show_tree: false,
+            xs: vec![(184, 600)],
+            ys: vec![vec![(32, 776)]],
+            ..g
+        };
+        assert_eq!(tab_strip_rect(shut.w, shut.top, shut.bot, true, shut.vtab, 0, shut.gap).left, 0);
+        assert_eq!(hit(&shut, 2, 200), None);
+        assert_eq!(hit(&shut, 178, 200), Some(Hit::VTab));
+        assert_eq!(hit(&shut, 183, 200), Some(Hit::VTab));
+        assert_eq!(hit(&shut, 184, 200), None);
     }
 
     #[test]
