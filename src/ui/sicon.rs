@@ -126,6 +126,8 @@ pub(crate) enum LineIcon {
     Upload,
     Sync,
     Permissions,
+    /// Two chevrons, ». Overflow on the command toolbar.
+    Chevrons,
 }
 
 #[path = "icon_pack.rs"]
@@ -272,6 +274,10 @@ fn master(kind: LineIcon, p: &mut Pen) {
             if kind == StarAdd {
                 p.cross((0.0, 1.0), 2.0);
             }
+        }
+        Chevrons => {
+            p.path(&[(-5.0, -4.0), (-1.5, 0.0), (-5.0, 4.0)], 0.0, false);
+            p.path(&[(1.5, -4.0), (5.0, 0.0), (1.5, 4.0)], 0.0, false);
         }
         other => icon_pack::draw(other, p),
     }

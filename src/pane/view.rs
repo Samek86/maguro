@@ -298,7 +298,7 @@ pub(crate) unsafe fn layout_pane(h: HWND) {
 
 pub(crate) unsafe fn relayout() {
     sync_panes();
-    let Some((main, moves, label, shown, drive_vis, show_bar, show_side, tree_h, side_h, show_preview, preview_h)) = app(|a| {
+    let Some((main, mut moves, label, shown, drive_vis, show_bar, show_side, tree_h, side_h, show_preview, preview_h, cmd_bar)) = app(|a| {
         a.gap_hot = None; // the splitter may be gone; the window is repainted below
         if a.main.0.is_null() {
             return None;
@@ -320,6 +320,9 @@ pub(crate) unsafe fn relayout() {
         // The last letters hide first so a minimum tab stays clear of the group.
         // The gear and the tab list stay when the toolbar is off; the other icons and the letters do not.
         let icons = icon_slots(g.w, btn_top, a.dpi, drive_slots(a.s.drive_buttons, a.drives.len()), show_bar);
+        // Command toolbar uses tab_w (left of the tab list). It stays up when the right icons are hidden.
+        // Horizontal tabs keep this row for the tab strip, so the command bar is not placed.
+        let cmd_bar = (icons.tab_w, btn_top, a.dpi, a.s.vertical_tabs);
         moves.push((tb(ID_TB_LIST), icons.list));
         for (id, r) in icons.icons {
             moves.push((tb(id), r));
@@ -351,10 +354,16 @@ pub(crate) unsafe fn relayout() {
                 shown.push((p.hwnd, a.zoom.is_none_or(|z| z == i)));
             }
         }
-        Some((a.main, moves, layout_label(&a.s.heights), shown, drive_vis, show_bar, show_side, tree_h, side_h, show_preview, preview_h))
+        Some((a.main, moves, layout_label(&a.s.heights), shown, drive_vis, show_bar, show_side, tree_h, side_h, show_preview, preview_h, cmd_bar))
     }) else {
         return;
     };
+    let (cmd_w, cmd_top, cmd_dpi, cmd_vertical) = cmd_bar;
+    for slot in crate::toolbar::moves(cmd_w, cmd_top, cmd_dpi, cmd_vertical) {
+        if let Ok(b) = GetDlgItem(Some(main), slot.id) {
+            moves.push((b, slot.rect));
+        }
+    }
     move_all(&moves, None);
     for id in [ID_TB_LIST, ID_TB_LAYOUT, ID_TB_SAVE, ID_TB_LOAD, ID_TB_FAV, ID_TB_BASKET, ID_TB_WATCH, ID_TB_SET] {
         if let Ok(b) = GetDlgItem(Some(main), id) {
@@ -367,6 +376,17 @@ pub(crate) unsafe fn relayout() {
     for (h, on) in &drive_vis {
         _ = ShowWindow(*h, if *on { SW_SHOW } else { SW_HIDE });
     }
+    for slot in crate::toolbar::moves(cmd_w, cmd_top, cmd_dpi, cmd_vertical) {
+        if let Ok(b) = GetDlgItem(Some(main), slot.id) {
+            // A zero rect still takes the click. Hide every slot the layout did not place.
+            _ = ShowWindow(b, if slot.show { SW_SHOWNA } else { SW_HIDE });
+            if slot.show {
+                _ = SetWindowPos(b, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+    }
+    crate::toolbar::refresh_tips();
+    crate::toolbar::sync_enabled();
     if !tree_h.0.is_null() {
         _ = ShowWindow(tree_h, if show_side.0 { SW_SHOW } else { SW_HIDE });
     }
@@ -396,6 +416,14 @@ pub(crate) unsafe fn relayout() {
     for (h, on) in &drive_vis {
         if *on {
             _ = SetWindowPos(*h, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+    // Above the tab strip. Horizontal tabs hide these, so they do not cover the tabs.
+    for slot in crate::toolbar::moves(cmd_w, cmd_top, cmd_dpi, cmd_vertical) {
+        if slot.show {
+            if let Ok(b) = GetDlgItem(Some(main), slot.id) {
+                _ = SetWindowPos(b, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
         }
     }
     for (h, on) in &shown {

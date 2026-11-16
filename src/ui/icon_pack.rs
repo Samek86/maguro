@@ -457,7 +457,7 @@ pub(super) fn draw(kind: super::LineIcon, p: &mut super::Pen) {
             p.seg((-3.0, 3.0), (-5.5, 5.5));
             p.seg((-0.5, 4.0), (6.0, 4.0));
         }
-        Gear | List | Layout | Add | Group | Up | Down | Rename | Del | Back | Fwd | OpenIn | Save | Load | Basket | Watch | Star | StarFilled | StarAdd => {}
+        Gear | List | Layout | Add | Group | Up | Down | Rename | Del | Back | Fwd | OpenIn | Save | Load | Basket | Watch | Star | StarFilled | StarAdd | Chevrons => {}
     }
 }
 

@@ -22,6 +22,11 @@ pub(crate) const ID_TB_FAV: i32 = 206; // star, immediately left of the gear: fa
 pub(crate) const ID_TB_BASKET: i32 = 208; // basket, right of the star: file basket window (same as Ctrl+Shift+B)
 pub(crate) const ID_TB_WATCH: i32 = 209; // eye, left of the gear: folder watch window (same as Ctrl+Shift+W)
 pub(crate) const ID_TB_SET: i32 = 207; // gear: settings menu (view, appearance, behavior, and settings)
+/// Command toolbar. Sixteen slots, then the overflow chevrons, then the pinned Change button.
+/// Shown on the left of the top strip only while window tabs are vertical.
+pub(crate) const ID_CMD_FIRST: i32 = 250;
+pub(crate) const ID_CMD_OVERFLOW: i32 = 266;
+pub(crate) const ID_CMD_EDIT: i32 = 267;
 // menu ids
 pub(crate) const ID_HIDDEN: usize = 1100;
 pub(crate) const ID_KEYS: usize = 1101;

@@ -643,6 +643,36 @@ unsafe fn copy_once(srcs: &[String], dst: &str, rename: bool, mv: bool) -> super
     super::inuse::Attempt { result, locked }
 }
 
+/// Shell Properties for the active pane's selection.
+pub(crate) unsafe fn show_selection_properties(i: usize) {
+    let Some(sv) = view_of::<IShellView>(i) else {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    };
+    let Ok(cm) = sv.GetItemObject::<IContextMenu>(SVGIO_SELECTION) else {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    };
+    let Ok(menu) = CreatePopupMenu() else { return };
+    let verb = b"properties\0";
+    let hwnd = sv.GetWindow().unwrap_or_else(|_| app(|a| a.main));
+    if cm.QueryContextMenu(menu, 0, 1, 0x7fff, CMF_NORMAL).is_ok() {
+        let ci = CMINVOKECOMMANDINFO {
+            cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
+            hwnd,
+            lpVerb: PCSTR(verb.as_ptr()),
+            nShow: SW_SHOWNORMAL.0 as i32,
+            ..Default::default()
+        };
+        if cm.InvokeCommand(&ci).is_err() {
+            _ = MessageBeep(MB_ICONWARNING);
+        }
+    } else {
+        _ = MessageBeep(MB_ICONWARNING);
+    }
+    _ = DestroyMenu(menu);
+}
+
 pub(crate) unsafe fn delete_selection(i: usize, shift: bool) {
     if crate::pane::recent::locked(i) {
         _ = MessageBeep(MB_ICONWARNING);

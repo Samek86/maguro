@@ -383,6 +383,10 @@ pub(crate) unsafe fn open_window(mut s: Session) -> Result<HWND> {
     // Same owner-draw button as the gear and the other tool-row icons. draw_button paints it.
     let list = child(main, w!("BUTTON"), PCWSTR(HSTRING::from(crate::tr(crate::Key::TabList)).as_ptr()), BS_OWNERDRAW as u32, WINDOW_EX_STYLE(0), ID_TB_LIST, HFONT::default());
     add_tip(list, &tab_list_tip());
+    // Command toolbar. toolbar.json is read here and is not created when it is missing.
+    crate::toolbar::create_buttons(main);
+    crate::toolbar::load();
+    crate::toolbar::install_clipboard(main);
     if let Ok((t, th)) = create_tree(main) {
         app(|a| (a.tree, a.tree_hwnd) = (Some(t), th));
         // The tree view can register its target after Initialize returns.
@@ -447,6 +451,7 @@ pub(crate) unsafe fn open_window(mut s: Session) -> Result<HWND> {
     }
     show_active_tab();
     relayout();
+    crate::toolbar::note_clipboard();
     focus_view(app(|a| a.s.active));
     if app(|a| a.s.preview_on) {
         note_preview(app(|a| a.s.active));

@@ -1631,6 +1631,7 @@ pub(crate) unsafe fn refresh_tab_list_tip() {
     if main.0.is_null() {
         return;
     }
+    crate::toolbar::refresh_tips();
     let Ok(b) = GetDlgItem(Some(main), ID_TB_LIST) else { return };
     _ = SetWindowTextW(b, &HSTRING::from(tr(crate::Key::TabList)));
     tip_text(b, &tab_list_tip(), TTM_UPDATETIPTEXTW);

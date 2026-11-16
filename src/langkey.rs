@@ -942,11 +942,15 @@ pub(crate) enum Key {
     CtxPreview,
     CtxConnect,
     OpenInMaguro,
+    CommandToolbar,
+    ToolbarView,
+    ToolbarOverflow,
+    ToolbarChange,
 }
 
-pub(crate) const KEY_COUNT: usize = 937;
+pub(crate) const KEY_COUNT: usize = 941;
 
-const _: () = assert!((Key::OpenInMaguro as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::ToolbarChange as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1886,6 +1890,10 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Preview",
     "Connect",
     "Open in Maguro",
+    "Command toolbar",
+    "View",
+    "More commands",
+    "Change",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2827,4 +2835,8 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "ctx_preview",
     "ctx_connect",
     "open_in_maguro",
+    "command_toolbar",
+    "toolbar_view",
+    "toolbar_overflow",
+    "toolbar_change",
 ];

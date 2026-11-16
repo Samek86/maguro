@@ -19,6 +19,7 @@ mod session;
 mod shell;
 mod settings;
 mod folderview;
+mod toolbar;
 mod marks;
 mod everything;
 mod rename;

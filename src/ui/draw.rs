@@ -617,6 +617,13 @@ pub(crate) unsafe fn draw_button(d: &DRAWITEMSTRUCT) {
         draw_line_icon(dc, rc, kind, if dirty { GREEN } else { fg }, dpi);
         return;
     }
+    // Command toolbar: icon only. The accessible name stays on the button window.
+    if crate::toolbar::is_command_control(id) {
+        if let Some(kind) = crate::toolbar::icon_for_control(id) {
+            draw_line_icon(dc, rc, kind, fg, dpi);
+        }
+        return;
+    }
     text(dc, rc, glyph(id), icon_font, fg, DT_CENTER);
 }
 

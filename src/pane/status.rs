@@ -370,6 +370,8 @@ pub(crate) unsafe fn update_status() {
     if app(|a| a.status_key != key) {
         status_base(i, &path, main, &fv, n, sel, &spec, busy, zoom, trust);
         app(|a| a.status_key = key);
+        // Selection or folder changed: gray or restore the command toolbar.
+        crate::toolbar::sync_enabled();
     }
     // Selected folders only. Walking visible rows (GetVisibleItem) touched the list every tick
     // and fought the scroll. A content change drops the cache; this asks for the selection again

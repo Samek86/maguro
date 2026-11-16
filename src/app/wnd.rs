@@ -496,6 +496,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 ID_ACCENT_PICK => pick_accent(),
                 ID_KEYS => toggle_keys(),
                 id if crate::winmerge::gear(h, id) => {}
+                id if crate::toolbar::command(h, id) => {}
                 _ => {}
             },
             WM_INITMENUPOPUP => {
@@ -729,7 +730,9 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 m.ptMinTrackSize.y = y;
                 return LRESULT(0);
             }
+            WM_CLIPBOARDUPDATE => crate::toolbar::note_clipboard(),
             WM_DESTROY => {
+                crate::toolbar::remove_clipboard(h);
                 release_hotkey_hwnd(h);
                 crate::shell::listsync::disarm(h);
                 crate::cliphot::release(h);

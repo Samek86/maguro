@@ -431,6 +431,11 @@ const WM_CTX_RENAME: u32 = WM_APP + 90;
 /// The file-pane menu comes from `IShellFolder::GetUIObjectOf`, which has no view site.
 /// `CDefFolderMenu` handles `rename` by calling `IFolderView2::DoRename` on that site, so
 /// `InvokeCommand` returns without an edit. F2 reaches the same method on the view itself.
+/// In-place rename of the focused item. The same edit F2 starts. Not batch rename.
+pub(crate) unsafe fn rename_inplace(pane: usize) -> bool {
+    begin_shell_rename(pane)
+}
+
 unsafe fn begin_shell_rename(pane: usize) -> bool {
     if crate::pane::recent::locked(pane) {
         return false;

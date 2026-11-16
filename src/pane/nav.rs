@@ -2139,6 +2139,24 @@ pub(crate) unsafe fn tint_menu(h: HWND, i: usize, at: POINT) {
     }
 }
 
+/// View-mode list from the pane header menu: extra large through content.
+pub(crate) unsafe fn popup_view_modes(owner: HWND, pane: usize, at: POINT) {
+    let checked = pane_mode_icon(pane).and_then(|(m, z)| explorer_view_index(m, z));
+    let Ok(view) = CreatePopupMenu() else { return };
+    for (k, &(_, _, label)) in EXPLORER_VIEWS.iter().enumerate() {
+        _ = AppendMenuW(view, MF_STRING, VIEW_CMD + k, &HSTRING::from(tr(label)));
+    }
+    if let Some(k) = checked {
+        _ = CheckMenuRadioItem(view, VIEW_CMD as u32, (VIEW_CMD + EXPLORER_VIEWS.len() - 1) as u32, (VIEW_CMD + k) as u32, MF_BYCOMMAND.0);
+    }
+    let pick = TrackPopupMenu(view, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, at.x, at.y, None, owner, None).0 as usize;
+    _ = DestroyMenu(view);
+    if (VIEW_CMD..VIEW_CMD + EXPLORER_VIEWS.len()).contains(&pick) {
+        let (mode, icon, ..) = EXPLORER_VIEWS[pick - VIEW_CMD];
+        commit_pane_view(pane, mode, icon);
+    }
+}
+
 /// Shell parsing name of the folder on display. A filesystem folder's name is its path.
 pub(crate) unsafe fn pane_parsing_name(i: usize) -> String {
     if let Some(fv) = view_of::<IFolderView2>(i) {
