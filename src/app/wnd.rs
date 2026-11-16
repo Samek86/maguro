@@ -1463,6 +1463,8 @@ pub(crate) fn theme_action_label() -> &'static str {
 pub(crate) unsafe fn set_language(lang: Lang) {
     app(|a| a.s.choose_lang(lang));
     apply(lang);
+    // The verb's display name follows the UI language. Off does not create the verb.
+    crate::folderapp::refresh_verb_label();
     // Vendor titles are chosen in the UI language. The next settings paint reads them again.
     crate::shell::ctxmenu::invalidate();
     publish_shared();
@@ -1770,6 +1772,15 @@ mod gear_menu_tests {
         assert!(regs.iter().any(|l| l.contains("win.rs") && l.contains(&want)));
         assert!(regs.iter().any(|l| l.contains("fileop.rs") && l.contains(&off)));
         assert!(regs.iter().all(|l| !l.contains(&on)));
+        let lang_fn_at = prod.find("fn set_language").expect("set_language");
+        let lang_tail = &prod[lang_fn_at..];
+        let lang_end = lang_tail.find("\n}").expect("end of set_language");
+        let lang_fn = &lang_tail[..lang_end];
+        assert!(lang_fn.contains("refresh_verb_label"));
+        assert!(!lang_fn.contains(&["set_registered", "("].concat()));
+        let main_src = include_str!("../main.rs");
+        assert!(main_src.contains("reload_shown()"));
+        assert!(!main_src.contains(&["set_registered", "("].concat()));
         let toggles = call_lines("toggle_default_folder_app");
         assert_eq!(toggles.len(), 2, "{toggles:?}");
         assert!(toggles.iter().any(|l| l.contains("win.rs") && l.contains("hwnd()")));

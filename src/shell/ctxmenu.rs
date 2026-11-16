@@ -1146,7 +1146,7 @@ unsafe fn snapshot_item(menu: HMENU, pos: u32) -> Option<SavedItem> {
     })
 }
 
-unsafe fn append_saved(menu: HMENU, item: &SavedItem) {
+unsafe fn insert_saved_at(menu: HMENU, pos: u32, item: &SavedItem) {
     let string_item = item.ftype.0 & (MFT_SEPARATOR.0 | MFT_OWNERDRAW.0 | MFT_BITMAP.0) == 0;
     let mut text = if item.text.is_empty() { vec![0u16] } else { item.text.clone() };
     let mut mask = MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_DATA | MIIM_BITMAP | MIIM_CHECKMARKS;
@@ -1170,8 +1170,79 @@ unsafe fn append_saved(menu: HMENU, item: &SavedItem) {
         cch: text.len().saturating_sub(1) as u32,
         hbmpItem: item.bmp,
     };
-    let pos = GetMenuItemCount(Some(menu)).max(0) as u32;
     let _ = InsertMenuItemW(menu, pos, true, &info);
+}
+
+unsafe fn append_saved(menu: HMENU, item: &SavedItem) {
+    let pos = GetMenuItemCount(Some(menu)).max(0) as u32;
+    insert_saved_at(menu, pos, item);
+}
+
+unsafe fn move_row_to_front(menu: HMENU, from: u32) {
+    if from == 0 {
+        return;
+    }
+    let Some(item) = snapshot_item(menu, from) else { return };
+    if RemoveMenu(menu, from, MF_BYPOSITION).is_err() {
+        return;
+    }
+    insert_saved_at(menu, 0, &item);
+}
+
+unsafe fn folder_open_kinds(menu: HMENU) -> Vec<Option<crate::folderapp::FolderOpenKind>> {
+    let n = GetMenuItemCount(Some(menu)).max(0) as usize;
+    let mut kinds = Vec::with_capacity(n);
+    for i in 0..n {
+        if super::menu_sep(menu, i as u32) {
+            kinds.push(None);
+            continue;
+        }
+        let id = GetMenuItemID(menu, i as i32);
+        if id == u32::MAX {
+            kinds.push(None);
+            continue;
+        }
+        kinds.push(crate::folderapp::folder_open_kind(&super::indexed_verb(id)));
+    }
+    kinds
+}
+
+unsafe fn delete_maguro_verb_rows(menu: HMENU) {
+    if !crate::folderapp::shown_on() {
+        return;
+    }
+    let n = GetMenuItemCount(Some(menu)).max(0) as u32;
+    let mut drop_at = Vec::new();
+    for i in 0..n {
+        if super::menu_sep(menu, i) {
+            continue;
+        }
+        let id = GetMenuItemID(menu, i as i32);
+        if id == u32::MAX {
+            continue;
+        }
+        if crate::folderapp::is_maguro_verb(&super::indexed_verb(id)) {
+            drop_at.push(i);
+        }
+    }
+    for i in drop_at.into_iter().rev() {
+        let _ = DeleteMenu(menu, i, MF_BYPOSITION);
+    }
+}
+
+/// Folder and drive menus only. Open (`open`, or `explore` when that is the Open row)
+/// becomes position 0 and the bold default. When the folder-app setting is on, the
+/// `Maguro` shell verb is removed from this menu. The label is not consulted.
+/// Call after `pin_properties_last` so Properties stays last.
+pub(crate) unsafe fn pin_folder_open(menu: HMENU) {
+    delete_maguro_verb_rows(menu);
+    if let Some(at) = crate::folderapp::preferred_open_at(&folder_open_kinds(menu)) {
+        move_row_to_front(menu, at as u32);
+    }
+    normalize_menu(menu);
+    let Some(at) = crate::folderapp::preferred_open_at(&folder_open_kinds(menu)) else { return };
+    // By position: the command id is not what makes the row bold.
+    _ = SetMenuDefaultItem(menu, at as u32, 1);
 }
 
 /// Properties (shell verb or `ID_CTX_PROPS`) becomes the last row. The bottom Maguro
@@ -5876,6 +5947,135 @@ mod mark_menu_pos_tests {
             let once = ids(menu);
             pin_properties_last(menu);
             assert_eq!(ids(menu), once);
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    struct Shown(bool);
+    impl Drop for Shown {
+        fn drop(&mut self) {
+            crate::folderapp::set_shown_for_test(self.0);
+        }
+    }
+
+    unsafe fn default_pos(menu: HMENU) -> u32 {
+        GetMenuDefaultItem(menu, 1, GET_MENU_DEFAULT_ITEM_FLAGS(0))
+    }
+
+    /// Maguro at the top, Open in the middle, Properties not last yet.
+    unsafe fn folder_rows(maguro_label: &str, maguro_verb: &str) -> HMENU {
+        crate::remember_verbs(&[(7, maguro_verb), (3, "cut"), (10, "open"), (42, "properties")]);
+        let menu = CreatePopupMenu().unwrap();
+        push(menu, 7, maguro_label);
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        push(menu, 3, "Cut");
+        push(menu, 10, "열기");
+        push(menu, crate::ID_CTX_FAV, "Favourites");
+        push(menu, 42, "속성");
+        menu
+    }
+
+    #[test]
+    fn folder_menu_hides_the_maguro_verb_and_pins_open_when_shown() {
+        let _shown = Shown(crate::folderapp::shown_on());
+        let _clear = ClearVerbs;
+        crate::folderapp::set_shown_for_test(true);
+        for (label, verb) in [("Maguro", "Maguro"), ("Maguro로 열기", "maguro"), ("Maguroで開く", "MAGURO"), ("Open in Maguro", "Windows.Maguro")] {
+            unsafe {
+                let menu = folder_rows(label, verb);
+                pin_properties_last(menu);
+                pin_folder_open(menu);
+                let ids = ids(menu);
+                assert!(!ids.contains(&7), "verb hidden for {label}: {ids:?}");
+                assert_eq!(ids[0], 10, "open is first for {label}: {ids:?}");
+                assert_eq!(text_at(menu, 0), "열기");
+                assert_eq!(*ids.last().unwrap(), 42, "properties stays last: {ids:?}");
+                assert_eq!(default_pos(menu), 0, "open is the default for {label}");
+                assert!(ids.iter().any(|id| *id == crate::ID_CTX_FAV));
+                no_double_sep(&seps(menu));
+                assert!(!seps(menu)[0], "no leading separator");
+                let _ = DestroyMenu(menu);
+            }
+        }
+    }
+
+    #[test]
+    fn folder_menu_pins_open_and_leaves_a_maguro_row_when_the_setting_is_off() {
+        let _shown = Shown(crate::folderapp::shown_on());
+        let _clear = ClearVerbs;
+        crate::folderapp::set_shown_for_test(false);
+        unsafe {
+            let menu = folder_rows("Maguro", "Maguro");
+            pin_properties_last(menu);
+            pin_folder_open(menu);
+            let ids = ids(menu);
+            assert!(ids.contains(&7), "off does not strip the verb: {ids:?}");
+            assert_eq!(ids[0], 10, "{ids:?}");
+            assert_eq!(*ids.last().unwrap(), 42, "{ids:?}");
+            assert_eq!(default_pos(menu), 0);
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn folder_menu_uses_explore_when_open_is_absent_and_prefers_open() {
+        let _shown = Shown(crate::folderapp::shown_on());
+        let _clear = ClearVerbs;
+        crate::folderapp::set_shown_for_test(true);
+        unsafe {
+            crate::remember_verbs(&[(7, "Maguro"), (9, "explore"), (42, "properties")]);
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, 7, "Maguro로 열기");
+            push(menu, 4, "Cut");
+            push(menu, 9, "開く");
+            push(menu, 42, "Properties");
+            pin_properties_last(menu);
+            pin_folder_open(menu);
+            let first = ids(menu);
+            assert!(!first.contains(&7), "{first:?}");
+            assert_eq!(first[0], 9, "{first:?}");
+            assert_eq!(default_pos(menu), 0);
+            assert_eq!(*first.last().unwrap(), 42);
+            let _ = DestroyMenu(menu);
+
+            crate::remember_verbs(&[(9, "explore"), (10, "open"), (5, "opennew")]);
+            let both = CreatePopupMenu().unwrap();
+            push(both, 9, "Explore");
+            push(both, 5, "Open in new window");
+            push(both, 10, "Open");
+            pin_folder_open(both);
+            let row = ids(both);
+            assert_eq!(row[0], 10, "open wins over explore and opennew: {row:?}");
+            assert_eq!(default_pos(both), 0);
+            assert!(row.contains(&5) && row.contains(&9));
+            let _ = DestroyMenu(both);
+
+            crate::remember_verbs(&[(5, "opennew"), (6, "cut")]);
+            let none = CreatePopupMenu().unwrap();
+            push(none, 5, "Open in new window");
+            push(none, 6, "Cut");
+            pin_folder_open(none);
+            assert_eq!(ids(none), vec![5, 6]);
+            assert_eq!(default_pos(none), u32::MAX);
+            let _ = DestroyMenu(none);
+        }
+    }
+
+    #[test]
+    fn a_row_labelled_maguro_with_the_open_verb_stays() {
+        let _shown = Shown(crate::folderapp::shown_on());
+        let _clear = ClearVerbs;
+        crate::folderapp::set_shown_for_test(true);
+        unsafe {
+            crate::remember_verbs(&[(10, "open")]);
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, 10, "Maguro");
+            push(menu, 3, "Cut");
+            pin_folder_open(menu);
+            let ids = ids(menu);
+            assert_eq!(ids[0], 10, "{ids:?}");
+            assert_eq!(text_at(menu, 0), "Maguro");
+            assert_eq!(default_pos(menu), 0);
             let _ = DestroyMenu(menu);
         }
     }

@@ -796,6 +796,7 @@ thread_local! {
     static MENU_BRIDGE: RefCell<Option<MenuBridge>> = const { RefCell::new(None) };
     static CTX_MENU: Cell<isize> = const { Cell::new(0) }; // top HMENU; separator cleanup also walks its submenus
     static CTX_BACKGROUND: Cell<bool> = const { Cell::new(false) };
+    static CTX_FOLDER: Cell<bool> = const { Cell::new(false) };
     static WHO_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
@@ -808,6 +809,7 @@ impl Drop for ClearBridge {
     VERB_INDEX.with(|v| *v.borrow_mut() = None);
         CTX_MENU.with(|m| m.set(0));
         CTX_BACKGROUND.with(|c| c.set(false));
+        CTX_FOLDER.with(|c| c.set(false));
         CTX_OPEN.store(false, Ordering::Release);
         crate::pane::marks_overlay::note_menu(false);
     }
@@ -1080,6 +1082,11 @@ impl Drop for ClearExcel {
     }
 }
 
+/// A folder or drive click. Files and an empty background stay with the shell's own order.
+pub(crate) fn folder_menu_click(background: bool, items: &[(String, bool)]) -> bool {
+    !background && !items.is_empty() && items.iter().all(|(_, file)| !*file)
+}
+
 /// One filesystem file. Folders and a background click have no single file to ask about.
 fn who_path(items: &[(String, bool)], background: bool) -> Option<String> {
     if background || items.len() != 1 {
@@ -1189,6 +1196,8 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     let _clear_who = ClearWho;
     WHO_PATH.with(|p| *p.borrow_mut() = who_path(items, background));
     CTX_BACKGROUND.with(|c| c.set(background));
+    let folder_click = folder_menu_click(background, items);
+    CTX_FOLDER.with(|c| c.set(folder_click));
     let Ok(menu) = CreatePopupMenu() else { return false };
     let mut flags = CMF_EXPLORE | CMF_CANRENAME;
     if !background {
@@ -1287,6 +1296,10 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     }
     // After every insert, including mark. Shell Properties and ID_CTX_PROPS stay last.
     super::ctxmenu::pin_properties_last(menu);
+    // Folder and drive clicks: Open is the top default. The Maguro verb is hidden in this menu only.
+    if folder_click {
+        super::ctxmenu::pin_folder_open(menu);
+    }
     super::ctxmenu::dump_menu_items(if background { "background" } else if items.first().is_some_and(|(_, f)| !*f) { "folder" } else { "file" }, menu);
     super::ctxmenu::log_phase("total-pre", t_pre);
     MENU_BRIDGE.with(|b| {
@@ -1471,6 +1484,9 @@ unsafe fn ctx_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _a1: usize, 
             }
             // The shell can append a row while the menu opens. Properties stays the last one.
             super::ctxmenu::pin_properties_last(popup);
+            if CTX_FOLDER.with(|c| c.get()) {
+                super::ctxmenu::pin_folder_open(popup);
+            }
         }
         if let Some(lr) = lr {
             return lr;
@@ -2114,9 +2130,20 @@ mod geo_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{batch_insert_at, ctx_rename_target, fav_action_label, is_rename_verb, parent_of, properties_verb, shell_work_dir, who_insert_at, CtxRename};
+    use super::{batch_insert_at, ctx_rename_target, fav_action_label, folder_menu_click, is_rename_verb, parent_of, properties_verb, shell_work_dir, who_insert_at, CtxRename};
     use crate::i18n::UI;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn folder_menu_click_is_folders_and_drives_only() {
+        assert!(!folder_menu_click(true, &[]));
+        assert!(!folder_menu_click(false, &[]));
+        assert!(!folder_menu_click(false, &[("a.txt".into(), true)]));
+        assert!(!folder_menu_click(false, &[(r"C:\data".into(), false), ("a.txt".into(), true)]));
+        assert!(folder_menu_click(false, &[(r"C:\data".into(), false)]));
+        assert!(folder_menu_click(false, &[(r"C:\".into(), false)]));
+        assert!(folder_menu_click(false, &[(r"D:\".into(), false), (r"E:\work".into(), false)]));
+    }
 
     #[test]
     fn hidden_favourites_still_leaves_a_slot_for_the_other_maguro_rows() {

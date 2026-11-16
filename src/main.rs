@@ -51,6 +51,8 @@ fn main() -> Result<()> {
     unsafe {
         // A moved exe keeps the folder registration pointed at the binary that is running.
         folderapp::repair_moved_exe();
+        // Folder menus read this cache. Loading it is a registry read.
+        folderapp::reload_shown();
         let mut raw: Vec<String> = std::env::args().skip(1).collect();
         // Strip the failure flag before `--updated` consumes the front of the list.
         let update_fail = take_update_failed(&mut raw);

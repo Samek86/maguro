@@ -941,11 +941,12 @@ pub(crate) enum Key {
     CtxEncrypt,
     CtxPreview,
     CtxConnect,
+    OpenInMaguro,
 }
 
-pub(crate) const KEY_COUNT: usize = 936;
+pub(crate) const KEY_COUNT: usize = 937;
 
-const _: () = assert!((Key::CtxConnect as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::OpenInMaguro as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1884,6 +1885,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Encrypt",
     "Preview",
     "Connect",
+    "Open in Maguro",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2824,4 +2826,5 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "ctx_encrypt",
     "ctx_preview",
     "ctx_connect",
+    "open_in_maguro",
 ];
