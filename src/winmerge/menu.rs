@@ -132,7 +132,9 @@ pub(crate) unsafe fn insert_ctx(menu: HMENU, at: u32, pane: usize, items: &[(Str
     } else {
         crate::shell::ctxmenu::click_targets(false, items)
     };
-    if !crate::shell::ctxmenu::winmerge_menu_on(targets) {
+    // The Maguro toggle starts on. The classic WinMerge switch still starts off,
+    // so an existing menu does not gain these rows until that switch is on.
+    if !crate::shell::ctxmenu::maguro_shown("winmerge") || !crate::shell::ctxmenu::winmerge_menu_on(targets) {
         return;
     }
     let live = live(pane, items);

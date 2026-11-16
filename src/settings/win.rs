@@ -936,7 +936,13 @@ unsafe fn draw(dc: HDC, rc: RECT, g: &Geo, sn: &Snap, h: HWND) {
                 let row = if empty { None } else { fav_rows.get(*i) };
                 draw_fav_row(dc, row, *rect, sn, empty);
             }
-            Item::Note(r, key) => crate::paint_meta(dc, *r, tx(*key), sn.small),
+            Item::Note(r, key) => {
+                if matches!(*key, crate::Key::TheseItemsAppearInMaguroSRight | crate::Key::CtxWin11Note) {
+                    crate::text(dc, *r, tx(*key), sn.small, crate::ui_tokens().sub, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+                } else {
+                    crate::paint_meta(dc, *r, tx(*key), sn.small);
+                }
+            }
             Item::Alert(r) => {
                 if let Some(note) = crate::cliphot::registration_notice() {
                     crate::paint_label(dc, *r, &note, sn.small);
@@ -952,9 +958,10 @@ unsafe fn draw(dc: HDC, rc: RECT, g: &Geo, sn: &Snap, h: HWND) {
                 crate::paint_segment_group(dc, &cells, Some(if on_win { 1 } else { 0 }), hot, None, None, dpi, t.bg, crate::FocusRing::Outside);
             }
             Item::CtxBar { .. } => {}
-            Item::CtxRow { id, rect, mark, chev, name, detail, raw, tick, chips, packaged, .. } => {
-                let open = !*packaged && sn.ctx_open.iter().any(|x| x == id);
-                draw_ctx_row(dc, *rect, *mark, *chev, name, detail, raw, *tick, chips, open, *packaged, sn);
+            Item::CtxRow { id, rect, mark, chev, name, detail, raw, tick, chips, packaged, kind, .. } => {
+                let simple = *kind != CTX_KIND_CLASSIC || *packaged;
+                let open = !simple && sn.ctx_open.iter().any(|x| x == id);
+                draw_ctx_row(dc, *rect, *mark, *chev, name, detail, raw, *tick, chips, open, simple, sn);
             }
             Item::CtxSub { rect, mark, bit, tick, .. } => draw_ctx_sub(dc, *rect, *mark, *bit, *tick, sn),
             Item::CtxEmpty(r, key) => crate::paint_meta(dc, *r, tx(*key), sn.small),
@@ -1819,6 +1826,8 @@ unsafe fn on_command(h: HWND, id: i32, code: u32) {
             app(|a| {
                 let s = &mut a.s;
                 crate::shell::ctxmenu::reset_menu(&mut s.ctx_off, &mut s.ctx_on);
+                s.ctx_builtin_off.clear();
+                s.ctx_maguro_off.clear();
                 crate::shell::ctxpack::enable_all(&mut s.ctx_packaged_on);
             });
             crate::save_session();
@@ -2206,11 +2215,23 @@ unsafe fn on_click(h: HWND, x: i32, y: i32) {
                 return;
             }
         }
-        if let Item::CtxRow { id, ids, scopes, rect, mark, packaged, .. } = item {
+        if let Item::CtxRow { id, ids, scopes, rect, mark, kind, .. } = item {
             if inside(*rect, x, y) {
-                if *packaged {
+                if *kind == CTX_KIND_PACK {
                     let id = id.clone();
                     app(|a| crate::shell::ctxpack::toggle(&mut a.s.ctx_packaged_on, &id));
+                    crate::save_session();
+                    layout(h);
+                    let _ = InvalidateRect(Some(h), None, false);
+                    return;
+                }
+                if *kind == CTX_KIND_BUILTIN || *kind == CTX_KIND_MAGURO {
+                    let id = id.clone();
+                    let kind = *kind;
+                    app(|a| {
+                        let set = if kind == CTX_KIND_BUILTIN { &mut a.s.ctx_builtin_off } else { &mut a.s.ctx_maguro_off };
+                        crate::shell::ctxmenu::toggle_member(set, &id);
+                    });
                     crate::save_session();
                     layout(h);
                     let _ = InvalidateRect(Some(h), None, false);

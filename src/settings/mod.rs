@@ -161,11 +161,15 @@ const CTX_EMPTY: crate::Key = crate::Key::NoThirdPartyMenuItems;
 const CTX_CLASSIC: crate::Key = crate::Key::ClassicMenu;
 const CTX_WIN11: crate::Key = crate::Key::Windows11Menu;
 const CTX_WIN11_EMPTY: crate::Key = crate::Key::CtxWin11Empty;
-/// Page copy is gone. The strings stay so the language checks still have a key.
-#[cfg_attr(not(test), allow(dead_code))]
 const CTX_NOTE: crate::Key = crate::Key::TheseItemsAppearInMaguroSRight;
-#[cfg_attr(not(test), allow(dead_code))]
 const CTX_WIN11_NOTE: crate::Key = crate::Key::CtxWin11Note;
+const CTX_BUILTIN_HEAD: crate::Key = crate::Key::CtxBuiltinHead;
+const CTX_MAGURO_HEAD: crate::Key = crate::Key::CtxMaguroHead;
+const CTX_OTHER_HEAD: crate::Key = crate::Key::CtxOtherHead;
+pub(super) const CTX_KIND_CLASSIC: u8 = 0;
+pub(super) const CTX_KIND_PACK: u8 = 1;
+pub(super) const CTX_KIND_BUILTIN: u8 = 2;
+pub(super) const CTX_KIND_MAGURO: u8 = 3;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Ctl {
@@ -341,7 +345,14 @@ fn page_match(q: &str, page: usize) -> bool {
             || has(tx(CTX_CLASSIC), q)
             || has(tx(CTX_WIN11), q)
             || has(tx(CTX_WIN11_EMPTY), q)
+            || has(tx(CTX_NOTE), q)
+            || has(tx(CTX_WIN11_NOTE), q)
+            || has(tx(CTX_BUILTIN_HEAD), q)
+            || has(tx(CTX_MAGURO_HEAD), q)
+            || has(tx(CTX_OTHER_HEAD), q)
             || crate::shell::ctxmenu::name_hit(q)
+            || crate::shell::ctxmenu::builtin_name_hit(q)
+            || crate::shell::ctxmenu::maguro_name_hit(q)
             || crate::shell::ctxpack::name_hit(q);
     }
     false
@@ -537,6 +548,8 @@ enum Item {
         chips: Vec<(u8, RECT)>,
         /// Packaged row: one on/off for the CLSID. No chevron, no per-target expand.
         packaged: bool,
+        /// 0 classic, 1 packaged, 2 Explorer built-in, 3 Maguro command.
+        kind: u8,
     },
     CtxSub { ids: Vec<String>, scopes: Vec<u8>, bit: u8, rect: RECT, mark: RECT, tick: crate::shell::ctxmenu::Tick },
     CtxEmpty(RECT, crate::Key),
@@ -782,6 +795,42 @@ fn ctx_bar_rects(left: i32, right: i32, top: i32, bh: i32, gap: i32, reset_w: i3
     )
 }
 
+fn ctx_head(g: &mut Geo, left: i32, right: i32, y: i32, dpi: i32, key: crate::Key) -> i32 {
+    let h = sc(dpi, 28);
+    g.items.push(Item::Head(RECT { left, top: y, right, bottom: y + h }, key));
+    y + h
+}
+
+fn ctx_note(g: &mut Geo, left: i32, right: i32, y: i32, dpi: i32, key: crate::Key) -> i32 {
+    let h = sc(dpi, 40);
+    g.items.push(Item::Note(RECT { left, top: y, right, bottom: y + h }, key));
+    y + h + sc(dpi, 8)
+}
+
+fn ctx_simple(g: &mut Geo, left: i32, right: i32, y: i32, dpi: i32, id: &str, name: &str, on: bool, kind: u8) -> i32 {
+    let h = sc(dpi, 48);
+    let rect = RECT { left, top: y, right, bottom: y + h };
+    let tick = sc(dpi, 16);
+    let mid = y + h / 2;
+    let mark = RECT { left: left + sc(dpi, 14), top: mid - tick / 2, right: left + sc(dpi, 30), bottom: mid + tick / 2 };
+    g.items.push(Item::CtxRow {
+        id: id.to_string(),
+        ids: Vec::new(),
+        scopes: Vec::new(),
+        rect,
+        mark,
+        chev: RECT { left: 0, top: 0, right: 0, bottom: 0 },
+        name: name.to_string(),
+        detail: String::new(),
+        raw: String::new(),
+        tick: if on { crate::shell::ctxmenu::Tick::On } else { crate::shell::ctxmenu::Tick::Off },
+        chips: Vec::new(),
+        packaged: true,
+        kind,
+    });
+    y + h + sc(dpi, 6)
+}
+
 fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str) -> i32 {
     let dpi = sn.dpi.max(96);
     let sh = sc(dpi, 32);
@@ -790,7 +839,7 @@ fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str
     let win11 = RECT { left: classic.right, top: y, right: classic.right + seg_w(tx(CTX_WIN11), dpi), bottom: y + sh };
     g.items.push(Item::CtxSeg { classic, win11 });
     y += sh + gap;
-    let (win11_view, pack_on, off, on, seen, quiet) = app(|a| {
+    let (win11_view, pack_on, off, on, seen, quiet, builtin_off, maguro_off) = app(|a| {
         (
             a.s.ctx_win11_view,
             a.s.ctx_packaged_on.clone(),
@@ -798,6 +847,8 @@ fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str
             a.s.ctx_on.clone(),
             a.s.ctx_labels.clone(),
             a.s.ctx_quiet.clone(),
+            a.s.ctx_builtin_off.clone(),
+            a.s.ctx_maguro_off.clone(),
         )
     });
     let rows = if win11_view { Vec::new() } else { crate::shell::ctxmenu::ui_rows(&off, &on, &seen, &quiet, rq) };
@@ -811,6 +862,9 @@ fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str
     g.items.push(Item::CtxBar { reset, refresh });
     y += bh + sc(dpi, 12);
     if win11_view {
+        if rq.is_empty() || has(tx(CTX_WIN11_NOTE), rq) {
+            y = ctx_note(g, left, right, y, dpi, CTX_WIN11_NOTE);
+        }
         if pack_rows.is_empty() {
             g.items.push(Item::CtxEmpty(RECT { left, top: y, right, bottom: y + sc(dpi, 36) }, CTX_WIN11_EMPTY));
             return y + sc(dpi, 44);
@@ -836,14 +890,41 @@ fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str
                 tick: if row.on { crate::shell::ctxmenu::Tick::On } else { crate::shell::ctxmenu::Tick::Off },
                 chips,
                 packaged: true,
+                kind: CTX_KIND_PACK,
             });
             y += h + sc(dpi, 6);
         }
         return y;
     }
+    let builtin_q = if rq.is_empty() || has(tx(CTX_BUILTIN_HEAD), rq) || has(tx(CTX_NOTE), rq) { "" } else { rq };
+    let builtin_rows = crate::shell::ctxmenu::builtin_ui(&builtin_off, builtin_q);
+    if rq.is_empty() || !builtin_rows.is_empty() || has(tx(CTX_BUILTIN_HEAD), rq) || has(tx(CTX_NOTE), rq) {
+        y = ctx_head(g, left, right, y, dpi, CTX_BUILTIN_HEAD);
+        if rq.is_empty() || has(tx(CTX_NOTE), rq) {
+            y = ctx_note(g, left, right, y, dpi, CTX_NOTE);
+        }
+        for (id, key, on) in builtin_rows {
+            y = ctx_simple(g, left, right, y, dpi, id, tx(key), on, CTX_KIND_BUILTIN);
+        }
+    }
+    let maguro_q = if rq.is_empty() || has(tx(CTX_MAGURO_HEAD), rq) { "" } else { rq };
+    let maguro_rows = crate::shell::ctxmenu::maguro_ui(&maguro_off, maguro_q);
+    if rq.is_empty() || !maguro_rows.is_empty() || has(tx(CTX_MAGURO_HEAD), rq) {
+        y = ctx_head(g, left, right, y, dpi, CTX_MAGURO_HEAD);
+        for (id, key, on) in maguro_rows {
+            y = ctx_simple(g, left, right, y, dpi, id, tx(key), on, CTX_KIND_MAGURO);
+        }
+    }
+    let show_other = rq.is_empty() || !rows.is_empty() || has(tx(CTX_OTHER_HEAD), rq) || has(tx(CTX_EMPTY), rq);
+    if show_other {
+        y = ctx_head(g, left, right, y, dpi, CTX_OTHER_HEAD);
+    }
     if rows.is_empty() {
-        g.items.push(Item::CtxEmpty(RECT { left, top: y, right, bottom: y + sc(dpi, 36) }, CTX_EMPTY));
-        return y + sc(dpi, 44);
+        if show_other {
+            g.items.push(Item::CtxEmpty(RECT { left, top: y, right, bottom: y + sc(dpi, 36) }, CTX_EMPTY));
+            return y + sc(dpi, 44);
+        }
+        return y;
     }
     for row in rows {
         let sub = !row.detail.is_empty() || !row.raw.is_empty();
@@ -868,6 +949,7 @@ fn ctx_items(g: &mut Geo, sn: &Snap, left: i32, right: i32, mut y: i32, rq: &str
             tick: row.tick,
             chips,
             packaged: false,
+            kind: CTX_KIND_CLASSIC,
         });
         y += h;
         if open {
@@ -1789,7 +1871,12 @@ mod tests {
         assert_eq!(CTX_PAGE, 8);
         assert_eq!(PAGES.len(), PAGE_N);
         assert_eq!(tx(PAGES[CTX_PAGE]), "Right-click menu items");
-        assert_eq!(tx(CTX_WIN11_NOTE), "Windows 11 apps start off. Turn on only what you need. Items already shown are not added again. Enabled ones sit with Open. Properties stays last.");
+        assert_eq!(tx(CTX_WIN11_NOTE), "Windows 11 apps start off. Off removes the row, including one Windows already drew. Enabled ones sit with Open. Properties stays last.");
+        assert_eq!(tx(CTX_NOTE), "Windows and Maguro commands start on. Turn one off to hide it in Maguro's menu. Explorer is unchanged.");
+        assert_eq!(tx(CTX_BUILTIN_HEAD), "Windows commands");
+        assert_eq!(tx(CTX_MAGURO_HEAD), "Maguro commands");
+        assert!(page_match("Windows commands", CTX_PAGE));
+        assert!(page_match("Maguro commands", CTX_PAGE));
         assert_eq!(tx(CTX_RESET_L), "Reset to all enabled");
         assert_eq!(tx(CTX_REFRESH_L), "Refresh");
         assert!(page_match("Refresh", CTX_PAGE));
@@ -1817,7 +1904,12 @@ mod tests {
 
         crate::UI.store(1, Ordering::Relaxed);
         assert_eq!(tx(PAGES[CTX_PAGE]), "우클릭 메뉴 항목");
-        assert_eq!(tx(CTX_WIN11_NOTE), "Windows 11 앱은 꺼진 채로 시작해요. 필요한 것만 켜세요. 이미 있는 항목은 다시 넣지 않아요. 켠 항목은 열기 옆에 나오고, 속성은 맨 마지막이에요.");
+        assert_eq!(tx(CTX_WIN11_NOTE), "Windows 11 앱은 꺼진 채로 시작해요. 끄면 그 줄이 빠져요. Windows가 이미 그린 항목도 지워요. 켠 항목은 열기 옆에 나오고, 속성은 맨 마지막이에요.");
+        assert_eq!(tx(CTX_NOTE), "Windows 명령과 Maguro 명령은 켜진 채로 시작해요. 끄면 Maguro 메뉴에서만 숨겨요. 탐색기는 바뀌지 않아요.");
+        assert_eq!(tx(CTX_BUILTIN_HEAD), "Windows 명령");
+        assert_eq!(tx(CTX_MAGURO_HEAD), "Maguro 명령");
+        assert!(page_match("Windows 명령", CTX_PAGE));
+        assert!(page_match("공유", CTX_PAGE));
         assert_eq!(tx(CTX_RESET_L), "모두 사용");
         assert_eq!(tx(CTX_REFRESH_L), "새로고침");
         assert!(page_match("새로고침", CTX_PAGE));
@@ -1840,9 +1932,11 @@ mod tests {
 
         crate::UI.store(2, Ordering::Relaxed);
         assert_eq!(tx(PAGES[CTX_PAGE]), "右クリックメニュー項目");
-        assert_eq!(tx(CTX_WIN11_NOTE), "Windows 11 のアプリはオフから始まります。必要なものだけオンにしてください。既にある項目は重ねません。オンにした項目は「開く」の近くに入り、プロパティは最後のままです。");
+        assert_eq!(tx(CTX_WIN11_NOTE), "Windows 11 のアプリはオフから始まります。オフにするとその行が消えます。Windows が既に描いた項目も消します。オンにした項目は「開く」の近くに入り、プロパティは最後のままです。");
         assert_eq!(tx(CTX_RESET_L), "すべて有効に戻す");
-        assert_eq!(tx(CTX_NOTE), "Maguro の右クリックメニューに出る項目です。開く、コピー、プロパティなどの Windows の項目はそのままです。新しい項目はオンで始まります。エクスプローラーは変わりません。");
+        assert_eq!(tx(CTX_NOTE), "Windows と Maguro のコマンドはオンから始まります。オフにすると Maguro のメニューだけから隠れます。エクスプローラーは変わりません。");
+        assert_eq!(tx(CTX_BUILTIN_HEAD), "Windows のコマンド");
+        assert_eq!(tx(CTX_MAGURO_HEAD), "Maguro のコマンド");
         assert!(!page_match("右クリックの時間を記録", CTX_PAGE));
         let (_, page) = commit_search(0, 0, "右クリックメニュー");
         assert_eq!(page, CTX_PAGE);
@@ -1973,10 +2067,10 @@ mod tests {
             Item::CtxRow { rect, .. } => Some(rect.top),
             _ => None,
         }).expect("first ctx row");
-        assert_eq!(row_top, refresh.bottom + 12);
-        // The note was 72 DIP tall plus an 8 DIP gap. At 96 DPI the list starts 80 DIP higher.
-        let old_row = classic.top + 72 + 8 + (classic.bottom - classic.top) + (refresh.top - classic.bottom) + (refresh.bottom - refresh.top) + 12;
-        assert_eq!(old_row - row_top, 80);
+        // Head (28) and the wrapped note (40) plus an 8 DIP gap sit under the bar.
+        assert_eq!(row_top, refresh.bottom + 12 + 28 + 40 + 8);
+        assert!(g.items.iter().any(|it| matches!(it, Item::Head(_, k) if *k == CTX_BUILTIN_HEAD)));
+        assert!(g.items.iter().any(|it| matches!(it, Item::Head(_, k) if *k == CTX_MAGURO_HEAD)));
     }
 
     struct Face(HFONT);

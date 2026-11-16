@@ -248,7 +248,9 @@ pub(crate) fn needs_filter(targets: u8) -> bool {
         return false;
     }
     app(|a| {
-        a.s.ctx_off.values().any(|v| bits_of(v) & targets != 0) || !winmerge_covers(&a.s.ctx_on, targets)
+        // Built-in hides run on the same strip. A click with nothing else to filter
+        // (WinMerge explicitly on, no classic handler off) still has to remove them.
+        !a.s.ctx_builtin_off.is_empty() || a.s.ctx_off.values().any(|v| bits_of(v) & targets != 0) || !winmerge_covers(&a.s.ctx_on, targets)
     })
 }
 
@@ -798,7 +800,8 @@ pub(crate) unsafe fn dump_menu_items(tag: &str, menu: HMENU) {
         }
         let id = GetMenuItemID(menu, i as i32);
         let text = item_text(menu, i).replace('\n', " ").replace('\r', "");
-        log_line(&format!("[maguro] ctx menu-dump {tag} [{i}] id={id} {text}"));
+        let verb = super::indexed_verb(id);
+        log_line(&format!("[maguro] ctx menu-dump {tag} [{i}] id={id} verb={verb} {text}"));
     }
 }
 
@@ -898,7 +901,11 @@ pub(crate) unsafe fn compose_paths(owner: HWND, items: &[(String, bool)], target
 }
 
 pub(crate) unsafe fn strip_disabled(menu: HMENU, cm: &IContextMenu, targets: u8) {
-    let (off, on) = app(|a| (a.s.ctx_off.clone(), a.s.ctx_on.clone()));
+    let (off, on, builtin_off, maguro_off) = app(|a| (a.s.ctx_off.clone(), a.s.ctx_on.clone(), a.s.ctx_builtin_off.clone(), a.s.ctx_maguro_off.clone()));
+    hide_builtin_rows(menu, |id| {
+        if id != u32::MAX && id >= 1 && id < 0x8000 { super::cmd_verb(cm, (id - 1) as usize) } else { String::new() }
+    }, &builtin_off);
+    hide_maguro_rows(menu, &maguro_off);
     let cat = catalogue();
     let mut verbs = Vec::new();
     let mut names = Vec::new();
@@ -955,7 +962,7 @@ pub(crate) unsafe fn strip_disabled(menu: HMENU, cm: &IContextMenu, targets: u8)
         }
         let raw = item_text(menu, i);
         let verb = if id != u32::MAX && id >= 1 && id < 0x8000 { super::cmd_verb(cm, (id - 1) as usize) } else { String::new() };
-        if !item_dropped(&verb, &raw, &verbs, &names) {
+        if !item_dropped(&verb, &raw, &verbs, &names, &builtin_off) {
             continue;
         }
         let verb_l = verb.trim().to_ascii_lowercase();
@@ -996,7 +1003,7 @@ fn push_mark(names: &mut Vec<String>, text: &str) {
 /// Mark or unmark, directly under Maguro's favourites row when that row is present.
 /// The shell menu is left in place. A Recent "Show in folder" row stays at the top.
 pub(crate) unsafe fn insert_mark_item(menu: HMENU, items: &[(String, bool)]) {
-    if items.is_empty() {
+    if items.is_empty() || !maguro_shown("mark") {
         return;
     }
     let (text, on) = crate::marks::menu_parts(items);
@@ -1031,11 +1038,11 @@ fn maguro_menu_id(id: u32) -> bool {
 
 /// A shell row belongs to a disabled handler. Builtin verbs stay. Comparison uses the verb
 /// or the strings the handler inserted, after accelerators and ellipsis are folded.
-fn item_dropped(verb: &str, text: &str, verbs: &[String], names: &[String]) -> bool {
-    let verb_l = verb.trim().to_ascii_lowercase();
-    if !verb_l.is_empty() && (builtin_verb(&verb_l) || shell_owned(&verb_l)) {
+fn item_dropped(verb: &str, text: &str, verbs: &[String], names: &[String], builtin_off: &BTreeSet<String>) -> bool {
+    if builtin_kept(verb, text, builtin_off) {
         return false;
     }
+    let verb_l = verb.trim().to_ascii_lowercase();
     if !verb_l.is_empty() && verbs.iter().any(|v| v == &verb_l) {
         return true;
     }
@@ -1904,7 +1911,7 @@ fn menu_label(s: &str) -> String {
 
 /// Identity of a menu row for deletion. Accelerators, a trailing `(L)`, and `...` / `…` fold together.
 /// `比較` and `比較...` stay distinct: they are different commands.
-fn menu_match_key(s: &str) -> String {
+pub(crate) fn menu_match_key(s: &str) -> String {
     let t = menu_label(s);
     if t.is_empty() {
         return String::new();
@@ -3421,65 +3428,338 @@ fn builtin_component_name(name: &str) -> bool {
     false
 }
 
-pub(crate) fn builtin_verb(name: &str) -> bool {
-    let n = name.trim().trim_matches('&').to_ascii_lowercase();
-    if n.starts_with("windows.") {
-        return true;
+struct BuiltinSpec {
+    id: &'static str,
+    key: crate::Key,
+    verbs: &'static [&'static str],
+    /// `menu_match_key` stems. Exact, so "open" does not hide "open with".
+    labels: &'static [&'static str],
+}
+
+/// Real Explorer commands. A `windows.*` verb is a built-in only when it is listed here.
+/// Photos, Clipchamp, Copilot, and other packaged `windows.*` verbs are not in this table.
+const BUILTINS: &[BuiltinSpec] = &[
+    BuiltinSpec {
+        id: "open",
+        key: crate::Key::Open,
+        verbs: &["open", "opennew", "explore", "find", "opencontaining", "opennewprocess", "opennewwindow", "windows.open", "windows.explore"],
+        labels: &["open", "explore", "열기", "開く", "ouvrir", "öffnen"],
+    },
+    BuiltinSpec {
+        id: "openwith",
+        key: crate::Key::OpenWith,
+        verbs: &["openas", "openwith", "openwithprompt", "windows.openwith"],
+        labels: &["open with", "연결 프로그램", "다른 앱으로 열기", "プログラムから開く", "別のアプリで開く", "ouvrir avec", "öffnen mit"],
+    },
+    BuiltinSpec { id: "cut", key: crate::Key::CtxCut, verbs: &["cut", "windows.cut"], labels: &["cut", "잘라내기", "切り取り", "couper", "ausschneiden"] },
+    BuiltinSpec { id: "copy", key: crate::Key::Copy, verbs: &["copy", "windows.copy"], labels: &["copy", "복사", "コピー", "copier", "kopieren"] },
+    BuiltinSpec { id: "paste", key: crate::Key::CtxPaste, verbs: &["paste", "windows.paste"], labels: &["paste", "붙여넣기", "貼り付け", "coller", "einfügen"] },
+    BuiltinSpec { id: "delete", key: crate::Key::Delete, verbs: &["delete", "windows.delete"], labels: &["delete", "삭제", "削除", "supprimer", "löschen"] },
+    BuiltinSpec { id: "rename", key: crate::Key::Rename, verbs: &["rename", "windows.rename"], labels: &["rename", "이름 바꾸기", "名前の変更", "renommer", "umbenennen"] },
+    BuiltinSpec {
+        id: "properties",
+        key: crate::Key::Properties,
+        verbs: &["properties", "windows.properties"],
+        labels: &["properties", "속성", "プロパティ", "propriétés", "proprietes", "eigenschaften"],
+    },
+    BuiltinSpec {
+        id: "new",
+        key: crate::Key::CtxNewMenu,
+        verbs: &["new", "windows.new"],
+        labels: &["new", "새로 만들기", "新規作成", "nouveau", "neu"],
+    },
+    BuiltinSpec {
+        id: "newfolder",
+        key: crate::Key::NewFolder,
+        verbs: &["newfolder", "windows.newfolder"],
+        labels: &["new folder", "새 폴더", "新しいフォルダー", "新しいフォルダ", "新規フォルダー", "新規フォルダ", "nouveau dossier", "neuer ordner"],
+    },
+    BuiltinSpec {
+        id: "sendto",
+        key: crate::Key::CtxSendTo,
+        verbs: &["sendto", "windows.sendto"],
+        labels: &["send to", "보내기", "送る", "envoyer vers", "senden an"],
+    },
+    BuiltinSpec {
+        id: "share",
+        key: crate::Key::CtxShare,
+        verbs: &["share", "sharing", "modernshare", "giveaccessto", "windows.share", "windows.sharing", "windows.modernshare", "windows.giveaccessto"],
+        labels: &["share", "sharing", "give access to", "공유", "共有", "partager", "freigeben"],
+    },
+    BuiltinSpec {
+        id: "copyaspath",
+        key: crate::Key::CtxCopyAsPath,
+        verbs: &["copyaspath", "windows.copyaspath"],
+        labels: &["copy as path", "경로로 복사", "경로 복사", "パスのコピー", "パスとしてコピー", "copier comme chemin", "als pfad kopieren"],
+    },
+    BuiltinSpec {
+        id: "previousversions",
+        key: crate::Key::CtxPreviousVersions,
+        verbs: &["previousversions", "windows.previousversions"],
+        labels: &["previous versions", "restore previous versions", "이전 버전", "이전 버전 복원", "以前のバージョン", "versions précédentes", "vorherige versionen"],
+    },
+    BuiltinSpec {
+        id: "pintostart",
+        key: crate::Key::CtxPinToStart,
+        verbs: &["pintohome", "unpinfromhome", "pintostartscreen", "windows.pintohome", "windows.unpinfromhome", "windows.pintostartscreen", "windows.pintostart"],
+        labels: &["pin to start", "unpin from start", "pin to start screen", "시작 메뉴에 고정", "시작에 고정", "スタートにピン留め", "スタートメニューにピン留め"],
+    },
+    BuiltinSpec {
+        id: "pintotaskbar",
+        key: crate::Key::CtxPinToTaskbar,
+        verbs: &["pintotaskbar", "unpinfromtaskbar", "windows.pintotaskbar", "windows.unpinfromtaskbar"],
+        labels: &["pin to taskbar", "unpin from taskbar", "작업 표시줄에 고정", "작업 표시줄에서 제거", "タスク バーにピン留め", "タスクバーにピン留め"],
+    },
+    BuiltinSpec {
+        id: "terminal",
+        key: crate::Key::CtxOpenInTerminal,
+        verbs: &["openinterminal", "windows.openinterminal", "windows.terminal", "windows.openterminal"],
+        labels: &["open in terminal", "터미널에서 열기", "ターミナルで開く", "ouvrir dans le terminal", "in terminal öffnen"],
+    },
+    BuiltinSpec {
+        id: "console",
+        key: crate::Key::CtxCommandWindow,
+        verbs: &["cmd", "powershell", "pwsh", "wsl", "bash", "windows.cmd", "windows.powershell"],
+        labels: &["open command window here", "open powershell window here", "명령 창에서 열기", "ここでコマンド ウィンドウを開く"],
+    },
+    BuiltinSpec {
+        id: "defender",
+        key: crate::Key::CtxWindowsDefender,
+        verbs: &["windowsdefender", "windows.windowsdefender", "windows.defender"],
+        labels: &["windows defender", "scan with microsoft defender", "microsoft defender로 검사", "windows defender로 검사"],
+    },
+    BuiltinSpec { id: "link", key: crate::Key::CtxCreateShortcut, verbs: &["link", "windows.link"], labels: &["create shortcut", "바로 가기 만들기", "ショートカットの作成", "créer un raccourci", "verknüpfung erstellen"] },
+    BuiltinSpec { id: "print", key: crate::Key::CtxPrint, verbs: &["print", "printto", "windows.print"], labels: &["print", "인쇄", "印刷", "imprimer", "drucken"] },
+    BuiltinSpec { id: "edit", key: crate::Key::CtxEdit, verbs: &["edit", "windows.edit"], labels: &["edit", "편집", "編集", "modifier", "bearbeiten"] },
+    BuiltinSpec { id: "preview", key: crate::Key::CtxPreview, verbs: &["preview", "windows.preview"], labels: &["preview", "미리 보기", "プレビュー", "aperçu", "vorschau"] },
+    BuiltinSpec { id: "runas", key: crate::Key::CtxRunAs, verbs: &["runas", "runasuser", "windows.runas"], labels: &["run as administrator", "run as different user", "관리자 권한으로 실행", "管理者として実行"] },
+    BuiltinSpec { id: "format", key: crate::Key::CtxFormat, verbs: &["format", "windows.format"], labels: &["format", "포맷", "フォーマット", "formater", "formatieren"] },
+    BuiltinSpec { id: "eject", key: crate::Key::CtxEject, verbs: &["eject", "disconnect", "windows.eject"], labels: &["eject", "disconnect", "꺼내기", "取り出し", "éjecter", "auswerfen"] },
+    BuiltinSpec { id: "connect", key: crate::Key::CtxConnect, verbs: &["connect", "windows.connect"], labels: &["connect", "연결", "接続", "connecter", "verbinden"] },
+    BuiltinSpec { id: "manage", key: crate::Key::CtxManage, verbs: &["manage", "windows.manage"], labels: &["manage", "관리", "管理", "gérer", "verwalten"] },
+    BuiltinSpec {
+        id: "library",
+        key: crate::Key::CtxIncludeInLibrary,
+        verbs: &["includeinlibrary", "windows.includeinlibrary"],
+        labels: &["include in library", "라이브러리에 포함", "ライブラリに追加"],
+    },
+    BuiltinSpec {
+        id: "cast",
+        key: crate::Key::CtxCastToDevice,
+        verbs: &["playto", "casttodevice", "windows.playto", "windows.casttodevice"],
+        labels: &["cast to device", "play to", "장치로 캐스트", "デバイスにキャスト"],
+    },
+    BuiltinSpec {
+        id: "encrypt",
+        key: crate::Key::CtxEncrypt,
+        verbs: &["updateencryptionsettings", "encryptionmenu", "windows.encryption"],
+        labels: &["encrypt", "암호화", "暗号化"],
+    },
+];
+
+pub(crate) fn builtin_ids() -> &'static [&'static str] {
+    const IDS: &[&str] = &[
+        "open", "openwith", "cut", "copy", "paste", "delete", "rename", "properties", "new", "newfolder", "sendto", "share", "copyaspath", "previousversions",
+        "pintostart", "pintotaskbar", "terminal", "console", "defender", "link", "print", "edit", "preview", "runas", "format", "eject", "connect", "manage", "library",
+        "cast", "encrypt",
+    ];
+    IDS
+}
+
+struct MaguroSpec {
+    id: &'static str,
+    key: crate::Key,
+}
+
+const MAGURO: &[MaguroSpec] = &[
+    MaguroSpec { id: "fav", key: crate::Key::AddMaguroFavorites },
+    MaguroSpec { id: "mark", key: crate::Key::MarkAsImportant },
+    MaguroSpec { id: "batch", key: crate::Key::BatchRename },
+    MaguroSpec { id: "who", key: crate::Key::WhoIsUsingThisFile },
+    MaguroSpec { id: "fast", key: crate::Key::FastPaste },
+    MaguroSpec { id: "term", key: crate::Key::OpenInTerminalAdministrator },
+    MaguroSpec { id: "excelro", key: crate::Key::OpenReadOnly },
+    MaguroSpec { id: "exceltidy", key: crate::Key::ExcelTidy },
+    MaguroSpec { id: "reveal", key: crate::Key::ShowInFolder },
+    MaguroSpec { id: "props", key: crate::Key::Properties },
+    MaguroSpec { id: "winmerge", key: crate::Key::VendorWinmerge },
+];
+
+pub(crate) fn maguro_ids() -> &'static [&'static str] {
+    const IDS: &[&str] = &["fav", "mark", "batch", "who", "fast", "term", "excelro", "exceltidy", "reveal", "props", "winmerge"];
+    IDS
+}
+
+fn norm_verb(name: &str) -> String {
+    name.trim().trim_matches('&').to_ascii_lowercase()
+}
+
+fn verb_builtin_id(verb: &str) -> Option<&'static str> {
+    let v = norm_verb(verb);
+    if v.is_empty() {
+        return None;
     }
-    matches!(
-        n.as_str(),
-        "open"
-            | "opennew"
-            | "openas"
-            | "openwith"
-            | "openwithprompt"
-            | "opencontaining"
-            | "opennewprocess"
-            | "opennewwindow"
-            | "explore"
-            | "find"
-            | "edit"
-            | "print"
-            | "printto"
-            | "preview"
-            | "runas"
-            | "runasuser"
-            | "cut"
-            | "copy"
-            | "paste"
-            | "delete"
-            | "link"
-            | "rename"
-            | "properties"
-            | "pintohome"
-            | "unpinfromhome"
-            | "pintostartscreen"
-            | "pintotaskbar"
-            | "unpinfromtaskbar"
-            | "cmd"
-            | "powershell"
-            | "pwsh"
-            | "wsl"
-            | "bash"
-            | "sharing"
-            | "share"
-            | "previousversions"
-            | "copyaspath"
-            | "format"
-            | "eject"
-            | "disconnect"
-            | "connect"
-            | "manage"
-            | "modernshare"
-            | "updateencryptionsettings"
-            | "encryptionmenu"
-            | "windowsdefender"
-            | "playto"
-            | "casttodevice"
-            | "giveaccessto"
-            | "includeinlibrary"
-            | "new"
-    )
+    BUILTINS.iter().find(|s| s.verbs.iter().any(|w| *w == v)).map(|s| s.id)
+}
+
+fn label_builtin_id(text: &str) -> Option<&'static str> {
+    let key = menu_match_key(text);
+    if key.is_empty() {
+        return None;
+    }
+    BUILTINS.iter().find(|s| s.labels.iter().any(|l| *l == key)).map(|s| s.id)
+}
+
+/// Verb wins when the shell named one. A blank verb falls back to the folded label.
+pub(crate) fn builtin_id_for(verb: &str, text: &str) -> Option<&'static str> {
+    let v = norm_verb(verb);
+    if !v.is_empty() {
+        return verb_builtin_id(&v);
+    }
+    label_builtin_id(text)
+}
+
+/// True when this row is a built-in the user turned off.
+pub(crate) fn builtin_row_hidden(verb: &str, text: &str, off: &BTreeSet<String>) -> bool {
+    builtin_id_for(verb, text).is_some_and(|id| off.contains(id))
+}
+
+/// A built-in that is still on stays protected from a third-party name collision.
+fn builtin_kept(verb: &str, text: &str, off: &BTreeSet<String>) -> bool {
+    if let Some(id) = builtin_id_for(verb, text) {
+        return !off.contains(id);
+    }
+    let v = norm_verb(verb);
+    !v.is_empty() && shell_owned(&v)
+}
+
+pub(crate) fn builtin_ui(off: &BTreeSet<String>, q: &str) -> Vec<(&'static str, crate::Key, bool)> {
+    let q = q.trim().to_lowercase();
+    BUILTINS
+        .iter()
+        .filter(|s| q.is_empty() || tr(s.key).to_lowercase().contains(&q))
+        .map(|s| (s.id, s.key, !off.contains(s.id)))
+        .collect()
+}
+
+pub(crate) fn maguro_ui(off: &BTreeSet<String>, q: &str) -> Vec<(&'static str, crate::Key, bool)> {
+    let q = q.trim().to_lowercase();
+    MAGURO
+        .iter()
+        .filter(|s| q.is_empty() || tr(s.key).to_lowercase().contains(&q))
+        .map(|s| (s.id, s.key, !off.contains(s.id)))
+        .collect()
+}
+
+pub(crate) fn builtin_name_hit(q: &str) -> bool {
+    let q = q.trim().to_lowercase();
+    if q.chars().count() < 2 {
+        return false;
+    }
+    tr(crate::Key::CtxBuiltinHead).to_lowercase().contains(&q)
+        || BUILTINS.iter().any(|s| tr(s.key).to_lowercase().contains(&q))
+}
+
+pub(crate) fn maguro_name_hit(q: &str) -> bool {
+    let q = q.trim().to_lowercase();
+    if q.chars().count() < 2 {
+        return false;
+    }
+    tr(crate::Key::CtxMaguroHead).to_lowercase().contains(&q) || MAGURO.iter().any(|s| tr(s.key).to_lowercase().contains(&q))
+}
+
+/// Absent or empty means the row is shown. Shortcuts and handlers stay registered.
+pub(crate) fn maguro_enabled(off: &BTreeSet<String>, key: &str) -> bool {
+    !key.is_empty() && !off.contains(key)
+}
+
+pub(crate) fn maguro_shown(key: &str) -> bool {
+    app(|a| maguro_enabled(&a.s.ctx_maguro_off, key))
+}
+
+pub(crate) fn toggle_member(set: &mut BTreeSet<String>, id: &str) {
+    let id = id.trim();
+    if id.is_empty() {
+        return;
+    }
+    if !set.remove(id) {
+        set.insert(id.to_string());
+    }
+}
+
+/// Maguro command ids below the packaged inject range (`0x8100`).
+pub(crate) fn maguro_key_for_id(id: u32) -> Option<&'static str> {
+    match id {
+        0x8000 => Some("fav"),
+        0x8001 => Some("props"),
+        0x8002 => Some("batch"),
+        0x8003 => Some("fast"),
+        0x8004 => Some("who"),
+        0x8005 => Some("reveal"),
+        0x8006 => Some("excelro"),
+        0x8007 => Some("exceltidy"),
+        0x8008 => Some("term"),
+        0x8009 => Some("mark"),
+        0x8020..=0x80FF => Some("winmerge"),
+        _ => None,
+    }
+}
+
+/// Drop built-in rows the user turned off, then clean doubled separators.
+pub(crate) unsafe fn hide_builtin_rows(menu: HMENU, verb_of: impl Fn(u32) -> String, off: &BTreeSet<String>) {
+    if off.is_empty() {
+        return;
+    }
+    let n = GetMenuItemCount(Some(menu)).max(0) as u32;
+    for i in (0..n).rev() {
+        if super::menu_sep(menu, i) {
+            continue;
+        }
+        let id = GetMenuItemID(menu, i as i32);
+        if maguro_key_for_id(id).is_some() || (id != u32::MAX && id >= 0x8100) {
+            continue;
+        }
+        let text = item_text(menu, i);
+        if builtin_row_hidden(&verb_of(id), &text, off) {
+            let _ = DeleteMenu(menu, i, MF_BYPOSITION);
+        }
+    }
+    normalize_menu(menu);
+}
+
+/// Drop Maguro rows whose toggle is off. Packaged inject ids stay for the Windows 11 list.
+pub(crate) unsafe fn hide_maguro_rows(menu: HMENU, off: &BTreeSet<String>) {
+    if off.is_empty() {
+        return;
+    }
+    let n = GetMenuItemCount(Some(menu)).max(0) as u32;
+    for i in (0..n).rev() {
+        if super::menu_sep(menu, i) {
+            continue;
+        }
+        let id = GetMenuItemID(menu, i as i32);
+        if maguro_key_for_id(id).is_some_and(|key| off.contains(key)) {
+            let _ = DeleteMenu(menu, i, MF_BYPOSITION);
+        }
+    }
+    normalize_menu(menu);
+}
+
+/// Known Explorer verbs only. `windows.photos` and other packaged verbs are not built-ins.
+pub(crate) fn builtin_verb(name: &str) -> bool {
+    verb_builtin_id(name).is_some()
+}
+
+/// A word that already names a built-in row, such as "terminal" inside "open in terminal".
+/// Packaged title matching must not treat that word as a product name.
+pub(crate) fn builtin_label_word(word: &str) -> bool {
+    let word = word.trim();
+    if word.is_empty() {
+        return false;
+    }
+    BUILTINS.iter().any(|s| {
+        s.verbs.iter().any(|v| *v == word) || s.labels.iter().any(|l| l.split(|c: char| !c.is_ascii_alphanumeric()).any(|p| p == word))
+    })
 }
 
 fn shell_owned(verb: &str) -> bool {
@@ -3981,9 +4261,13 @@ mod tests {
     fn inbox_verbs_and_windows_binaries_are_not_third_party() {
         assert!(builtin_verb("Open"));
         assert!(builtin_verb("windows.copyaspath"));
+        assert!(builtin_verb("windows.newfolder"));
         assert!(builtin_verb("cmd"));
         assert!(!builtin_verb("7-Zip"));
         assert!(!builtin_verb("OpenWithNotepad"));
+        assert!(!builtin_verb("windows.photos"));
+        assert!(!builtin_verb("windows.copilot"));
+        assert!(!builtin_verb("ExplorerCommandOnly"));
         assert!(under_windows(r"C:\Windows\System32\shell32.dll"));
         assert!(under_windows(r"\\?\C:\Windows\SysWOW64\zipfldr.dll"));
         assert!(!under_windows(r"C:\Program Files\7-Zip\7-zip.dll"));
@@ -3991,6 +4275,148 @@ mod tests {
         assert!(!command_inbox(r#""C:\Program Files\7-Zip\7zFM.exe" "%1""#));
         assert!(shell_owned("properties"));
         assert!(!shell_owned("SevenZip"));
+        let clear = BTreeSet::new();
+        assert!(!builtin_row_hidden("open", "열기", &clear));
+        assert!(!builtin_row_hidden("properties", "속성", &clear));
+        assert!(!item_dropped("open", "열기", &["open".into()], &["열기".into()], &clear));
+        assert!(!item_dropped("properties", "속성", &[], &["속성".into()], &clear));
+        let mut off = BTreeSet::new();
+        off.insert("open".into());
+        off.insert("share".into());
+        assert!(builtin_row_hidden("open", "열기", &off));
+        assert!(builtin_row_hidden("", "공유", &off));
+        let mut path_off = BTreeSet::new();
+        path_off.insert("copyaspath".into());
+        assert!(builtin_row_hidden("windows.copyaspath", "경로로 복사", &path_off));
+        assert!(!builtin_row_hidden("windows.photos", "Photos", &off));
+        assert!(item_dropped("windows.photos", "Photos", &["windows.photos".into()], &[], &clear));
+        assert!(builtin_label_word("terminal"));
+        assert!(builtin_label_word("microsoft"));
+        assert!(!builtin_label_word("copilot"));
+        assert!(!builtin_label_word("clipchamp"));
+        for id in maguro_ids() {
+            assert!(maguro_enabled(&clear, id), "{id}");
+            let mut hidden = BTreeSet::new();
+            hidden.insert((*id).to_string());
+            assert!(!maguro_enabled(&hidden, id), "{id}");
+        }
+    }
+
+    #[test]
+    fn an_off_builtin_still_asks_for_a_strip_when_winmerge_covers_the_click() {
+        let (off, on, builtin) = crate::app(|a| (a.s.ctx_off.clone(), a.s.ctx_on.clone(), a.s.ctx_builtin_off.clone()));
+        crate::app(|a| {
+            a.s.ctx_off.clear();
+            a.s.ctx_on.insert(APP_WINMERGE.to_string(), vec!["file".into()]);
+            a.s.ctx_builtin_off.clear();
+        });
+        assert!(!needs_filter(FILE));
+        crate::app(|a| {
+            a.s.ctx_builtin_off.insert("previousversions".into());
+        });
+        assert!(needs_filter(FILE));
+        crate::app(|a| {
+            a.s.ctx_off = off;
+            a.s.ctx_on = on;
+            a.s.ctx_builtin_off = builtin;
+        });
+    }
+
+    #[test]
+    fn an_off_builtin_leaves_the_menu_and_does_not_double_separators() {
+        unsafe {
+            let build = || {
+                let menu = CreatePopupMenu().unwrap();
+                let _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from("Open"));
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+                let _ = AppendMenuW(menu, MF_STRING, 2, &HSTRING::from("공유"));
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+                let _ = AppendMenuW(menu, MF_STRING, 3, &HSTRING::from("Properties"));
+                menu
+            };
+            let labels = |menu: HMENU| {
+                let n = GetMenuItemCount(Some(menu)).max(0) as u32;
+                let mut out = Vec::new();
+                for i in 0..n {
+                    if crate::shell::menu_sep(menu, i) {
+                        out.push("---".into());
+                    } else {
+                        out.push(item_text(menu, i));
+                    }
+                }
+                out
+            };
+            fn verb(id: u32) -> String {
+                match id {
+                    1 => "open".into(),
+                    2 => "share".into(),
+                    3 => "properties".into(),
+                    _ => String::new(),
+                }
+            }
+            let menu = build();
+            hide_builtin_rows(menu, verb, &BTreeSet::new());
+            let kept = labels(menu);
+            assert!(kept.iter().any(|s| s == "Open"), "{kept:?}");
+            assert!(kept.iter().any(|s| s == "공유"), "{kept:?}");
+            assert!(kept.iter().any(|s| s == "Properties"), "{kept:?}");
+            let _ = DestroyMenu(menu);
+
+            let mut off = BTreeSet::new();
+            off.insert("share".into());
+            let menu = build();
+            hide_builtin_rows(menu, verb, &off);
+            let hidden = labels(menu);
+            assert!(hidden.iter().all(|s| s != "공유"), "{hidden:?}");
+            assert!(hidden.iter().any(|s| s == "Open") && hidden.iter().any(|s| s == "Properties"), "{hidden:?}");
+            assert!(!hidden.windows(2).any(|w| w[0] == "---" && w[1] == "---"), "{hidden:?}");
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn an_off_maguro_command_is_absent_and_the_others_stay() {
+        unsafe {
+            let rows = [
+                (0x8000u32, "fav"),
+                (0x8001, "props"),
+                (0x8002, "batch"),
+                (0x8003, "fast"),
+                (0x8004, "who"),
+                (0x8005, "reveal"),
+                (0x8006, "excelro"),
+                (0x8007, "exceltidy"),
+                (0x8008, "term"),
+                (0x8009, "mark"),
+                (0x8020, "winmerge"),
+            ];
+            let build = || {
+                let menu = CreatePopupMenu().unwrap();
+                for (id, _) in rows {
+                    let _ = AppendMenuW(menu, MF_STRING, id as usize, &HSTRING::from("row"));
+                }
+                menu
+            };
+            let ids = |menu: HMENU| {
+                let n = GetMenuItemCount(Some(menu)).max(0);
+                (0..n).map(|i| GetMenuItemID(menu, i)).collect::<Vec<_>>()
+            };
+            let menu = build();
+            hide_maguro_rows(menu, &BTreeSet::new());
+            assert_eq!(ids(menu).len(), rows.len());
+            let _ = DestroyMenu(menu);
+            for (id, key) in rows {
+                let mut off = BTreeSet::new();
+                off.insert(key.to_string());
+                let menu = build();
+                hide_maguro_rows(menu, &off);
+                let left = ids(menu);
+                assert!(left.iter().all(|have| *have != id), "{key} {left:?}");
+                assert_eq!(left.len(), rows.len() - 1, "{key}");
+                let _ = DestroyMenu(menu);
+            }
+        }
     }
 
     #[test]
@@ -4491,24 +4917,25 @@ mod tests {
     fn disabled_handlers_drop_inserted_text_in_the_ui_language() {
         // What the handler inserted on a one-item menu, in Japanese.
         let inserted = vec![menu_match_key("左側として選択(&L)"), menu_match_key("比較...")];
-        assert!(item_dropped("", "左側として選択(L)", &[], &inserted));
-        assert!(item_dropped("", "比較…", &[], &inserted));
+        let none = BTreeSet::new();
+        assert!(item_dropped("", "左側として選択(L)", &[], &inserted, &none));
+        assert!(item_dropped("", "比較…", &[], &inserted, &none));
         // The two-path probe inserts a different command. That string does not remove the ellipsis item.
         let two_paths = vec![menu_match_key("比較")];
-        assert!(!item_dropped("", "比較...", &[], &two_paths));
-        assert!(!item_dropped("", "左側として選択(L)", &[], &two_paths));
+        assert!(!item_dropped("", "比較...", &[], &two_paths, &none));
+        assert!(!item_dropped("", "左側として選択(L)", &[], &two_paths, &none));
         // English catalogue text is not a stand-in for the inserted Japanese rows.
         let english = vec![menu_match_key("WinMerge"), menu_match_key("Select Left"), menu_match_key("Compare...")];
-        assert!(!item_dropped("", "左側として選択(L)", &[], &english));
-        assert!(!item_dropped("", "比較...", &[], &english));
+        assert!(!item_dropped("", "左側として選択(L)", &[], &english, &none));
+        assert!(!item_dropped("", "比較...", &[], &english, &none));
         // A resolved MuiVerb does remove the localized row, and the registry verb does too.
         let mui = vec![menu_match_key("比較...")];
-        assert!(item_dropped("", "比較...", &[], &mui));
-        assert!(item_dropped("WinMerge", "比較...", &["winmerge".into()], &[]));
+        assert!(item_dropped("", "比較...", &[], &mui, &none));
+        assert!(item_dropped("WinMerge", "比較...", &["winmerge".into()], &[], &none));
         // Neighbouring commands and the shell's own verbs stay.
-        assert!(!item_dropped("", "SVN Checkout...", &[], &inserted));
-        assert!(!item_dropped("properties", "プロパティ", &[], &inserted));
-        assert!(!item_dropped("open", "開く(O)", &["open".into()], &inserted));
+        assert!(!item_dropped("", "SVN Checkout...", &[], &inserted, &none));
+        assert!(!item_dropped("properties", "プロパティ", &[], &inserted, &none));
+        assert!(!item_dropped("open", "開く(O)", &["open".into()], &inserted, &none));
         // Maguro's own WinMerge commands sit at 0x8020 and are not shell rows.
         // Excel read-only is 0x8005, with the other app rows, and is not a shell row either.
         assert!(maguro_menu_id(0x8020));

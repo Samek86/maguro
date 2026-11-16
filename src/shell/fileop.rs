@@ -945,6 +945,8 @@ pub(crate) unsafe fn reset_prefs() {
         a.s.winmerge_path.clear();
         a.s.ctx_off.clear();
         a.s.ctx_on.clear();
+        a.s.ctx_builtin_off.clear();
+        a.s.ctx_maguro_off.clear();
         // Packaged Windows 11 commands default off. Reset drops whatever was turned on.
         // The migration flag stays recorded so the next launch does not run that switch again.
         a.s.ctx_packaged_on.clear();

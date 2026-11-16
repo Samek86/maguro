@@ -122,6 +122,9 @@ pub(crate) unsafe fn insert(menu: HMENU, verb_of: impl Fn(u32) -> String) {
     if let Some(i) = super::fav::menu_index(menu, ID_CTX_TERM as usize) {
         let _ = DeleteMenu(menu, i, MF_BYPOSITION);
     }
+    if !super::ctxmenu::maguro_shown("term") {
+        return;
+    }
     let Some(anchor) = terminal_anchor(&snaps(menu, &verb_of)) else { return };
     let enabled = anchor.enabled && folder().is_some();
     let flags = if enabled { MF_STRING } else { MF_STRING | MF_GRAYED };

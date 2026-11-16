@@ -84,7 +84,7 @@ pub(crate) fn summary_text(done: usize, skipped: &[(&str, bool, &str)]) -> Strin
 
 /// The command sits with Maguro's own rows, and only when every selected file is `.xlsx` or `.xlsm`.
 pub(crate) unsafe fn insert_menu(menu: HMENU, items: &[(String, bool)]) {
-    if !ooxml::applies(items) {
+    if !crate::shell::ctxmenu::maguro_shown("exceltidy") || !ooxml::applies(items) {
         return;
     }
     let Some(at) = crate::menu_index(menu, crate::ID_CTX_WHO as usize)
