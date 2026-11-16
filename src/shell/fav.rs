@@ -412,6 +412,17 @@ pub(crate) fn is_rename_verb(verb: &str) -> bool {
     tail.eq_ignore_ascii_case("rename")
 }
 
+/// Shell Properties. The canonical verb is `properties`, sometimes `Windows.properties`.
+/// The drawn label (속성, Properties, Eigenschaften) is not a verb.
+pub(crate) fn properties_verb(verb: &str) -> bool {
+    let v = verb.trim().trim_matches('\0');
+    if v.is_empty() {
+        return false;
+    }
+    let tail = v.rsplit(['.', '\\']).next().unwrap_or(v);
+    tail.eq_ignore_ascii_case("properties")
+}
+
 /// Posted to the shell view after the popup is gone. A rename edit started inside
 /// `WM_CONTEXTMENU` is cancelled when that message returns and focus settles.
 const WM_CTX_RENAME: u32 = WM_APP + 90;
@@ -485,14 +496,18 @@ impl VerbIndex {
         self.by_id.get(&id).map(String::as_str).unwrap_or("")
     }
 
-    unsafe fn has_verb(&self, menu: HMENU, want: &str) -> bool {
+    fn row_is_properties(&self, id: u32) -> bool {
+        id == ID_CTX_PROPS || properties_verb(self.verb(id))
+    }
+
+    /// Shell `"properties"` / `"Windows.properties"`, or Maguro's own `ID_CTX_PROPS`.
+    unsafe fn has_properties(&self, menu: HMENU) -> bool {
         let n = GetMenuItemCount(Some(menu)).max(0) as u32;
         (0..n).any(|i| {
             if menu_sep(menu, i) {
                 return false;
             }
-            let id = GetMenuItemID(menu, i as i32);
-            self.verb(id).trim().eq_ignore_ascii_case(want)
+            self.row_is_properties(GetMenuItemID(menu, i as i32))
         })
     }
 
@@ -521,13 +536,28 @@ impl VerbIndex {
                 continue;
             }
             let id = GetMenuItemID(menu, i as i32);
-            if self.verb(id).trim().eq_ignore_ascii_case("properties") {
+            if self.row_is_properties(id) {
                 properties = Some(i);
                 break;
             }
         }
         fav_anchor(properties, n)
     }
+}
+
+/// Records shell verbs for a constructed menu. Tests use this; the real menu fills the same index.
+#[cfg(test)]
+pub(crate) fn remember_verbs(pairs: &[(u32, &str)]) {
+    let mut by_id = std::collections::HashMap::new();
+    for &(id, verb) in pairs {
+        by_id.insert(id, verb.to_string());
+    }
+    VERB_INDEX.with(|v| *v.borrow_mut() = Some(VerbIndex { by_id }));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_verbs() {
+    VERB_INDEX.with(|v| *v.borrow_mut() = None);
 }
 
 unsafe fn insert_fast_paste_idx(menu: HMENU, verbs: &VerbIndex) {
@@ -553,10 +583,14 @@ pub(crate) unsafe fn fav_anchor_pos(menu: HMENU, cm: &IContextMenu, id_first: u3
             continue;
         }
         let id = GetMenuItemID(menu, i as i32);
+        if id == ID_CTX_PROPS {
+            properties = Some(i);
+            break;
+        }
         if id == u32::MAX || id < id_first || id >= id_last {
             continue;
         }
-        if cmd_verb(cm, (id - id_first) as usize).trim().eq_ignore_ascii_case("properties") {
+        if properties_verb(&cmd_verb(cm, (id - id_first) as usize)) {
             properties = Some(i);
             break;
         }
@@ -1194,7 +1228,7 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     let t_app = std::time::Instant::now();
     let mut add_props = false;
     if background && super::ctxmenu::maguro_shown("props") {
-        let has = verbs.has_verb(menu, "properties");
+        let has = verbs.has_properties(menu);
         let n = GetMenuItemCount(Some(menu)).max(0) as u32;
         if !has && n > 0 {
             if !menu_sep(menu, n - 1) {
@@ -1251,6 +1285,8 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     if !background && !items.is_empty() {
         super::ctxmenu::insert_mark_item(menu, items);
     }
+    // After every insert, including mark. Shell Properties and ID_CTX_PROPS stay last.
+    super::ctxmenu::pin_properties_last(menu);
     super::ctxmenu::dump_menu_items(if background { "background" } else if items.first().is_some_and(|(_, f)| !*f) { "folder" } else { "file" }, menu);
     super::ctxmenu::log_phase("total-pre", t_pre);
     MENU_BRIDGE.with(|b| {
@@ -1433,6 +1469,8 @@ unsafe fn ctx_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _a1: usize, 
                 insert_excel(popup, &cm);
                 insert_term_admin(popup, &cm);
             }
+            // The shell can append a row while the menu opens. Properties stays the last one.
+            super::ctxmenu::pin_properties_last(popup);
         }
         if let Some(lr) = lr {
             return lr;
@@ -2076,7 +2114,7 @@ mod geo_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{batch_insert_at, ctx_rename_target, fav_action_label, is_rename_verb, parent_of, shell_work_dir, who_insert_at, CtxRename};
+    use super::{batch_insert_at, ctx_rename_target, fav_action_label, is_rename_verb, parent_of, properties_verb, shell_work_dir, who_insert_at, CtxRename};
     use crate::i18n::UI;
     use std::sync::atomic::Ordering;
 
@@ -2158,6 +2196,24 @@ mod tests {
         assert!(!is_rename_verb("properties"));
         assert!(!is_rename_verb("open"));
         assert!(!is_rename_verb("delete"));
+    }
+
+    #[test]
+    fn properties_verb_is_the_canonical_name_not_the_label() {
+        assert!(properties_verb("properties"));
+        assert!(properties_verb("Properties"));
+        assert!(properties_verb("  properties  "));
+        assert!(properties_verb("properties\0"));
+        assert!(properties_verb("Windows.properties"));
+        assert!(properties_verb(r"something\properties"));
+        assert!(!properties_verb(""));
+        assert!(!properties_verb("\0"));
+        assert!(!properties_verb("속성"));
+        assert!(!properties_verb("プロパティ"));
+        assert!(!properties_verb("Eigenschaften"));
+        assert!(!properties_verb("open"));
+        assert!(!properties_verb("propertiesx"));
+        assert!(!properties_verb("rename"));
     }
 
     #[test]

@@ -1002,6 +1002,7 @@ fn push_mark(names: &mut Vec<String>, text: &str) {
 
 /// Mark or unmark, directly under Maguro's favourites row when that row is present.
 /// The shell menu is left in place. A Recent "Show in folder" row stays at the top.
+/// Properties, when the menu has one, is then the last row.
 pub(crate) unsafe fn insert_mark_item(menu: HMENU, items: &[(String, bool)]) {
     if items.is_empty() || !maguro_shown("mark") {
         return;
@@ -1021,6 +1022,7 @@ unsafe fn insert_mark_label(menu: HMENU, text: &str, enabled: bool) {
     }
     let label = HSTRING::from(text);
     let _ = InsertMenuW(menu, mark_slot(menu), flags, ID_CTX_MARK as usize, &label);
+    pin_properties_last(menu);
 }
 
 /// Directly under Favourites. With no favourites row, append so position 0 stays free.
@@ -1029,6 +1031,200 @@ unsafe fn mark_slot(menu: HMENU) -> u32 {
         return fav.saturating_add(1);
     }
     GetMenuItemCount(Some(menu)).max(0) as u32
+}
+
+/// Favourites, mark, batch rename, who-is-using, Excel tidy, and WinMerge.
+/// Reveal, fast paste, Excel read-only, and terminal-as-admin stay where they were inserted.
+pub(crate) fn bottom_maguro_id(id: u32) -> bool {
+    matches!(id, crate::ID_CTX_FAV | crate::ID_CTX_BATCH | crate::ID_CTX_WHO | crate::excel::ID_CTX_EXCEL | ID_CTX_MARK) || (0x8020..=0x80FF).contains(&id)
+}
+
+fn submenu_has_bottom_id(menu: HMENU, depth: u8) -> bool {
+    if menu.0.is_null() || depth > 4 {
+        return false;
+    }
+    let n = unsafe { GetMenuItemCount(Some(menu)).max(0) };
+    for i in 0..n {
+        let id = unsafe { GetMenuItemID(menu, i) };
+        if bottom_maguro_id(id) {
+            return true;
+        }
+        if let Some(sub) = unsafe { item_submenu(menu, i as u32) } {
+            if submenu_has_bottom_id(sub, depth + 1) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum PinSlot {
+    Sep,
+    Item { at: usize },
+}
+
+/// Shell section, then one separator, then the bottom Maguro block, then every Properties row.
+/// No Properties row leaves the menu unchanged. A hidden Properties row is not inserted.
+fn plan_properties_last(rows: &[PinSlot], props: &[bool], bottom: &[bool]) -> Vec<PinSlot> {
+    let has = rows.iter().any(|slot| matches!(slot, PinSlot::Item { at } if props.get(*at).copied().unwrap_or(false)));
+    if !has {
+        return rows.to_vec();
+    }
+    let mut shell = Vec::new();
+    let mut block = Vec::new();
+    let mut properties = Vec::new();
+    for slot in rows {
+        match slot {
+            PinSlot::Sep => shell.push(PinSlot::Sep),
+            PinSlot::Item { at } if props.get(*at).copied().unwrap_or(false) => properties.push(PinSlot::Item { at: *at }),
+            PinSlot::Item { at } if bottom.get(*at).copied().unwrap_or(false) => block.push(PinSlot::Item { at: *at }),
+            PinSlot::Item { at } => shell.push(PinSlot::Item { at: *at }),
+        }
+    }
+    let mut out = drop_bad_seps(&shell);
+    if !out.is_empty() {
+        out.push(PinSlot::Sep);
+    }
+    out.extend(block);
+    out.extend(properties);
+    out
+}
+
+fn drop_bad_seps(rows: &[PinSlot]) -> Vec<PinSlot> {
+    let sep: Vec<bool> = rows.iter().map(|slot| matches!(slot, PinSlot::Sep)).collect();
+    let keep = separator_keep(&sep);
+    rows.iter().enumerate().filter(|(i, _)| keep[*i]).map(|(_, slot)| slot.clone()).collect()
+}
+
+struct SavedItem {
+    ftype: MENU_ITEM_TYPE,
+    fstate: MENU_ITEM_STATE,
+    id: u32,
+    submenu: HMENU,
+    checked: HBITMAP,
+    unchecked: HBITMAP,
+    data: usize,
+    bmp: HBITMAP,
+    text: Vec<u16>,
+}
+
+unsafe fn snapshot_item(menu: HMENU, pos: u32) -> Option<SavedItem> {
+    let mut buf = [0u16; 512];
+    let mut info = MENUITEMINFOW {
+        cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+        fMask: MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_SUBMENU | MIIM_DATA | MIIM_BITMAP | MIIM_CHECKMARKS | MIIM_STRING,
+        dwTypeData: PWSTR(buf.as_mut_ptr()),
+        cch: buf.len() as u32,
+        ..Default::default()
+    };
+    if GetMenuItemInfoW(menu, pos, true, &mut info).is_err() {
+        info.fMask = MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_SUBMENU | MIIM_DATA | MIIM_BITMAP | MIIM_CHECKMARKS;
+        info.dwTypeData = PWSTR(std::ptr::null_mut());
+        info.cch = 0;
+        if GetMenuItemInfoW(menu, pos, true, &mut info).is_err() {
+            return None;
+        }
+    }
+    let n = (info.cch as usize).min(buf.len());
+    let mut text: Vec<u16> = buf[..n].iter().copied().take_while(|&c| c != 0).collect();
+    if info.fMask.0 & MIIM_STRING.0 != 0 && !text.is_empty() {
+        text.push(0);
+    } else {
+        text.clear();
+    }
+    Some(SavedItem {
+        ftype: info.fType,
+        fstate: info.fState,
+        id: info.wID,
+        submenu: info.hSubMenu,
+        checked: info.hbmpChecked,
+        unchecked: info.hbmpUnchecked,
+        data: info.dwItemData,
+        bmp: info.hbmpItem,
+        text,
+    })
+}
+
+unsafe fn append_saved(menu: HMENU, item: &SavedItem) {
+    let string_item = item.ftype.0 & (MFT_SEPARATOR.0 | MFT_OWNERDRAW.0 | MFT_BITMAP.0) == 0;
+    let mut text = if item.text.is_empty() { vec![0u16] } else { item.text.clone() };
+    let mut mask = MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_DATA | MIIM_BITMAP | MIIM_CHECKMARKS;
+    if !item.submenu.0.is_null() {
+        mask |= MIIM_SUBMENU;
+    }
+    if string_item || item.text.len() > 1 {
+        mask |= MIIM_STRING;
+    }
+    let info = MENUITEMINFOW {
+        cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+        fMask: mask,
+        fType: item.ftype,
+        fState: item.fstate,
+        wID: item.id,
+        hSubMenu: item.submenu,
+        hbmpChecked: item.checked,
+        hbmpUnchecked: item.unchecked,
+        dwItemData: item.data,
+        dwTypeData: PWSTR(text.as_mut_ptr()),
+        cch: text.len().saturating_sub(1) as u32,
+        hbmpItem: item.bmp,
+    };
+    let pos = GetMenuItemCount(Some(menu)).max(0) as u32;
+    let _ = InsertMenuItemW(menu, pos, true, &info);
+}
+
+/// Properties (shell verb or `ID_CTX_PROPS`) becomes the last row. The bottom Maguro
+/// block sits immediately above it. Absent Properties leaves the menu alone.
+pub(crate) unsafe fn pin_properties_last(menu: HMENU) {
+    let n = GetMenuItemCount(Some(menu)).max(0) as usize;
+    if n == 0 {
+        return;
+    }
+    let mut rows = Vec::with_capacity(n);
+    let mut props = vec![false; n];
+    let mut bottom = vec![false; n];
+    for i in 0..n {
+        let pos = i as u32;
+        if super::menu_sep(menu, pos) {
+            rows.push(PinSlot::Sep);
+            continue;
+        }
+        let id = GetMenuItemID(menu, i as i32);
+        let verb = super::indexed_verb(id);
+        let is_props = id == crate::ID_CTX_PROPS || super::properties_verb(&verb);
+        props[i] = is_props;
+        bottom[i] = !is_props && (bottom_maguro_id(id) || (id == u32::MAX && item_submenu(menu, pos).is_some_and(|sub| submenu_has_bottom_id(sub, 0))));
+        rows.push(PinSlot::Item { at: i });
+    }
+    let planned = plan_properties_last(&rows, &props, &bottom);
+    if planned == rows {
+        return;
+    }
+    let mut saved = Vec::with_capacity(n);
+    for i in 0..n {
+        if matches!(rows[i], PinSlot::Sep) {
+            saved.push(None);
+            continue;
+        }
+        let Some(item) = snapshot_item(menu, i as u32) else { return };
+        saved.push(Some(item));
+    }
+    for i in (0..n as u32).rev() {
+        let _ = RemoveMenu(menu, i, MF_BYPOSITION);
+    }
+    for slot in &planned {
+        match slot {
+            PinSlot::Sep => {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            }
+            PinSlot::Item { at } => {
+                if let Some(item) = saved.get(*at).and_then(|s| s.as_ref()) {
+                    append_saved(menu, item);
+                }
+            }
+        }
+    }
 }
 
 /// Maguro appends its own commands at 0x8000 and above. The shell's range stops at 0x7FFF.
@@ -5445,6 +5641,241 @@ mod mark_menu_pos_tests {
             let ids = ids(menu);
             assert_eq!(ids[0], 10);
             assert_eq!(*ids.last().unwrap(), ID_CTX_MARK);
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    unsafe fn seps(menu: HMENU) -> Vec<bool> {
+        let n = GetMenuItemCount(Some(menu)).max(0) as u32;
+        (0..n).map(|i| crate::menu_sep(menu, i)).collect()
+    }
+
+    fn no_double_sep(sep: &[bool]) {
+        assert!(sep.windows(2).all(|pair| pair != [true, true]), "doubled separator: {sep:?}");
+    }
+
+    struct ClearVerbs;
+    impl Drop for ClearVerbs {
+        fn drop(&mut self) {
+            crate::clear_verbs();
+        }
+    }
+
+    /// Maguro's own Properties row has no shell verb. Mark must not append under it.
+    #[test]
+    fn mark_stays_above_maguro_properties_when_favourites_is_missing() {
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, 10, "Open");
+            push(menu, crate::ID_CTX_PROPS, "Properties");
+            insert_mark_label(menu, "Mark as important", true);
+            let ids = ids(menu);
+            assert_eq!(*ids.last().unwrap(), crate::ID_CTX_PROPS, "properties stays last: {ids:?}");
+            assert_eq!(ids[ids.len() - 2], ID_CTX_MARK, "mark sits directly above properties: {ids:?}");
+            assert_ne!(ids[0], ID_CTX_MARK);
+            no_double_sep(&seps(menu));
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn favourites_and_mark_sit_above_maguro_properties() {
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, 10, "Open");
+            push(menu, 11, "Cut");
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            push(menu, crate::ID_CTX_PROPS, "Properties");
+            push(menu, crate::ID_CTX_BATCH, "Batch rename");
+            push(menu, crate::ID_CTX_FAV, "Add to Favourites");
+            push(menu, 0x8020, "WinMerge");
+            insert_mark_item(menu, &[(r"C:\maguro-marks-menu-pos\note.txt".into(), true)]);
+            let ids = ids(menu);
+            let fav = ids.iter().position(|id| *id == crate::ID_CTX_FAV).unwrap();
+            let mark = ids.iter().position(|id| *id == ID_CTX_MARK).unwrap();
+            let props = ids.iter().position(|id| *id == crate::ID_CTX_PROPS).unwrap();
+            assert_eq!(*ids.last().unwrap(), crate::ID_CTX_PROPS, "{ids:?}");
+            assert_eq!(mark, fav + 1, "mark stays next to favourites: {ids:?}");
+            assert!(ids[props - 1] == 0x8020 || ids[props - 1] == ID_CTX_MARK, "maguro block ends at properties: {ids:?}");
+            assert!(fav < props && mark < props);
+            assert_eq!(ids[0], 10);
+            no_double_sep(&seps(menu));
+            assert!(!seps(menu)[props], "no separator on the properties row");
+            assert!(!seps(menu)[props - 1], "no separator between the maguro block and properties");
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn shell_properties_verb_is_last_and_the_label_is_not_the_key() {
+        unsafe {
+            let _clear = ClearVerbs;
+            // Stand-in command id. The label is Korean on purpose; the verb is what counts.
+            crate::remember_verbs(&[(42, "Windows.properties"), (55, "open")]);
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, 10, "Open");
+            push(menu, 42, "속성");
+            push(menu, 70, "Tail");
+            push(menu, crate::ID_CTX_FAV, "Add to Favourites");
+            insert_mark_item(menu, &[(r"C:\maguro-marks-menu-pos\note.txt".into(), true)]);
+            let ids = ids(menu);
+            assert_eq!(*ids.last().unwrap(), 42, "shell properties verb stays last: {ids:?}");
+            let fav = ids.iter().position(|id| *id == crate::ID_CTX_FAV).unwrap();
+            let mark = ids.iter().position(|id| *id == ID_CTX_MARK).unwrap();
+            assert_eq!(mark, fav + 1, "{ids:?}");
+            assert!(ids.iter().position(|id| *id == 70).unwrap() < fav, "shell tail stays above the maguro block: {ids:?}");
+            assert_eq!(ids[0], 10);
+            no_double_sep(&seps(menu));
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn a_localized_label_alone_is_not_properties() {
+        unsafe {
+            let _clear = ClearVerbs;
+            crate::clear_verbs();
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, 10, "Open");
+            push(menu, 55, "속성");
+            push(menu, crate::ID_CTX_FAV, "Add to Favourites");
+            insert_mark_label(menu, "Mark as important", true);
+            let ids = ids(menu);
+            assert_eq!(*ids.last().unwrap(), ID_CTX_MARK, "no verb, so the row is not moved last: {ids:?}");
+            assert!(ids.contains(&55));
+            assert!(!ids.contains(&crate::ID_CTX_PROPS));
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn both_properties_rows_end_the_menu_with_maguro_above_them() {
+        unsafe {
+            let _clear = ClearVerbs;
+            crate::remember_verbs(&[(42, "properties")]);
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, 10, "Open");
+            push(menu, 42, "Properties");
+            push(menu, crate::ID_CTX_PROPS, "Properties");
+            push(menu, crate::ID_CTX_FAV, "Add to Favourites");
+            insert_mark_label(menu, "Mark as important", true);
+            let ids = ids(menu);
+            let fav = ids.iter().position(|id| *id == crate::ID_CTX_FAV).unwrap();
+            let mark = ids.iter().position(|id| *id == ID_CTX_MARK).unwrap();
+            let shell = ids.iter().position(|id| *id == 42).unwrap();
+            let own = ids.iter().position(|id| *id == crate::ID_CTX_PROPS).unwrap();
+            assert!(fav < shell && mark < shell && fav < own && mark < own, "{ids:?}");
+            assert_eq!(*ids.last().unwrap(), crate::ID_CTX_PROPS, "{ids:?}");
+            assert_eq!(ids[ids.len() - 2], 42, "{ids:?}");
+            assert_eq!(mark, fav + 1, "{ids:?}");
+            no_double_sep(&seps(menu));
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn reveal_stays_first_when_properties_is_pinned() {
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, crate::ID_CTX_REVEAL, "Show in folder");
+            push(menu, 10, "Open");
+            push(menu, crate::ID_CTX_FAST, "Fast paste");
+            push(menu, crate::ID_CTX_EXCEL, "Open read-only");
+            push(menu, crate::ID_CTX_PROPS, "Properties");
+            push(menu, crate::excel::ID_CTX_EXCEL, "Excel tidy");
+            push(menu, crate::ID_CTX_FAV, "Remove from Favourites");
+            insert_mark_label(menu, "Remove important mark", true);
+            let ids = ids(menu);
+            assert_eq!(ids[0], crate::ID_CTX_REVEAL, "{ids:?}");
+            let fast = ids.iter().position(|id| *id == crate::ID_CTX_FAST).unwrap();
+            let ro = ids.iter().position(|id| *id == crate::ID_CTX_EXCEL).unwrap();
+            let tidy = ids.iter().position(|id| *id == crate::excel::ID_CTX_EXCEL).unwrap();
+            let fav = ids.iter().position(|id| *id == crate::ID_CTX_FAV).unwrap();
+            let mark = ids.iter().position(|id| *id == ID_CTX_MARK).unwrap();
+            assert!(fast < fav && ro < fav, "paste and read-only stay out of the properties block: {ids:?}");
+            assert!(tidy > ro && tidy < fav || tidy == fav - 1, "excel tidy stays in the maguro block: {ids:?}");
+            assert_eq!(mark, fav + 1, "{ids:?}");
+            assert_eq!(*ids.last().unwrap(), crate::ID_CTX_PROPS, "{ids:?}");
+            assert_ne!(mark, 0);
+            no_double_sep(&seps(menu));
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn separators_are_not_doubled_at_the_properties_boundary() {
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, 10, "Open");
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            push(menu, crate::ID_CTX_PROPS, "Properties");
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            push(menu, crate::ID_CTX_FAV, "Add to Favourites");
+            insert_mark_label(menu, "Mark as important", true);
+            let ids = ids(menu);
+            let sep = seps(menu);
+            let props = ids.iter().position(|id| *id == crate::ID_CTX_PROPS).unwrap();
+            no_double_sep(&sep);
+            assert!(!sep[props]);
+            assert!(!sep[props - 1], "the maguro row touches properties: {ids:?} {sep:?}");
+            assert_eq!(ids[props - 1], ID_CTX_MARK);
+            assert!(sep.iter().any(|s| *s), "the shell section keeps its separator");
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn grayed_mark_and_a_winmerge_submenu_survive_the_move() {
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            let sub = CreatePopupMenu().unwrap();
+            push(sub, 0x8020, "Compare");
+            push(menu, 10, "Open");
+            push(menu, crate::ID_CTX_PROPS, "Properties");
+            let _ = InsertMenuW(menu, 2, MF_BYPOSITION | MF_POPUP | MF_STRING, sub.0 as usize, &HSTRING::from("WinMerge"));
+            insert_mark_label(menu, "Mark as important", false);
+            let ids = ids(menu);
+            assert_eq!(*ids.last().unwrap(), crate::ID_CTX_PROPS, "{ids:?}");
+            let mark = ids.iter().position(|id| *id == ID_CTX_MARK).unwrap();
+            assert!(mark + 1 == ids.len() - 1 || ids.get(mark + 1).is_some_and(|id| *id == u32::MAX || *id == crate::ID_CTX_PROPS));
+            assert!(mark < ids.len() - 1);
+            let mut state = MENUITEMINFOW {
+                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_STATE,
+                ..Default::default()
+            };
+            assert!(GetMenuItemInfoW(menu, mark as u32, true, &mut state).is_ok());
+            assert!(state.fState.0 & MFS_GRAYED.0 != 0, "grayed state survives");
+            let mut found = false;
+            let n = GetMenuItemCount(Some(menu)).max(0) as u32;
+            for i in 0..n {
+                let child = GetSubMenu(menu, i as i32);
+                if child.0.is_null() {
+                    continue;
+                }
+                let inner = GetMenuItemID(child, 0);
+                if inner == 0x8020 {
+                    found = true;
+                    assert!(i < n - 1, "winmerge submenu stays above properties");
+                }
+            }
+            assert!(found, "winmerge submenu was kept");
+            no_double_sep(&seps(menu));
+            let _ = DestroyMenu(menu);
+        }
+    }
+
+    #[test]
+    fn pinning_twice_leaves_the_same_order() {
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            push(menu, 10, "Open");
+            push(menu, crate::ID_CTX_FAV, "Add to Favourites");
+            push(menu, crate::ID_CTX_PROPS, "Properties");
+            insert_mark_label(menu, "Mark as important", true);
+            let once = ids(menu);
+            pin_properties_last(menu);
+            assert_eq!(ids(menu), once);
             let _ = DestroyMenu(menu);
         }
     }
