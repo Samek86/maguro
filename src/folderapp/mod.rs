@@ -7,12 +7,12 @@ mod apply;
 mod handoff;
 mod plan;
 
-pub(crate) use apply::{open_in_explorer, reload_shown, repair_moved_exe, set_registered, shown_on, take_launch_args};
+pub(crate) use apply::{open_in_explorer, refresh_verb_label, reload_shown, repair_moved_exe, set_registered, shown_on, take_launch_args};
 #[cfg(test)]
 pub(crate) use apply::set_shown_for_test;
 pub(crate) use handoff::{intent_elapsed_ms, note_activate, noted_pane, parent_pid};
 #[allow(unused_imports)]
 pub(crate) use plan::{
-    handoff_action, handoff_text, link_file, list_activation, list_open, menu_open, menu_open_item, navigable, open_verb, parse_handoff, tree_activate, ActKind, Handoff, ListAct, OpenIn,
-    OpenWhere,
+    folder_open_kind, handoff_action, handoff_text, is_maguro_verb, link_file, list_activation, list_open, menu_open, menu_open_item, navigable, open_verb, parse_handoff,
+    preferred_open_at, tree_activate, ActKind, FolderOpenKind, Handoff, ListAct, OpenIn, OpenWhere,
 };

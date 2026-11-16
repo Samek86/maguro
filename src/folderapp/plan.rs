@@ -2,7 +2,10 @@
 //! which arguments are not filesystem paths. Nothing here touches the registry.
 
 /// Verb name under `Directory\shell` and `Drive\shell`. Not the Folder class.
+/// The shell key's default stays this name. The visible label is a separate value.
 pub(crate) const VERB: &str = "Maguro";
+/// Display string on the verb key. Windows shows this instead of the key name.
+pub(crate) const MUI_VERB: &str = "MUIVerb";
 pub(crate) const DIRECTORY: &str = "Directory";
 pub(crate) const DRIVE: &str = "Drive";
 /// Previous `(Default)` of the shell key. Empty when that value was absent.
@@ -117,6 +120,48 @@ fn is_our_verb(v: &str) -> bool {
     v.eq_ignore_ascii_case(VERB)
 }
 
+fn verb_tail(verb: &str) -> &str {
+    let v = verb.trim().trim_matches('\0');
+    let tail = v.rsplit(['.', '\\']).next().unwrap_or(v);
+    tail.trim()
+}
+
+/// The registered folder verb. Comparison is the verb, not the drawn label.
+pub(crate) fn is_maguro_verb(verb: &str) -> bool {
+    verb_tail(verb).eq_ignore_ascii_case(VERB)
+}
+
+/// Which shell row is Open on a folder menu. `opennew` is not Open.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FolderOpenKind {
+    Open,
+    Explore,
+}
+
+pub(crate) fn folder_open_kind(verb: &str) -> Option<FolderOpenKind> {
+    let tail = verb_tail(verb);
+    if tail.eq_ignore_ascii_case("open") {
+        Some(FolderOpenKind::Open)
+    } else if tail.eq_ignore_ascii_case("explore") {
+        Some(FolderOpenKind::Explore)
+    } else {
+        None
+    }
+}
+
+/// `open` wins. `explore` is the Open row only when `open` is absent.
+pub(crate) fn preferred_open_at(kinds: &[Option<FolderOpenKind>]) -> Option<usize> {
+    if let Some(i) = kinds.iter().position(|k| *k == Some(FolderOpenKind::Open)) {
+        return Some(i);
+    }
+    kinds.iter().position(|k| *k == Some(FolderOpenKind::Explore))
+}
+
+fn display_name<'a>(label: &'a str) -> &'a str {
+    let label = label.trim();
+    if label.is_empty() { VERB } else { label }
+}
+
 fn class_is_ours(s: &ClassState) -> bool {
     s.shell_default.as_deref().is_some_and(is_our_verb) && s.command.as_ref().is_some_and(|c| !c.trim().is_empty())
 }
@@ -187,14 +232,18 @@ fn previous_to_store(s: &ClassState) -> (String, u32, u32, u32) {
     (text, set, shell_created, class_created)
 }
 
-pub(crate) fn register_ops(exe: &str, states: &[ClassState]) -> Vec<Op> {
+/// `label` is the visible name (`Open in Maguro`, `Maguro로 열기`, `Maguroで開く`).
+/// The shell default stays the verb name `Maguro`, which is how Windows picks the default verb.
+pub(crate) fn register_ops(exe: &str, label: &str, states: &[ClassState]) -> Vec<Op> {
+    let display = display_name(label);
     let mut ops = Vec::new();
     for class in CLASSES {
         let s = state_for(states, class);
         let (prev, set, shell_created, class_created) = previous_to_store(&s);
         let verb = verb_key(class);
         ops.push(Op::SetSz { key: shell_key(class), name: String::new(), data: VERB.into() });
-        ops.push(Op::SetSz { key: verb.clone(), name: String::new(), data: VERB.into() });
+        ops.push(Op::SetSz { key: verb.clone(), name: String::new(), data: display.into() });
+        ops.push(Op::SetSz { key: verb.clone(), name: MUI_VERB.into(), data: display.into() });
         ops.push(Op::SetSz { key: verb.clone(), name: PREV_DEFAULT.into(), data: prev });
         ops.push(Op::SetDword { key: verb.clone(), name: PREV_SET.into(), data: set });
         ops.push(Op::SetDword { key: verb.clone(), name: SHELL_CREATED.into(), data: shell_created });
@@ -573,7 +622,7 @@ mod tests {
     #[test]
     fn register_writes_directory_and_drive_and_never_folder() {
         let exe = r"C:\Program Files\Maguro\maguro.exe";
-        let ops = register_ops(exe, &fresh());
+        let ops = register_ops(exe, "Open in Maguro", &fresh());
         assert_classes_only(&ops);
         let keys: Vec<&str> = ops.iter().map(Op::key).collect();
         for key in value_keys() {
@@ -584,7 +633,7 @@ mod tests {
         // A Folder row in the snapshot is ignored. The plan never grows a Folder key.
         let mut extra = fresh();
         extra.push(ClassState::absent("Folder"));
-        assert_classes_only(&register_ops(exe, &extra));
+        assert_classes_only(&register_ops(exe, "Open in Maguro", &extra));
     }
 
     #[test]
@@ -597,7 +646,7 @@ mod tests {
         assert!(dir.ends_with("%1\""));
         assert!(drive.ends_with("%1\\\""));
         assert_ne!(dir, drive);
-        let ops = register_ops(exe, &fresh());
+        let ops = register_ops(exe, "Open in Maguro", &fresh());
         assert_eq!(sz(&ops, &command_key(DIRECTORY), ""), Some(dir.as_str()));
         assert_eq!(sz(&ops, &command_key(DRIVE), ""), Some(drive.as_str()));
     }
@@ -612,9 +661,11 @@ mod tests {
         let mut drive = ClassState::absent(DRIVE);
         drive.class_exists = true;
         drive.class_other_subkeys = vec!["shellex".into()];
-        let ops = register_ops(r"D:\maguro.exe", &[dir, drive]);
+        let ops = register_ops(r"D:\maguro.exe", "Open in Maguro", &[dir, drive]);
         assert_eq!(sz(&ops, &shell_key(DIRECTORY), ""), Some(VERB));
-        assert_eq!(sz(&ops, &verb_key(DIRECTORY), ""), Some(VERB));
+        assert_eq!(sz(&ops, &verb_key(DIRECTORY), ""), Some("Open in Maguro"));
+        assert_eq!(sz(&ops, &verb_key(DIRECTORY), MUI_VERB), Some("Open in Maguro"));
+        assert_eq!(sz(&ops, &shell_key(DIRECTORY), MUI_VERB), None);
         assert_eq!(sz(&ops, &verb_key(DIRECTORY), PREV_DEFAULT), Some("open"));
         assert_eq!(dword(&ops, &verb_key(DIRECTORY), PREV_SET), Some(1));
         assert_eq!(dword(&ops, &verb_key(DIRECTORY), SHELL_CREATED), Some(0));
@@ -626,8 +677,46 @@ mod tests {
     }
 
     #[test]
+    fn register_keeps_the_verb_name_as_the_shell_default_and_localizes_the_display() {
+        for label in ["Open in Maguro", "Maguro로 열기", "Maguroで開く"] {
+            let ops = register_ops(r"C:\maguro.exe", label, &fresh());
+            assert_classes_only(&ops);
+            for class in [DIRECTORY, DRIVE] {
+                assert_eq!(sz(&ops, &shell_key(class), ""), Some(VERB), "{label} {class}");
+                assert_eq!(sz(&ops, &shell_key(class), MUI_VERB), None, "{label} {class}");
+                assert_eq!(sz(&ops, &verb_key(class), ""), Some(label), "{class}");
+                assert_eq!(sz(&ops, &verb_key(class), MUI_VERB), Some(label), "{class}");
+            }
+        }
+        let blank = register_ops(r"C:\maguro.exe", "  ", &fresh());
+        assert_eq!(sz(&blank, &shell_key(DIRECTORY), ""), Some(VERB));
+        assert_eq!(sz(&blank, &verb_key(DIRECTORY), ""), Some(VERB));
+        assert_eq!(sz(&blank, &verb_key(DRIVE), MUI_VERB), Some(VERB));
+    }
+
+    #[test]
+    fn open_is_the_folder_row_and_explore_is_the_fallback() {
+        use FolderOpenKind::*;
+        assert_eq!(folder_open_kind("open"), Some(Open));
+        assert_eq!(folder_open_kind("Open"), Some(Open));
+        assert_eq!(folder_open_kind("Windows.open"), Some(Open));
+        assert_eq!(folder_open_kind("explore"), Some(Explore));
+        assert_eq!(folder_open_kind("  EXPLORE  "), Some(Explore));
+        assert_eq!(folder_open_kind("opennew"), None);
+        assert_eq!(folder_open_kind("opennewwindow"), None);
+        assert_eq!(folder_open_kind("maguro"), None);
+        assert_eq!(folder_open_kind(""), None);
+        assert!(is_maguro_verb("Maguro") && is_maguro_verb("MAGURO") && is_maguro_verb("windows.maguro"));
+        assert!(!is_maguro_verb("open") && !is_maguro_verb("Open in Maguro") && !is_maguro_verb(""));
+        let rows = [None, Some(Explore), Some(Open), Some(Explore)];
+        assert_eq!(preferred_open_at(&rows), Some(2));
+        assert_eq!(preferred_open_at(&[Some(Explore), None]), Some(0));
+        assert_eq!(preferred_open_at(&[None, None]), None);
+    }
+
+    #[test]
     fn a_fresh_hive_records_that_we_created_the_parents() {
-        let ops = register_ops(r"C:\maguro.exe", &fresh());
+        let ops = register_ops(r"C:\maguro.exe", "Open in Maguro", &fresh());
         for class in [DIRECTORY, DRIVE] {
             assert_eq!(dword(&ops, &verb_key(class), PREV_SET), Some(0));
             assert_eq!(sz(&ops, &verb_key(class), PREV_DEFAULT), Some(""));
@@ -643,7 +732,10 @@ mod tests {
             ours(DIRECTORY, Some("open"), 0, 0, &cmd),
             ours(DRIVE, None, 1, 1, &command_line(r"C:\maguro.exe", DRIVE)),
         ];
-        let ops = register_ops(r"C:\moved\maguro.exe", &states);
+        let ops = register_ops(r"C:\moved\maguro.exe", "Maguro로 열기", &states);
+        assert_eq!(sz(&ops, &shell_key(DIRECTORY), ""), Some(VERB));
+        assert_eq!(sz(&ops, &verb_key(DIRECTORY), ""), Some("Maguro로 열기"));
+        assert_eq!(sz(&ops, &verb_key(DRIVE), MUI_VERB), Some("Maguro로 열기"));
         assert_eq!(sz(&ops, &verb_key(DIRECTORY), PREV_DEFAULT), Some("open"));
         assert_eq!(dword(&ops, &verb_key(DIRECTORY), PREV_SET), Some(1));
         assert_eq!(dword(&ops, &verb_key(DIRECTORY), SHELL_CREATED), Some(0));

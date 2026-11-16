@@ -32,7 +32,12 @@ pub(crate) fn reload_shown() {
     SHOWN.store(is_registered(&read_states()), Ordering::Relaxed);
 }
 
+fn verb_label() -> String {
+    crate::tr(crate::Key::OpenInMaguro).to_string()
+}
+
 /// ON writes our Directory and Drive verb. OFF deletes exactly the keys the plan names.
+/// The visible name is the current UI string. The shell default stays the verb name.
 pub(crate) fn set_registered(on: bool) -> bool {
     let exe = current_exe();
     if on && exe.is_empty() {
@@ -40,14 +45,39 @@ pub(crate) fn set_registered(on: bool) -> bool {
         return false;
     }
     let states = read_states();
-    let ops = if on { register_ops(&exe, &states) } else { restore_ops(&states) };
+    let ops = if on { register_ops(&exe, &verb_label(), &states) } else { restore_ops(&states) };
     let ok = unsafe { apply_ops(&ops) };
     reload_shown();
     ok
 }
 
+/// A UI language change rewrites the verb's display name when the setting is already on.
+/// Off stays off: this does not create the verb. Tests never reach the registry.
+pub(crate) fn refresh_verb_label() {
+    if !shown_on() || cfg!(test) {
+        return;
+    }
+    let exe = current_exe();
+    if exe.is_empty() {
+        return;
+    }
+    let states = read_states();
+    if !is_registered(&states) {
+        return;
+    }
+    let ops = register_ops(&exe, &verb_label(), &states);
+    unsafe {
+        _ = apply_ops(&ops);
+    }
+    reload_shown();
+}
+
 /// Startup: if both classes already point at Maguro, point the command at this exe.
+/// `MAGURO_SKIP_FOLDERAPP_REPAIR` leaves the live hive alone (a portable capture of another exe).
 pub(crate) fn repair_moved_exe() {
+    if std::env::var_os("MAGURO_SKIP_FOLDERAPP_REPAIR").is_some() {
+        return;
+    }
     let exe = current_exe();
     if exe.is_empty() {
         return;
@@ -279,4 +309,32 @@ unsafe fn value_names(key: HKEY) -> Vec<String> {
 
 fn utf16z(s: &str) -> Vec<u8> {
     s.encode_utf16().chain(std::iter::once(0)).flat_map(|u| u.to_le_bytes()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verb_label;
+
+    #[test]
+    fn verb_label_follows_the_ui_language() {
+        let prev = crate::UI.load(std::sync::atomic::Ordering::Relaxed);
+        crate::UI.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(verb_label(), "Open in Maguro");
+        crate::UI.store(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(verb_label(), "Maguro로 열기");
+        crate::UI.store(2, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(verb_label(), "Maguroで開く");
+        crate::UI.store(prev, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[test]
+    fn refresh_returns_before_the_registry_when_the_setting_is_off() {
+        let prev = crate::folderapp::shown_on();
+        crate::folderapp::set_shown_for_test(false);
+        super::refresh_verb_label();
+        crate::folderapp::set_shown_for_test(true);
+        // cfg(test) returns before any hive read, even when the cache says on.
+        super::refresh_verb_label();
+        crate::folderapp::set_shown_for_test(prev);
+    }
 }
