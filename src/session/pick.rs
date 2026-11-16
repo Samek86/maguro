@@ -1224,6 +1224,9 @@ unsafe fn pick_session_ex(owner: HWND, title: &str, with_save: bool) -> Option<V
                 continue;
             }
         }
+        if crate::eat_for_capture(&msg, mine) {
+            continue;
+        }
         if msg.message == WM_MOUSEMOVE || msg.message == WM_MOUSELEAVE {
             let on = msg.message == WM_MOUSEMOVE && crate::is_icon_button(msg.hwnd) && GetParent(msg.hwnd).unwrap_or_default() == h;
             crate::set_hover(if on { msg.hwnd } else { HWND::default() });

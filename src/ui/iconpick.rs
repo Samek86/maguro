@@ -165,6 +165,10 @@ pub(crate) unsafe fn pick_system_icon(owner: HWND, current_path: &str, current_i
             }
             break;
         }
+        let mine = msg.hwnd == hwnd || IsChild(hwnd, msg.hwnd).as_bool();
+        if crate::eat_for_capture(&msg, mine) {
+            continue;
+        }
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
         if !IsWindow(Some(hwnd)).as_bool() {

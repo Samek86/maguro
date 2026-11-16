@@ -125,6 +125,9 @@ fn pump_reply() {
             if !PeekMessageW(&mut m, None, 0, 0, PM_REMOVE).as_bool() {
                 break;
             }
+            if crate::eat_for_capture(&m, false) {
+                continue;
+            }
             _ = TranslateMessage(&m);
             DispatchMessageW(&m);
         }

@@ -502,6 +502,9 @@ unsafe fn ask(owner: HWND, initial: Prefs) -> Option<Prefs> {
                 continue;
             }
         }
+        if crate::eat_for_capture(&msg, mine) {
+            continue;
+        }
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

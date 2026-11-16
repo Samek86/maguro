@@ -692,6 +692,8 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_THEME_RELAUNCH => theme_relaunch(),
             WM_UPDATE => on_update(h, wp.0),
             crate::remote::WM_REMOTE => remote_arrived(),
+            // A chord posted before capture dropped the registration must not still run.
+            WM_HOTKEY if crate::keys::capture_gate(crate::keys::capturing()).block_hotkey => {}
             WM_HOTKEY if wp.0 == HOTKEY_ID as usize => hotkey_pressed(),
             WM_HOTKEY if wp.0 == crate::dialogjump::DIALOG_HOTKEY_ID as usize => crate::dialogjump::on_hotkey(),
             WM_HOTKEY if wp.0 == crate::cliphot::CLIP_HOTKEY_ID as usize => crate::cliphot::on_hotkey(),
@@ -1229,6 +1231,9 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             // loop handles WM_XBUTTONUP first; a mouse-sourced command for that same click
             // is claimed there and must not step history again.
             WM_APPCOMMAND => {
+                if crate::keys::capture_gate(crate::keys::capturing()).block_app {
+                    return LRESULT(0);
+                }
                 let Some((dir, path)) = appcommand_event(lp.0) else {
                     return DefWindowProcW(h, msg, wp, lp);
                 };
@@ -1259,6 +1264,12 @@ pub(crate) unsafe fn set_hotkey(main: HWND, on: bool) -> bool {
     if !on {
         _ = UnregisterHotKey(Some(main), HOTKEY_ID);
         return false;
+    }
+    // Capture needs the chord as a normal key. Report success so the wish stays on and no toast appears.
+    if !crate::keys::register_hotkey_now(crate::keys::capturing(), true) {
+        _ = UnregisterHotKey(Some(main), HOTKEY_ID);
+        crate::keys::set_hot_hold(true);
+        return true;
     }
     let Some(chord) = crate::keys::hot_chord() else { return false };
     if chord.digits || (!chord.ctrl && !chord.alt && !chord.shift && !chord.win) {
@@ -1292,8 +1303,36 @@ pub(crate) unsafe fn try_register_hotkey(main: HWND) {
     });
 }
 
+/// Drop Win+Shift+E, the clipboard chord, and the file-dialog chord while a shortcut is captured.
+/// The on/off wishes stay. [`resume_global_hotkeys`] puts the registrations back.
+pub(crate) unsafe fn suspend_global_hotkeys() {
+    crate::keys::set_hot_hold(true);
+    let (front, clip) = app(|a| (a.hot_hwnd, a.clip_hwnd));
+    if !front.0.is_null() {
+        _ = UnregisterHotKey(Some(front), HOTKEY_ID);
+    }
+    if !clip.0.is_null() {
+        _ = UnregisterHotKey(Some(clip), crate::cliphot::CLIP_HOTKEY_ID);
+    }
+    crate::dialogjump::suspend_for_capture();
+}
+
+/// Register the global chords again after capture. A no-op when they were not dropped.
+pub(crate) unsafe fn resume_global_hotkeys() {
+    if !crate::keys::take_hot_hold() {
+        return;
+    }
+    apply_hotkey(false);
+}
+
 /// After a rebind or a reset. The wish stays on when the new chord cannot be registered.
+/// While a shortcut row is capturing, registration waits until capture ends.
 pub(crate) unsafe fn apply_hotkey(notify: bool) {
+    if crate::keys::capturing() {
+        suspend_global_hotkeys();
+        return;
+    }
+    crate::keys::set_hot_hold(false);
     let (want, old, main) = app(|a| (a.s.hotkey, a.hot_hwnd, a.main));
     if !old.0.is_null() {
         _ = UnregisterHotKey(Some(old), HOTKEY_ID);
