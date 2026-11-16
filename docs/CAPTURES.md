@@ -199,12 +199,12 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 | settings_panes.ko.png | 설정 패널·보기 | MaguroSettings page2 | light/ko | dialogs/fav 시드 | 31688 B (986×633) | capture-settings-panes.ps1 | DWM |  |
 | settings_panes.png | 설정 패널·보기 | MaguroSettings page2 | light/en | dialogs/fav 시드 | 34309 B (986×633) | capture-settings-panes.ps1 | DWM |  |
 | tab_list.png | 탭 목록 | MaguroTabList | light/en | tabs.json | 17406 B (562×532) | WM_COMMAND 탭목록 | DWM |  |
-| tabs.ja.png | 창 탭·패널 탭 | MaguroMain | light/ja | tabs.ja.json | 229004 B (1206×813) | tabs cfg | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** Photos(선택, 파랑 줄) / Mixed·Docs는 옅은 색만 / Music 무색. G:\\Photos 2026 + G:\\Mixed |
-| tabs.ko.png | 창 탭·패널 탭 | MaguroMain | light/ko | tabs.ko.json | 226443 B (1206×813) | tabs cfg | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** 선택 탭만 색 줄 |
-| tabs.png | 창 탭·패널 탭 | MaguroMain | light/en | tabs.json | 225980 B (1206×813) | tabs cfg | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** Selected Photos has the blue stripe. Mixed and Docs are tint only. Music is uncoloured |
-| vertical_tabs.ja.png | 세로 창 탭 | MaguroMain | light/ja | tabs.ja.json + vertical_tabs | 234185 B (1206×813) | 같은 시드에 vertical_tabs=true | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** 옛 v8은 1px inset으로 1204×811. 선택 탭만 색 줄 |
-| vertical_tabs.ko.png | 세로 창 탭 | MaguroMain | light/ko | tabs.ko.json + vertical_tabs | 230974 B (1206×813) | 같은 시드에 vertical_tabs=true | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** |
-| vertical_tabs.png | 세로 창 탭 | MaguroMain | light/en | tabs.json + vertical_tabs | 230876 B (1206×813) | same seed with vertical_tabs=true | DWM, 1px frame kept | **2026-11-16 images-v9.** Old v8 was 1204×811 after a 1px inset. Only the selected tab has a stripe |
+| tabs.ja.png | 창 탭·패널 탭 | MaguroMain | light/ja | tabs.ja.json | 228887 B (1206×813) | tabs cfg | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** Photos(선택, 파랑 줄) / Mixed·Docs는 옅은 색만 / Music 무색. G:\\Photos 2026 + G:\\Mixed. 폴더 트리는 Archive부터 |
+| tabs.ko.png | 창 탭·패널 탭 | MaguroMain | light/ko | tabs.ko.json | 225918 B (1206×813) | tabs cfg | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** 선택 탭만 색 줄. 폴더 트리는 Archive부터 |
+| tabs.png | 창 탭·패널 탭 | MaguroMain | light/en | tabs.json | 225835 B (1206×813) | tabs cfg | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** Selected Photos has the blue stripe. Mixed and Docs are tint only. Music is uncoloured. Folder tree starts at Archive |
+| vertical_tabs.ja.png | 세로 창 탭 | MaguroMain | light/ja | tabs.ja.json + vertical_tabs | 234051 B (1206×813) | 같은 시드에 vertical_tabs=true | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** 옛 v8은 1px inset으로 1204×811. 선택 탭만 색 줄. 폴더 트리는 Archive부터 |
+| vertical_tabs.ko.png | 세로 창 탭 | MaguroMain | light/ko | tabs.ko.json + vertical_tabs | 231820 B (1206×813) | 같은 시드에 vertical_tabs=true | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** 폴더 트리는 Archive부터 |
+| vertical_tabs.png | 세로 창 탭 | MaguroMain | light/en | tabs.json + vertical_tabs | 230660 B (1206×813) | same seed with vertical_tabs=true | DWM, 1px frame kept | **2026-11-16 images-v9.** Old v8 was 1204×811 after a 1px inset. Only the selected tab has a stripe. Folder tree starts at Archive |
 | view_menu.ja.png | 톱니 보기 메뉴 | #32768 두 장 | light/ja | tabs.ja.json | 21896 B (738×437) | WM_COMMAND 207, 表示 하위 메뉴 | 메뉴만 흰 캔버스 | **2026-11-16 images-v9.** タブを縦に並べる, 단축키 없음, 체크 없음. 메뉴 사이 흰 칸은 캔버스 |
 | view_menu.ko.png | 톱니 보기 메뉴 | #32768 두 장 | light/ko | tabs.ko.json | 16079 B (575×437) | WM_COMMAND 207, 보기 하위 메뉴 | 메뉴만 흰 캔버스 | **2026-11-16 images-v9.** 탭을 세로로 표시 |
 | view_menu.png | 톱니 보기 메뉴 | #32768 두 장 | light/en | tabs.json | 20839 B (693×437) | WM_COMMAND 207, View submenu | menus only, white canvas | **2026-11-16 images-v9.** Vertical tabs, no shortcut, unchecked. The white corner is the canvas, not another window |
@@ -258,6 +258,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 시스템 대화상자(IFileOperation 진행, 탐색기 메뉴, 공통 파일 대화상자)는 그대로다. 이름 묻기, 즐겨찾기 관리, 정보, Excel, 확인 창, 그리고 팝업·알림(폴더 감시 토스트, 즐겨찾기 없음, 네트워크 실패, 빠른 복사 진행·이름 충돌, 세션 목록, 단축키, 레이아웃 고르기, 선택 칸, 서버 연결의 저장/취소)은 공유 토큰으로 옮겼다. 설정 창의 토글은 모양과 동작이 이전과 같다.
 
 ## 변경 이력 (관련)
+
+- **2026-11-16 (v0.2.25 follow-up):** `docs/images-v9/{en,ko,ja}/tabs.png`와 `vertical_tabs.png`만 다시 찍음. 같은 시드·같은 창(1206×813, 1px 테두리 유지). G: 폴더 트리를 스크롤해 첫 보이는 자식이 Archive가 되게 함. `_qa-chunk1`, `_qa-s22`, `_qa-s23-chunk2`, `_qa-s25`, `_review`는 화면 밖. Photos 2026은 선택된 채로 보임. 바이트: en tabs 225835, en vertical 230660, ko tabs 225918, ko vertical 231820, ja tabs 228887, ja vertical 234051. G:의 폴더는 바꾸지 않음.
 
 - **2026-11-16 (v0.2.25):** main `7d1954de34677a94c1e204781550539b411ace2f`에서 바뀐 화면만 `docs/images-v9/{en,ko,ja}/`에 다시 찍음. 시드는 `readme2-cfgs-v6`의 `tabs.json` / `tabs.ko.json` / `tabs.ja.json`(세로 탭은 그 복사본에 `vertical_tabs: true`), 설정은 `dialogs.json` / `favorites.ko.json` / `hero_light.ja.json`. 라이트 테마. 창 탭·세로 탭은 1206×813(1px 테두리 유지). 우클릭 설정은 986×633, 클래식 메뉴, 위에 Windows 명령 묶음. 보기 메뉴는 톱니 WM_COMMAND 207로 연 두 팝업만 흰 캔버스에 붙임(en 693×437, ko 575×437, ja 738×437). `docs/images-v8/`은 그대로 두고, README·도움말에서 이 파일들만 v9를 가리킴. 나머지 샷은 v8.
 
