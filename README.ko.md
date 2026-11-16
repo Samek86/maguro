@@ -16,7 +16,7 @@
   <a href="https://github.com/Samek86/maguro"><img alt="플랫폼: Windows" src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white"></a>
   <a href="LICENSE"><img alt="라이선스: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <a href="https://github.com/Samek86/maguro"><img alt="언어: Rust" src="https://img.shields.io/badge/language-Rust-000000?logo=rust&logoColor=white"></a>
-  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="릴리스 0.2.24" src="https://img.shields.io/badge/release-0.2.24-0A9BD6"></a>
+  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="릴리스 0.2.25" src="https://img.shields.io/badge/release-0.2.25-0A9BD6"></a>
 </p>
 
 <p align="center">
@@ -102,17 +102,17 @@
 
 창 전체의 크롬 스타일 탭에 더해, 각 패널 안에도 탭이 있습니다. 탭 이름은 활성 폴더에서 오고, 툴팁에 전체 경로가 보입니다. 탭 복제, 새 창으로 이동, 세션 저장도 됩니다.
 
-<p align="center"><img width="760" alt="창 탭과 패널 탭" src="docs/images-v8/ko/tabs.png"></p>
+<p align="center"><img width="760" alt="창 탭과 패널 탭" src="docs/images-v9/ko/tabs.png"></p>
 
 ### 3. 세로 창 탭
 
-창 탭 목록을 즐겨찾기 패널 오른쪽에 세로로 둘 수 있습니다(설정 → 모양 → 탭을 세로로 표시, 기본값은 꺼짐). 오른쪽 가장자리를 끌어 너비를 바꾸고, 가장자리를 더블클릭하면 원래 너비로 돌아갑니다. 너비는 기억됩니다.
+창 탭 목록을 즐겨찾기 패널 오른쪽에 세로로 둘 수 있습니다(설정 → 모양 → 탭을 세로로 표시, 또는 톱니바퀴 메뉴 → 보기 → 탭을 세로로 표시. 기본값은 꺼짐). 오른쪽 가장자리를 끌어 너비를 바꾸고, 가장자리를 더블클릭하면 원래 너비로 돌아갑니다. 너비는 기억됩니다.
 
-<p align="center"><img width="760" alt="세로 창 탭" src="docs/images-v8/ko/vertical_tabs.png"></p>
+<p align="center"><img width="760" alt="세로 창 탭" src="docs/images-v9/ko/vertical_tabs.png"></p>
 
 ### 4. 탭 이름 고정·잠금·색
 
-탭을 더블클릭하거나 우클릭 → 이름 바꾸기로 원하는 이름을 고정할 수 있습니다. 잠그면 실수로 닫기 어렵습니다. 색을 입히면 관련 작업을 한눈에 구분할 수 있습니다.
+탭을 더블클릭하거나 우클릭 → 이름 바꾸기로 원하는 이름을 고정할 수 있습니다. 잠그면 실수로 닫기 어렵습니다. 색을 입히면 관련 작업을 한눈에 구분할 수 있습니다. 선택한 색 탭만 왼쪽에 색 줄이 있고, 다른 색 탭은 옅게 보입니다.
 
 ### 5. 패널을 끌어 옮기기 — Ctrl+끌기로 복사
 
@@ -155,9 +155,9 @@ F3으로 빠른 미리보기를 엽니다. 그림, PDF, Office, HTML, Markdown, 
 
 ### 10. 구성 가능한 우클릭 메뉴
 
-설정 → 우클릭 메뉴 항목에서 Maguro 고유 명령의 표시/숨김을 고를 수 있습니다. 메뉴를 짧게 유지해도, 전부 되살려도 됩니다.
+설정 → 우클릭 메뉴 항목에서 Windows 명령과 Maguro 명령을 각각 숨길 수 있습니다. 둘 다 켜진 채로 시작하고, 숨김은 Maguro 메뉴에만 적용되며 탐색기는 바뀌지 않습니다. 속성은 항상 맨 아래에 있고, Maguro 항목은 그 바로 위에 있습니다.
 
-<p align="center"><img width="560" alt="우클릭 메뉴 설정" src="docs/images-v8/ko/settings_ctxmenu.png"></p>
+<p align="center"><img width="560" alt="우클릭 메뉴 설정" src="docs/images-v9/ko/settings_ctxmenu.png"></p>
 
 ### 11. 이름 미리보기가 있는 일괄 이름 바꾸기
 

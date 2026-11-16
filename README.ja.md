@@ -16,7 +16,7 @@
   <a href="https://github.com/Samek86/maguro"><img alt="プラットフォーム: Windows" src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white"></a>
   <a href="LICENSE"><img alt="ライセンス: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <a href="https://github.com/Samek86/maguro"><img alt="言語: Rust" src="https://img.shields.io/badge/language-Rust-000000?logo=rust&logoColor=white"></a>
-  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="リリース 0.2.24" src="https://img.shields.io/badge/release-0.2.24-0A9BD6"></a>
+  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="リリース 0.2.25" src="https://img.shields.io/badge/release-0.2.25-0A9BD6"></a>
 </p>
 
 <p align="center">
@@ -102,17 +102,17 @@
 
 ウィンドウ全体の Chrome 風タブに加え、各ペインの中にもタブがあります。タブ名はアクティブなフォルダから付き、ツールチップにフルパスが出ます。タブの複製、別ウィンドウへの移動、セッション保存もできます。
 
-<p align="center"><img width="760" alt="ウィンドウタブとペインタブ" src="docs/images-v8/ja/tabs.png"></p>
+<p align="center"><img width="760" alt="ウィンドウタブとペインタブ" src="docs/images-v9/ja/tabs.png"></p>
 
 ### 3. 縦のウィンドウタブ
 
-ウィンドウのタブ一覧を、お気に入りパネルの右に縦に並べられます（設定 → 外観 → タブを縦に並べる。既定はオフ）。右端をドラッグして幅を変え、端をダブルクリックすると元の幅に戻ります。幅は記憶されます。
+ウィンドウのタブ一覧を、お気に入りパネルの右に縦に並べられます（設定 → 外観 → タブを縦に並べる、または歯車メニュー → 表示 → タブを縦に並べる。既定はオフ）。右端をドラッグして幅を変え、端をダブルクリックすると元の幅に戻ります。幅は記憶されます。
 
-<p align="center"><img width="760" alt="縦のウィンドウタブ" src="docs/images-v8/ja/vertical_tabs.png"></p>
+<p align="center"><img width="760" alt="縦のウィンドウタブ" src="docs/images-v9/ja/vertical_tabs.png"></p>
 
 ### 4. タブの固定名・ロック・色
 
-タブをダブルクリック、または右クリック → 名前の変更で好きな名前を固定できます。ロックすれば誤って閉じにくくなります。色を付けると、関連する作業が一目で分かります。
+タブをダブルクリック、または右クリック → 名前の変更で好きな名前を固定できます。ロックすれば誤って閉じにくくなります。色を付けると、関連する作業が一目で分かります。選択中の色付きタブだけ左に色の帯が出て、それ以外の色付きタブは薄い色だけになります。
 
 ### 5. ペインをドラッグして移動 — Ctrl+ドラッグでコピー
 
@@ -155,9 +155,9 @@ F3 でクイックルックを開きます。画像、PDF、Office、HTML、Mark
 
 ### 10. カスタムできる右クリックメニュー
 
-設定 → 右クリックメニュー項目で、Maguro 独自コマンドの表示／非表示を選べます。メニューをすっきりさせても、全部戻しても構いません。
+設定 → 右クリックメニュー項目では、Windows のコマンドと Maguro のコマンドをそれぞれ隠せます。どちらもオンから始まり、隠しても Maguro のメニューだけで、エクスプローラーは変わりません。プロパティは常に一番下で、Maguro の項目はそのすぐ上です。
 
-<p align="center"><img width="560" alt="右クリックメニューの設定" src="docs/images-v8/ja/settings_ctxmenu.png"></p>
+<p align="center"><img width="560" alt="右クリックメニューの設定" src="docs/images-v9/ja/settings_ctxmenu.png"></p>
 
 ### 11. 名前のプレビュー付き一括リネーム
 
