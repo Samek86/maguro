@@ -472,6 +472,12 @@ pub(crate) struct Session {
     /// Packaged Windows 11 commands the user turned on (`packaged:{clsid}`).
     /// Empty means every packaged command stays off. maguro.json only; a .maguro file does not carry this.
     pub(crate) ctx_packaged_on: std::collections::BTreeSet<String>,
+    /// Explorer built-in commands hidden in Maguro's menu. Empty or absent means every built-in stays visible.
+    /// Ids are the settings keys (`open`, `share`, …). maguro.json only; a .maguro file does not carry this.
+    pub(crate) ctx_builtin_off: std::collections::BTreeSet<String>,
+    /// Maguro-added commands hidden in the menu. Empty or absent means every Maguro row stays visible.
+    /// maguro.json only; a .maguro file does not carry this.
+    pub(crate) ctx_maguro_off: std::collections::BTreeSet<String>,
     /// One-time switch for configs that used to show every packaged command.
     /// Once true, `ctx_packaged_on` is kept and that switch does not run again.
     pub(crate) ctx_win11_pack_migrated: bool,
@@ -633,6 +639,8 @@ impl Default for Session {
             ctx_on: std::collections::BTreeMap::new(),
             ctx_quiet: std::collections::BTreeSet::new(),
             ctx_packaged_on: std::collections::BTreeSet::new(),
+            ctx_builtin_off: std::collections::BTreeSet::new(),
+            ctx_maguro_off: std::collections::BTreeSet::new(),
             ctx_win11_pack_migrated: true,
             ctx_win11_view: false,
             ctx_timing: false,
@@ -729,6 +737,8 @@ impl PartialEq for Session {
             && self.ctx_on == o.ctx_on
             && self.ctx_quiet == o.ctx_quiet
             && self.ctx_packaged_on == o.ctx_packaged_on
+            && self.ctx_builtin_off == o.ctx_builtin_off
+            && self.ctx_maguro_off == o.ctx_maguro_off
             && self.ctx_win11_pack_migrated == o.ctx_win11_pack_migrated
             && self.ctx_win11_view == o.ctx_win11_view
             && self.ctx_timing == o.ctx_timing

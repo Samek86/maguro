@@ -456,6 +456,14 @@ struct SettingsFile {
     /// A named session file does not store this.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     ctx_packaged_on: BTreeSet<String>,
+    /// Explorer built-ins hidden in Maguro's menu. Empty means every built-in stays visible.
+    /// A named session file does not store this. Old `ctx_menu` entries are not read as these ids.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    ctx_builtin_off: BTreeSet<String>,
+    /// Maguro-added commands hidden in the menu. Empty means every Maguro row stays visible.
+    /// A named session file does not store this.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    ctx_maguro_off: BTreeSet<String>,
     /// Set after the one-time switch that turns previously-on packaged commands off.
     /// Missing on an older file means that switch still has to run.
     #[serde(default, skip_serializing_if = "is_off")]
@@ -577,6 +585,8 @@ impl SettingsFile {
             ctx_quiet: BTreeSet::new(),
             ctx_packaged_off: BTreeSet::new(),
             ctx_packaged_on: BTreeSet::new(),
+            ctx_builtin_off: BTreeSet::new(),
+            ctx_maguro_off: BTreeSet::new(),
             ctx_win11_pack_migrated: false,
             ctx_win11_view: false,
             ctx_timing: false,
@@ -699,6 +709,8 @@ impl SettingsFile {
             ctx_quiet: clean_quiet(&s.ctx_quiet),
             ctx_packaged_off: BTreeSet::new(),
             ctx_packaged_on: clean_packaged(&s.ctx_packaged_on),
+            ctx_builtin_off: clean_known(&s.ctx_builtin_off, crate::shell::ctxmenu::builtin_ids()),
+            ctx_maguro_off: clean_known(&s.ctx_maguro_off, crate::shell::ctxmenu::maguro_ids()),
             ctx_win11_pack_migrated: s.ctx_win11_pack_migrated,
             ctx_win11_view: s.ctx_win11_view,
             ctx_timing: s.ctx_timing,
@@ -769,6 +781,8 @@ impl SettingsFile {
         self.extra.remove("ctx_quiet");
         self.extra.remove("ctx_packaged_off");
         self.extra.remove("ctx_packaged_on");
+        self.extra.remove("ctx_builtin_off");
+        self.extra.remove("ctx_maguro_off");
         self.extra.remove("ctx_win11_pack_migrated");
         self.extra.remove("ctx_win11_view");
         self.extra.remove("ctx_timing");
@@ -904,6 +918,8 @@ impl SettingsFile {
         } else {
             s.ctx_packaged_on.clear();
         }
+        s.ctx_builtin_off = clean_known(&self.ctx_builtin_off, crate::shell::ctxmenu::builtin_ids());
+        s.ctx_maguro_off = clean_known(&self.ctx_maguro_off, crate::shell::ctxmenu::maguro_ids());
         s.ctx_win11_pack_migrated = true;
         s.ctx_win11_view = self.ctx_win11_view;
         s.ctx_timing = self.ctx_timing;
@@ -999,6 +1015,18 @@ fn clean_blocked(names: &[String]) -> Vec<String> {
         out.push(base.to_string());
     }
     out
+}
+
+fn clean_known(ids: &BTreeSet<String>, ok: &[&str]) -> BTreeSet<String> {
+    ids.iter()
+        .filter_map(|id| {
+            let id = id.trim().to_ascii_lowercase();
+            if id.is_empty() || id.len() > 64 {
+                return None;
+            }
+            ok.iter().any(|k| *k == id).then_some(id)
+        })
+        .collect()
 }
 
 fn clean_packaged(ids: &BTreeSet<String>) -> BTreeSet<String> {
@@ -1560,7 +1588,38 @@ mod tests {
         let empty = adopt("{}").unwrap();
         assert!(empty.ctx_win11_pack_migrated);
         assert!(empty.ctx_packaged_on.is_empty());
+        assert!(empty.ctx_builtin_off.is_empty());
+        assert!(empty.ctx_maguro_off.is_empty());
         assert!(!empty.ctx_win11_view);
+        assert!(fresh.get("ctx_builtin_off").is_none());
+        assert!(fresh.get("ctx_maguro_off").is_none());
+    }
+
+    #[test]
+    fn builtin_and_maguro_off_lists_round_trip_in_json_only() {
+        let old = adopt(r#"{"ctx_menu":{"open":["file"],"share":["folder"]},"ctx_on":{"app:winmerge":["file"]}}"#).unwrap();
+        assert!(old.ctx_builtin_off.is_empty(), "an old ctx_menu entry is not a built-in hide");
+        assert!(old.ctx_maguro_off.is_empty());
+        assert!(old.ctx_off.contains_key("open"), "the third-party map is left as stored");
+
+        let mut chosen = Session::default();
+        chosen.ctx_builtin_off.insert("share".into());
+        chosen.ctx_builtin_off.insert("nope".into());
+        chosen.ctx_builtin_off.insert("  ".into());
+        chosen.ctx_maguro_off.insert("mark".into());
+        chosen.ctx_maguro_off.insert("fav".into());
+        chosen.ctx_maguro_off.insert("packaged:x".into());
+        let text = sync_text(&chosen);
+        let saved: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(saved["ctx_builtin_off"], serde_json::json!(["share"]));
+        assert_eq!(saved["ctx_maguro_off"], serde_json::json!(["fav", "mark"]));
+        assert!(!chosen.to_ini().contains("ctx_builtin_off"));
+        assert!(!chosen.to_ini().contains("ctx_maguro_off"));
+        let back = adopt(&text).unwrap();
+        assert_eq!(back.ctx_builtin_off.iter().cloned().collect::<Vec<_>>(), vec!["share".to_string()]);
+        assert_eq!(back.ctx_maguro_off.iter().cloned().collect::<Vec<_>>(), vec!["fav".to_string(), "mark".to_string()]);
+        assert!(Session::parse(&chosen.to_ini()).ctx_builtin_off.is_empty());
+        assert!(Session::parse(&chosen.to_ini()).ctx_maguro_off.is_empty());
     }
 
     #[test]

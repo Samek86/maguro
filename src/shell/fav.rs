@@ -341,6 +341,16 @@ pub(crate) fn fav_action_label(remove: bool) -> &'static str {
     }
 }
 
+/// Batch rename sits directly above favourites. With that row hidden, it uses the same anchor.
+pub(crate) fn batch_insert_at(fav_at: Option<u32>, anchor: u32) -> u32 {
+    fav_at.unwrap_or(anchor)
+}
+
+/// Who-is-using sits above batch rename, then above favourites, then at the same anchor.
+pub(crate) fn who_insert_at(batch_at: Option<u32>, fav_at: Option<u32>, anchor: u32) -> u32 {
+    batch_at.or(fav_at).unwrap_or(anchor)
+}
+
 /// Menu index the favourites command sits above: the properties item, or the last item.
 pub(crate) fn fav_anchor(properties: Option<u32>, count: i32) -> u32 {
     if count <= 0 {
@@ -524,6 +534,9 @@ unsafe fn insert_fast_paste_idx(menu: HMENU, verbs: &VerbIndex) {
     if let Some(i) = menu_index(menu, ID_CTX_FAST as usize) {
         let _ = DeleteMenu(menu, i, MF_BYPOSITION);
     }
+    if !super::ctxmenu::maguro_shown("fast") {
+        return;
+    }
     let Some(at) = verbs.find_pos_after(menu, "paste") else { return };
     let _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_FAST as usize, &HSTRING::from(tr(crate::Key::FastPaste)));
 }
@@ -556,6 +569,9 @@ unsafe fn insert_fast_paste(menu: HMENU, cm: &IContextMenu) {
     if let Some(i) = menu_index(menu, ID_CTX_FAST as usize) {
         let _ = DeleteMenu(menu, i, MF_BYPOSITION);
     }
+    if !super::ctxmenu::maguro_shown("fast") {
+        return;
+    }
     let n = GetMenuItemCount(Some(menu));
     if n <= 0 {
         return;
@@ -585,6 +601,9 @@ unsafe fn insert_excel_idx(menu: HMENU, verbs: &VerbIndex) {
     if let Some(i) = menu_index(menu, ID_CTX_EXCEL as usize) {
         let _ = DeleteMenu(menu, i, MF_BYPOSITION);
     }
+    if !super::ctxmenu::maguro_shown("excelro") {
+        return;
+    }
     if !super::excelro::armed() {
         return;
     }
@@ -596,6 +615,9 @@ unsafe fn insert_excel_idx(menu: HMENU, verbs: &VerbIndex) {
 unsafe fn insert_excel(menu: HMENU, cm: &IContextMenu) {
     if let Some(i) = menu_index(menu, ID_CTX_EXCEL as usize) {
         let _ = DeleteMenu(menu, i, MF_BYPOSITION);
+    }
+    if !super::ctxmenu::maguro_shown("excelro") {
+        return;
     }
     if !super::excelro::armed() {
         return;
@@ -1059,11 +1081,15 @@ unsafe fn insert_who(menu: HMENU) {
     if let Some(i) = menu_index(menu, ID_CTX_WHO as usize) {
         let _ = DeleteMenu(menu, i, MF_BYPOSITION);
     }
+    if !super::ctxmenu::maguro_shown("who") {
+        return;
+    }
     let Some(path) = WHO_PATH.with(|p| p.borrow().clone()) else { return };
     if path.is_empty() {
         return;
     }
-    let Some(at) = menu_index(menu, ID_CTX_BATCH as usize).or_else(|| menu_index(menu, ID_CTX_FAV as usize)) else { return };
+    let anchor = VERB_INDEX.with(|v| v.borrow().as_ref().map(|verbs| verbs.fav_anchor(menu, 0)).unwrap_or(0));
+    let at = who_insert_at(menu_index(menu, ID_CTX_BATCH as usize), menu_index(menu, ID_CTX_FAV as usize), anchor);
     let label = HSTRING::from(tr(crate::Key::WhoIsUsingThisFile));
     _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_WHO as usize, &label);
 }
@@ -1167,7 +1193,7 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     // The background menu of some views (Windows 10) comes without Properties. Add the folder's own.
     let t_app = std::time::Instant::now();
     let mut add_props = false;
-    if background {
+    if background && super::ctxmenu::maguro_shown("props") {
         let has = verbs.has_verb(menu, "properties");
         let n = GetMenuItemCount(Some(menu)).max(0) as u32;
         if !has && n > 0 {
@@ -1178,23 +1204,22 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
             add_props = true;
         }
     }
-    if !paths.is_empty() {
+    if !paths.is_empty() && super::ctxmenu::maguro_shown("fav") {
         let at = verbs.fav_anchor(menu, 0);
         insert_fav(menu, at, ID_CTX_FAV as usize, fav_menu_label(&paths));
     }
     // Directly above favourites, in the normal menu and after a filtered shell menu.
     // Background clicks have nothing to rename. Recent files is read-only, so no rename there.
-    if !background && !paths.is_empty() && !crate::pane::recent::locked(pane) {
-        if let Some(fav_at) = menu_index(menu, ID_CTX_FAV as usize) {
-            let label = HSTRING::from(crate::rename::menu_label());
-            _ = InsertMenuW(menu, fav_at, MF_STRING | MF_BYPOSITION, ID_CTX_BATCH as usize, &label);
-        }
+    if !background && !paths.is_empty() && !crate::pane::recent::locked(pane) && super::ctxmenu::maguro_shown("batch") {
+        let at = batch_insert_at(menu_index(menu, ID_CTX_FAV as usize), verbs.fav_anchor(menu, 0));
+        let label = HSTRING::from(crate::rename::menu_label());
+        _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_BATCH as usize, &label);
     }
     insert_who(menu);
     crate::excel::insert_menu(menu, items);
     // Next to Favourites (or above Properties on a background click). Only commands that fit this click.
     if !paths.is_empty() {
-        let at = menu_index(menu, ID_CTX_FAV as usize).map(|i| i + 1).unwrap_or(0);
+        let at = menu_index(menu, ID_CTX_FAV as usize).map(|i| i + 1).unwrap_or_else(|| verbs.fav_anchor(menu, 0));
         crate::winmerge::insert_ctx(menu, at, pane, items);
     } else if background {
         let at = verbs.fav_anchor(menu, 0);
@@ -1204,6 +1229,7 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     // After strip. Enabled packaged commands are inserted in the upper group, not after Properties.
     let t_inject = std::time::Instant::now();
     super::ctxpack::inject_menu(menu, paths, items, background, props_folder);
+    super::ctxpack::strip_off_rows(menu);
     super::ctxmenu::log_phase("inject", t_inject);
     // After every removal and insertion. The shell can still add a row when the menu opens.
     finish_shell_menu(menu, Some(&cm), background);
@@ -1214,7 +1240,7 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
         if let Some(i) = menu_index(menu, ID_CTX_FAST as usize) {
             let _ = DeleteMenu(menu, i, MF_BYPOSITION);
         }
-        if !background && items.len() == 1 {
+        if !background && items.len() == 1 && super::ctxmenu::maguro_shown("reveal") {
             let label = HSTRING::from(crate::pane::recent::reveal_label());
             let _ = InsertMenuW(menu, 0, MF_STRING | MF_BYPOSITION, ID_CTX_REVEAL as usize, &label);
         }
@@ -2050,9 +2076,18 @@ mod geo_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{ctx_rename_target, fav_action_label, is_rename_verb, parent_of, shell_work_dir, CtxRename};
+    use super::{batch_insert_at, ctx_rename_target, fav_action_label, is_rename_verb, parent_of, shell_work_dir, who_insert_at, CtxRename};
     use crate::i18n::UI;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn hidden_favourites_still_leaves_a_slot_for_the_other_maguro_rows() {
+        assert_eq!(batch_insert_at(Some(12), 20), 12);
+        assert_eq!(batch_insert_at(None, 20), 20);
+        assert_eq!(who_insert_at(Some(11), Some(12), 20), 11);
+        assert_eq!(who_insert_at(None, Some(12), 20), 12);
+        assert_eq!(who_insert_at(None, None, 20), 20);
+    }
 
     #[test]
     fn background_shell_verb_uses_the_open_folder() {

@@ -2,10 +2,12 @@
 //
 // These registrations are not under `shellex\ContextMenuHandlers`. The classic
 // scanner never sees them. Some still appear in the shell menu through other
-// Windows 11 paths (Photos, Clipchamp, Copilot, …); `inject_menu` skips any
-// title the menu already shows. Settings lists them on the Windows 11 view.
-// They start off. The popup inserts only the ones the user turned on, into the
-// upper group (with Open), never after Properties.
+// Windows 11 paths (Photos, Clipchamp, Copilot, …). Settings lists them on the
+// Windows 11 view. They start off. An off command is removed when the shell
+// already painted it, matched by the catalogue name or a cached title.
+// `inject_menu` still skips re-inserting a title that remains for a command
+// the user turned on. A disabled command is never CoCreated. Injected rows
+// join the upper group (with Open), never after Properties.
 //
 // The catalogue is built only when that view is laid out, Refresh runs while it
 // is showing, or a popup has at least one command enabled. It is not read at
@@ -846,6 +848,109 @@ fn title_already_present(existing: &std::collections::HashSet<String>, title: &s
     !folded.is_empty() && existing.contains(&folded)
 }
 
+fn titles_match(menu_text: &str, candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    let folded = ctxmenu::fold_menu_label(menu_text);
+    let want = ctxmenu::fold_menu_label(candidate);
+    if !folded.is_empty() && folded == want {
+        return true;
+    }
+    let key = ctxmenu::menu_match_key(menu_text);
+    let want_key = ctxmenu::menu_match_key(candidate);
+    if !key.is_empty() && key == want_key {
+        return true;
+    }
+    // Package display names are often shorter than the shell row ("Copilot" vs "Copilot에게 질문하기").
+    // A long token may start the row. Short words such as "open" stay exact, so Open with is left alone.
+    loose_title_hit(&folded, &want)
+}
+
+fn loose_title_hit(menu_folded: &str, candidate_folded: &str) -> bool {
+    if menu_folded.is_empty() {
+        return false;
+    }
+    // The catalogue name is often the product ("Copilot") while the shell row adds a verb
+    // ("Copilot에게 질문하기", "Clipchamp로 편집"). Match the full name and, when the name
+    // has several words, the last product word. An earlier word such as "Microsoft" also
+    // starts Defender, and "terminal" is already a built-in label.
+    let mut tokens: Vec<&str> = Vec::new();
+    if candidate_folded.chars().count() >= 6 {
+        tokens.push(candidate_folded);
+    }
+    if let Some(last) = candidate_folded.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| w.chars().count() >= 6).next_back() {
+        if !tokens.contains(&last) {
+            tokens.push(last);
+        }
+    }
+    tokens.into_iter().any(|word| {
+        if ctxmenu::builtin_verb(word) || ctxmenu::builtin_label_word(word) {
+            return false;
+        }
+        menu_folded.starts_with(word) || menu_folded.contains(&format!(" {word}"))
+    })
+}
+
+/// Titles of packaged commands that are off. Catalogue name and a cached GetTitle.
+/// Nothing here CoCreates.
+pub(crate) fn off_packaged_titles(rows: &[PackRow], on: &BTreeSet<String>, cache: &std::collections::HashMap<String, String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for row in rows {
+        if on.contains(&row.id) {
+            continue;
+        }
+        if !row.name.trim().is_empty() {
+            out.push(row.name.clone());
+        }
+        if let Some(title) = cache.get(&row.id) {
+            if !title.trim().is_empty() && !out.iter().any(|have| titles_match(have, title)) {
+                out.push(title.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Delete shell-drawn packaged rows the user left off. Does not CoCreate.
+pub(crate) unsafe fn strip_off_rows(menu: HMENU) {
+    let on = crate::app(|a| a.s.ctx_packaged_on.clone());
+    let rows = catalogue();
+    let cache = TITLE_CACHE.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
+    let titles = off_packaged_titles(&rows, &on, &cache);
+    ctxmenu::log_line(&format!("[maguro] ctx pack-strip candidates={}", titles.len()));
+    for title in titles.iter().take(24) {
+        ctxmenu::log_line(&format!("[maguro] ctx pack-strip title={title}"));
+    }
+    if titles.is_empty() {
+        return;
+    }
+    let n = GetMenuItemCount(Some(menu)).max(0) as u32;
+    for i in (0..n).rev() {
+        if super::fav::menu_sep(menu, i) {
+            continue;
+        }
+        let id = GetMenuItemID(menu, i as i32);
+        if id != u32::MAX && id >= ID_CTX_PACK {
+            continue;
+        }
+        if ctxmenu::maguro_key_for_id(id).is_some() {
+            continue;
+        }
+        let text = ctxmenu::item_text(menu, i);
+        let verb = super::fav::indexed_verb(id);
+        // An Explorer built-in that is still on stays, even when a packaged name shares a word.
+        if ctxmenu::builtin_id_for(&verb, &text).is_some_and(|bid| !crate::app(|a| a.s.ctx_builtin_off.contains(bid))) {
+            continue;
+        }
+        if titles.iter().any(|title| titles_match(&text, title)) {
+            let _ = DeleteMenu(menu, i, MF_BYPOSITION);
+        }
+    }
+    ctxmenu::normalize_menu(menu);
+}
+
 pub(crate) unsafe fn invoke_menu_command(cmd: u32, paths: &[String], background: bool, folder: &str) -> bool {
     let clsid = PACK_IDS.with(|m| m.borrow().iter().find(|(id, _)| *id == cmd).map(|(_, g)| *g));
     let Some(clsid) = clsid else { return false };
@@ -1000,6 +1105,71 @@ mod tests {
     }
 
     #[test]
+    fn an_off_packaged_title_is_removed_without_cocreate() {
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            let _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from("Open"));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, MF_STRING, 2, &HSTRING::from("Copilot에게 질문하기"));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, MF_STRING, 3, &HSTRING::from("Properties"));
+            let id = "packaged:{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}";
+            let mut row = pack_row(id, FILE);
+            row.name = "Ask Copilot".into();
+            set_test_rows(Some(vec![row]));
+            if let Ok(mut guard) = TITLE_CACHE.lock() {
+                guard.get_or_insert_with(std::collections::HashMap::new).insert(id.into(), "Copilot에게 질문하기".into());
+            }
+            let prev = crate::app(|a| a.s.ctx_packaged_on.clone());
+            crate::app(|a| a.s.ctx_packaged_on.clear());
+            strip_off_rows(menu);
+            let n = GetMenuItemCount(Some(menu)).max(0) as u32;
+            let mut labels = Vec::new();
+            for i in 0..n {
+                if crate::shell::menu_sep(menu, i) {
+                    labels.push("---".into());
+                } else {
+                    labels.push(ctxmenu::item_text(menu, i));
+                }
+            }
+            assert!(labels.iter().all(|s| s != "Copilot에게 질문하기"), "{labels:?}");
+            assert!(labels.iter().any(|s| s == "Open") && labels.iter().any(|s| s == "Properties"), "{labels:?}");
+            assert!(!labels.windows(2).any(|w| w[0] == "---" && w[1] == "---"), "{labels:?}");
+            let _ = DestroyMenu(menu);
+
+            let menu = CreatePopupMenu().unwrap();
+            let _ = AppendMenuW(menu, MF_STRING, 2, &HSTRING::from("Copilot에게 질문하기"));
+            crate::app(|a| {
+                a.s.ctx_packaged_on.insert(id.into());
+            });
+            strip_off_rows(menu);
+            assert_eq!(ctxmenu::item_text(menu, 0), "Copilot에게 질문하기");
+            let _ = DestroyMenu(menu);
+
+            let menu = CreatePopupMenu().unwrap();
+            let _ = AppendMenuW(menu, MF_STRING, 4, &HSTRING::from("터미널에서 열기"));
+            let mut row = pack_row("packaged:{bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee}", FILE);
+            row.name = "터미널에서 열기".into();
+            set_test_rows(Some(vec![row]));
+            crate::app(|a| {
+                a.s.ctx_packaged_on.clear();
+                a.s.ctx_builtin_off.remove("terminal");
+            });
+            strip_off_rows(menu);
+            assert_eq!(ctxmenu::item_text(menu, 0), "터미널에서 열기", "an on built-in stays even when an off package uses the same title");
+            let _ = DestroyMenu(menu);
+            crate::app(|a| a.s.ctx_packaged_on = prev);
+            if let Ok(mut guard) = TITLE_CACHE.lock() {
+                if let Some(map) = guard.as_mut() {
+                    map.remove(id);
+                }
+            }
+            set_test_rows(None);
+        }
+    }
+
+    #[test]
     fn title_already_present_folds_accelerators() {
         let mut set = std::collections::HashSet::new();
         set.insert(ctxmenu::fold_menu_label("속성(&R)"));
@@ -1008,6 +1178,13 @@ mod tests {
         assert!(title_already_present(&set, "속성(R)"));
         assert!(title_already_present(&set, "Copilot에게 질문하기"));
         assert!(!title_already_present(&set, "Clipchamp로 편집"));
+        assert!(titles_match("Copilot에게 질문하기", "Copilot"));
+        assert!(titles_match("Clipchamp로 편집", "Microsoft Clipchamp"));
+        assert!(titles_match("Edit with Clipchamp", "Microsoft Clipchamp"));
+        assert!(!titles_match("Microsoft Defender로 검사", "Microsoft Clipchamp"));
+        assert!(!titles_match("Open in Terminal", "Windows Terminal"));
+        assert!(!titles_match("Open with", "Open"));
+        assert!(!titles_match("열기", "Open"));
         assert!(!title_already_present(&set, ""));
     }
 
