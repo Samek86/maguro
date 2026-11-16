@@ -60,7 +60,8 @@ pub(crate) unsafe fn create_pane(i: usize) -> Result<Pane> {
     IUnknown_SetSite(&eb, &site)?; // before Initialize, so the view picks up our ICommDlgBrowser
     // Details is the starting mode. Columns for a folder with nothing remembered are applied
     // on navigation: Name, Date modified, Size (see folderview::default_details_columns).
-    let fs = FOLDERSETTINGS { ViewMode: FVM_DETAILS.0 as u32, fFlags: FWF_NOWEBVIEW.0 as u32 };
+    // Show-selection-always: ICommDlgBrowser otherwise draws the highlight only while the list has focus.
+    let fs = FOLDERSETTINGS { ViewMode: FVM_DETAILS.0 as u32, fFlags: pane_folder_flags(FWF_NOWEBVIEW.0 as u32, FWF_SHOWSELALWAYS.0 as u32) };
     eb.Initialize(h, &RECT::default(), Some(&fs))?;
     eb.SetOptions(EBO_NOBORDER)?;
     let ev: IExplorerBrowserEvents = Events(slot.clone()).into();

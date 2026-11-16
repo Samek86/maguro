@@ -503,6 +503,7 @@ pub(crate) unsafe fn on_tree_drop_timer(h: HWND) {
 impl IDropTarget_Impl for AskDrop_Impl {
     fn DragEnter(&self, d: Ref<IDataObject>, key: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         unsafe {
+            super::note_shell_drag();
             let basket = d.as_ref().is_some_and(|obj| crate::basket::is_basket_data(obj));
             self.basket.set(basket);
             self.forward_enter(&d, key, pt, effect);
@@ -534,11 +535,13 @@ impl IDropTarget_Impl for AskDrop_Impl {
             self.basket.set(false);
             self.srcs.borrow_mut().clear();
             let _ = self.inner.DragLeave();
+            super::end_shell_drag_target();
         }
         Ok(())
     }
     fn Drop(&self, d: Ref<IDataObject>, key: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         unsafe {
+            super::end_shell_drag_target();
             bind_hwnd(self.hwnd);
             let basket = self.basket.get();
             self.basket.set(false);

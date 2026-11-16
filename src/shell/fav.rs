@@ -1564,6 +1564,9 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
             _ = MessageBeep(MB_ICONWARNING);
         }
     }
+    // TrackPopupMenu deactivates the list. Restore it unless the user moved
+    // to a field or another window while the menu was up.
+    refocus_after_modal(pane);
     true
 }
 
@@ -1645,6 +1648,12 @@ unsafe fn ctx_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _a1: usize, 
     }
     if msg == WM_NOTIFY && wnd_class(h) == "SHELLDLL_DefView" {
         let hdr = &*(lp.0 as *const NMHDR);
+        // DefView runs DoDragDrop inside these notifications. Refocus when it returns.
+        if hdr.code == LVN_BEGINDRAG || hdr.code == LVN_BEGINRDRAG {
+            let r = DefSubclassProc(h, msg, wp, lp);
+            refocus_after_modal(pane_of(h).unwrap_or(data));
+            return r;
+        }
         let from = wnd_class(hdr.hwndFrom);
         // NM_DBLCLK (-3) and LVN_ITEMACTIVATE (-114). A header click auto-sizes a column and is not an open.
         let activate = hdr.code == (-3i32 as u32) || hdr.code == (-114i32 as u32);
@@ -1678,7 +1687,71 @@ unsafe fn ctx_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _a1: usize, 
             return LRESULT(0);
         }
     }
+    // Items view (DirectUI) starts its drag inside the mouse message, not LVN_BEGINDRAG.
+    // The outer message returns only after DoDragDrop. Nested messages during the drag do not.
+    if shell_drag_message(h, msg, wp) {
+        let outer = begin_shell_drag_watch();
+        let r = DefSubclassProc(h, msg, wp, lp);
+        if end_shell_drag_watch(outer) {
+            refocus_after_modal(pane_of(h).unwrap_or(data));
+        }
+        return r;
+    }
     DefSubclassProc(h, msg, wp, lp)
+}
+
+/// `LVN_BEGINDRAG` / `LVN_BEGINRDRAG`. The list tells DefView, which calls `DoDragDrop`.
+const LVN_BEGINDRAG: u32 = (-109i32) as u32;
+const LVN_BEGINRDRAG: u32 = (-111i32) as u32;
+
+thread_local! {
+    static DRAG_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static SAW_SHELL_DRAG: Cell<bool> = const { Cell::new(false) };
+}
+
+fn shell_drag_message(h: HWND, msg: u32, wp: WPARAM) -> bool {
+    if !ctx_surface(h) {
+        return false;
+    }
+    match msg {
+        WM_LBUTTONDOWN => true,
+        WM_MOUSEMOVE => wp.0 & MK_LBUTTON.0 as usize != 0,
+        _ => false,
+    }
+}
+
+fn begin_shell_drag_watch() -> bool {
+    DRAG_DEPTH.with(|d| {
+        let n = d.get();
+        d.set(n.saturating_add(1));
+        n == 0
+    })
+}
+
+fn end_shell_drag_watch(outer: bool) -> bool {
+    DRAG_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    let saw = SAW_SHELL_DRAG.with(|s| s.replace(false));
+    if !outer {
+        if saw {
+            SAW_SHELL_DRAG.with(|s| s.set(true));
+        }
+        return false;
+    }
+    refocus_after_file_drag(true, saw)
+}
+
+/// A file drag entered one of our drop targets. The mouse message that contains
+/// `DoDragDrop` reads this when it returns.
+pub(crate) fn note_shell_drag() {
+    SAW_SHELL_DRAG.with(|s| s.set(true));
+}
+
+/// DragEnter from another window (or the basket) must not look like our list's drag
+/// once that drag has already ended.
+pub(crate) fn end_shell_drag_target() {
+    if DRAG_DEPTH.with(|d| d.get()) == 0 {
+        SAW_SHELL_DRAG.with(|s| s.set(false));
+    }
 }
 
 // Sidebar menu: the tree builds the shell menu, then asks us for a replacement. Ours forwards
