@@ -428,6 +428,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 ID_SIDE_FAV => crate::set_side_half(true, !app(|a| a.s.show_fav())),
                 ID_SIDE_TREE => crate::set_side_half(false, !app(|a| a.s.show_tree())),
                 ID_PREVIEW => toggle_preview(),
+                ID_VTABS => settings::toggle_vertical_tabs(),
                 ID_GATHER => gather_explorer(),
                 ID_BASKET => crate::basket::toggle(),
                 ID_RECENT => {
@@ -511,6 +512,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 check(ID_SIDE_FAV, app(|a| a.s.show_fav()));
                 check(ID_SIDE_TREE, app(|a| a.s.show_tree()));
                 check(ID_PREVIEW, preview);
+                sync_vertical_tabs_menu(menu);
                 check(ID_EXT, ext);
                 check(ID_FOLLOW, app(|a| a.s.theme == 0));
                 _ = ModifyMenuW(menu, ID_THEME as u32, MF_BYCOMMAND | MF_STRING, ID_THEME as usize, &HSTRING::from(theme_action_label()));
@@ -1492,6 +1494,12 @@ pub(crate) unsafe fn set_language(lang: Lang) {
     save_session();
 }
 
+/// Check mark for gear → View → Vertical tabs. Reads `Session.vertical_tabs` only.
+pub(crate) unsafe fn sync_vertical_tabs_menu(menu: HMENU) {
+    let on = app(|a| a.s.vertical_tabs);
+    let _ = CheckMenuItem(menu, ID_VTABS as u32, (MF_BYCOMMAND | if on { MF_CHECKED } else { MF_UNCHECKED }).0);
+}
+
 /// Check mark for gear → Behavior. Reads `shown_on` only, so a test can set the cache
 /// without touching the registry. The menu handler reloads that cache first.
 pub(crate) unsafe fn sync_default_folder_menu(menu: HMENU) {
@@ -1531,6 +1539,7 @@ pub(crate) unsafe fn make_menus() -> Result<HMENU> {
     item(sub, MF_STRING, ID_SIDE_FAV, tr(crate::Key::ShowFavouritesPanel))?;
     item(sub, MF_STRING, ID_SIDE_TREE, tr(crate::Key::ShowFolderTreePanel))?;
     item(sub, MF_STRING, ID_PREVIEW, &with_chord(tr(crate::Key::PreviewPane), "view.preview"))?;
+    item(sub, MF_STRING, ID_VTABS, tr(crate::Key::VerticalTabs))?;
     item(view, MF_POPUP, sub.0 as usize, tr(crate::Key::View))?;
     sep(view)?;
 
@@ -1765,6 +1774,105 @@ mod gear_menu_tests {
         assert_eq!(toggles.len(), 2, "{toggles:?}");
         assert!(toggles.iter().any(|l| l.contains("win.rs") && l.contains("hwnd()")));
         assert!(toggles.iter().any(|l| l.contains("wnd.rs") && l.contains("ID_FOLDER_APP")));
+    }
+
+    struct Tabs(bool);
+    impl Drop for Tabs {
+        fn drop(&mut self) {
+            let prev = self.0;
+            crate::app(|a| a.s.vertical_tabs = prev);
+        }
+    }
+
+    unsafe fn command_checked(menu: HMENU, id: usize) -> bool {
+        let mut info = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_STATE,
+            ..Default::default()
+        };
+        assert!(GetMenuItemInfoW(menu, id as u32, false, &mut info).is_ok(), "item {id}");
+        info.fState.0 & MFS_CHECKED.0 != 0
+    }
+
+    #[test]
+    fn view_menu_ends_with_vertical_tabs_in_each_language() {
+        let _ui = ui(0);
+        assert_eq!(ID_VTABS, 1138);
+        let cases = [
+            (0u8, "View", "Vertical tabs"),
+            (1, "보기", "탭을 세로로 표시"),
+            (2, "表示", "タブを縦に並べる"),
+        ];
+        for (slot, view, tabs) in cases {
+            crate::UI.store(slot, Ordering::Relaxed);
+            assert_eq!(tr(crate::Key::View), view);
+            assert_eq!(tr(crate::Key::VerticalTabs), tabs);
+            unsafe {
+                let menu = Menu(make_menus().expect("gear menu"));
+                let sub = submenu_by_label(menu.0, view);
+                let n = GetMenuItemCount(Some(sub)).max(0);
+                assert_eq!(n, 7, "View keeps the six rows, then vertical tabs");
+                let ids = [ID_HIDDEN, ID_EXT, ID_PANEL, ID_SIDE_FAV, ID_SIDE_TREE, ID_PREVIEW, ID_VTABS];
+                for (i, id) in ids.iter().enumerate() {
+                    assert_eq!(GetMenuItemID(sub, i as i32) as usize, *id);
+                }
+                let row = row_text(sub, 6);
+                assert_eq!(row, tabs);
+                assert!(!row.contains('\t'), "{row}");
+            }
+        }
+        let de = include_str!("../../lang/lang.de.ini");
+        let fr = include_str!("../../lang/lang.fr.ini");
+        assert!(de.lines().any(|l| l == "vertical_tabs = Registerkarten vertikal"));
+        assert!(fr.lines().any(|l| l == "vertical_tabs = Onglets verticaux"));
+    }
+
+    #[test]
+    fn view_menu_vertical_tabs_check_follows_the_session() {
+        let _ui = ui(0);
+        let prev = crate::app(|a| a.s.vertical_tabs);
+        let _tabs = Tabs(prev);
+        unsafe {
+            let menu = Menu(make_menus().expect("gear menu"));
+            let sub = submenu_by_label(menu.0, tr(crate::Key::View));
+            crate::app(|a| a.s.vertical_tabs = false);
+            sync_vertical_tabs_menu(menu.0);
+            assert!(!command_checked(sub, ID_VTABS));
+            crate::app(|a| a.s.vertical_tabs = true);
+            sync_vertical_tabs_menu(menu.0);
+            assert!(command_checked(sub, ID_VTABS));
+            crate::app(|a| a.s.vertical_tabs = false);
+            sync_vertical_tabs_menu(menu.0);
+            assert!(!command_checked(sub, ID_VTABS));
+        }
+    }
+
+    #[test]
+    fn view_menu_vertical_tabs_shares_the_settings_switch() {
+        let prod = include_str!("wnd.rs").split("mod gear_menu_tests").next().unwrap();
+        let click = ["ID_VTABS => settings::toggle_vertical_tabs", "()"].concat();
+        assert!(prod.contains(&click));
+        assert!(prod.contains("sync_vertical_tabs_menu(menu)"));
+        let settings = include_str!("../settings/win.rs");
+        assert!(settings.contains("fn toggle_vertical_tabs"));
+        let flip = settings.find("fn flip").expect("flip");
+        let arm = settings[flip..].find("TG_VTABS =>").expect("arm");
+        let body = &settings[flip + arm..];
+        let end = body.find("TG_DRIVES").expect("next arm");
+        let arm_body = &body[..end];
+        let call = ["toggle_vertical_tabs", "()"].concat();
+        assert!(arm_body.contains(&call));
+        assert!(!arm_body.contains("vertical_tabs ^="));
+        let fn_at = settings.find("fn toggle_vertical_tabs").expect("fn");
+        let fn_tail = &settings[fn_at..];
+        let fn_end = fn_tail.find("\n}").expect("end of toggle");
+        let fn_body = &fn_tail[..fn_end];
+        assert!(fn_body.contains("vertical_tabs ^="));
+        assert!(fn_body.contains("save_session()"));
+        assert!(fn_body.contains("show_active_tab()"));
+        assert!(fn_body.contains("relayout()"));
+        assert!(fn_body.contains("redraw_all()"));
+        assert!(fn_body.contains("redraw()"));
     }
 }
 

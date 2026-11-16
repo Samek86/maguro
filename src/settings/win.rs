@@ -1454,6 +1454,19 @@ fn ev_activity_line() -> String {
     }
 }
 
+/// Gear → View and Settings → Appearance share this switch. Off by default.
+/// The tab strip moves at once: every window shows the active tab, then lays out again.
+pub(crate) unsafe fn toggle_vertical_tabs() {
+    app(|a| a.s.vertical_tabs ^= true);
+    crate::save_session();
+    crate::across_windows(|| {
+        crate::show_active_tab();
+        crate::relayout();
+        crate::redraw_all();
+    });
+    redraw();
+}
+
 /// User turned "use as default folder app" on or off.
 /// Settings and the gear menu both call this, so the registry write, the warning, and the settings redraw stay the same.
 pub(crate) unsafe fn toggle_default_folder_app(owner: HWND) {
@@ -1490,16 +1503,7 @@ fn flip(id: u8) {
             return;
         }
         TG_VTABS => {
-            app(|a| a.s.vertical_tabs ^= true);
-            unsafe {
-                crate::save_session();
-                crate::across_windows(|| {
-                    crate::show_active_tab();
-                    crate::relayout();
-                    crate::redraw_all();
-                });
-                redraw();
-            }
+            unsafe { toggle_vertical_tabs() };
             return;
         }
         TG_DRIVES => {
