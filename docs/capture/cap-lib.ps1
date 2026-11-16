@@ -211,15 +211,74 @@ function Send-MaguroText([IntPtr]$Hwnd, [uint32]$ProcessId, [string]$Text) {
   }
 }
 
+# Keep the app's own 1px window frame. A uniform dark outermost pixel is that
+# frame and is allowed. Reject only a dark band on the 2nd pixel inward
+# (margin thicker than the frame, or black still outside it). A few dark
+# widgets on that line are not a band. Dark UI chrome that matches the
+# interior (title bar, dark-theme ground ~RGB 28) is not a black margin.
 function Test-MaguroEdges([Drawing.Bitmap]$bmp) {
   $w=$bmp.Width; $h=$bmp.Height
-  function Dark([Drawing.Color]$c){ return ($c.R -lt 40 -and $c.G -lt 40 -and $c.B -lt 40) }
-  $left=0; for($y=0;$y -lt $h;$y++){ if(Dark $bmp.GetPixel(0,$y)){ $left++ } }
-  $right=0; for($y=0;$y -lt $h;$y++){ if(Dark $bmp.GetPixel($w-1,$y)){ $right++ } }
-  $top=0; for($x=0;$x -lt $w;$x++){ if(Dark $bmp.GetPixel($x,0)){ $top++ } }
-  $bot=0; for($x=0;$x -lt $w;$x++){ if(Dark $bmp.GetPixel($x,$h-1)){ $bot++ } }
-  $ok = ($left -lt 3) -and ($left -le [int](0.05*$h)) -and ($right -le [int](0.05*$h)) -and ($top -le [int](0.05*$w)) -and ($bot -le [int](0.05*$w))
-  return @{ Ok=$ok; LeftBlack=$left; RightBlack=$right; TopBlack=$top; BotBlack=$bot; Dark=($left+$right+$top+$bot) }
+  $none = @{ Ok=$false; LeftBlack=0; RightBlack=0; TopBlack=0; BotBlack=0; Dark=0; LeftBand=$false; RightBand=$false; TopBand=$false; BotBand=$false }
+  if ($w -lt 4 -or $h -lt 4) { return $none }
+  # 80% of the edge. A real outer margin is nearly the whole line.
+  function Band([int]$count, [int]$len) { return ($len -gt 0) -and (($count * 5) -ge ($len * 4)) }
+  # Margin pixel: darker than interior chrome. Near-black always counts.
+  # Dark-theme ground (about RGB 28,29,32) matches itself and does not.
+  function MarginPx([Drawing.Color]$c, [int]$cr, [int]$cg, [int]$cb) {
+    if ($c.R -ge 40 -or $c.G -ge 40 -or $c.B -ge 40) { return $false }
+    if ($c.R -lt 20 -and $c.G -lt 20 -and $c.B -lt 20) { return $true }
+    return (($cr - $c.R) -ge 16 -and ($cg - $c.G) -ge 16 -and ($cb - $c.B) -ge 16)
+  }
+  function Med([int[]]$xs) {
+    [Array]::Sort($xs)
+    return [int]$xs[[int]($xs.Length / 2)]
+  }
+  $innerX = [Math]::Min(8, [Math]::Max(2, [int]($w / 4)))
+  $innerY = [Math]::Min(8, [Math]::Max(2, [int]($h / 4)))
+  function ChromeCol([int]$x) {
+    $rs = New-Object int[] $h; $gs = New-Object int[] $h; $bs = New-Object int[] $h
+    for ($y=0; $y -lt $h; $y++) {
+      $c = $bmp.GetPixel($x, $y); $rs[$y]=$c.R; $gs[$y]=$c.G; $bs[$y]=$c.B
+    }
+    return @{ R = (Med $rs); G = (Med $gs); B = (Med $bs) }
+  }
+  function ChromeRow([int]$y) {
+    $rs = New-Object int[] $w; $gs = New-Object int[] $w; $bs = New-Object int[] $w
+    for ($x=0; $x -lt $w; $x++) {
+      $c = $bmp.GetPixel($x, $y); $rs[$x]=$c.R; $gs[$x]=$c.G; $bs[$x]=$c.B
+    }
+    return @{ R = (Med $rs); G = (Med $gs); B = (Med $bs) }
+  }
+  function CountCol([int]$x, [int]$cr, [int]$cg, [int]$cb) {
+    $n=0
+    for ($y=0; $y -lt $h; $y++) { if (MarginPx $bmp.GetPixel($x,$y) $cr $cg $cb) { $n++ } }
+    return $n
+  }
+  function CountRow([int]$y, [int]$cr, [int]$cg, [int]$cb) {
+    $n=0
+    for ($x=0; $x -lt $w; $x++) { if (MarginPx $bmp.GetPixel($x,$y) $cr $cg $cb) { $n++ } }
+    return $n
+  }
+  $lc = ChromeCol $innerX
+  $rc = ChromeCol ($w - 1 - $innerX)
+  $tc = ChromeRow $innerY
+  $bc = ChromeRow ($h - 1 - $innerY)
+  # 2nd pixel inward. The outermost 1px is the frame and is not tested.
+  $left = CountCol 1 $lc.R $lc.G $lc.B
+  $right = CountCol ($w - 2) $rc.R $rc.G $rc.B
+  $top = CountRow 1 $tc.R $tc.G $tc.B
+  $bot = CountRow ($h - 2) $bc.R $bc.G $bc.B
+  # Same test further in. If that line is also a band, the dark is content, not an outer margin.
+  $leftIn = CountCol $innerX $lc.R $lc.G $lc.B
+  $rightIn = CountCol ($w - 1 - $innerX) $rc.R $rc.G $rc.B
+  $topIn = CountRow $innerY $tc.R $tc.G $tc.B
+  $botIn = CountRow ($h - 1 - $innerY) $bc.R $bc.G $bc.B
+  $lb = (Band $left $h) -and -not (Band $leftIn $h)
+  $rb = (Band $right $h) -and -not (Band $rightIn $h)
+  $tb = (Band $top $w) -and -not (Band $topIn $w)
+  $bb = (Band $bot $w) -and -not (Band $botIn $w)
+  $ok = -not ($lb -or $rb -or $tb -or $bb)
+  return @{ Ok=$ok; LeftBlack=$left; RightBlack=$right; TopBlack=$top; BotBlack=$bot; Dark=($left+$right+$top+$bot); LeftBand=$lb; RightBand=$rb; TopBand=$tb; BotBand=$bb }
 }
 
 function Open-MaguroBackdrop([int]$L,[int]$T,[int]$R,[int]$B) {
@@ -241,21 +300,38 @@ function Close-MaguroBackdrop {
   }
 }
 
+# Trim black margin outside the frame only. Stop when the 2nd pixel inward is
+# no longer a dark band, so the outermost 1px (the app frame) is never inset away.
+# A clean DWM-bounds shot is returned at the same width and height.
 function Crop-MaguroFrame([Drawing.Bitmap]$bmp) {
   if ((Test-MaguroEdges $bmp).Ok) { return $bmp }
-  for ($inset=1; $inset -le 8; $inset++) {
-    $nw = $bmp.Width - (2 * $inset)
-    $nh = $bmp.Height - (2 * $inset)
+  $work = $bmp
+  $owned = $false
+  $trimL = 0; $trimT = 0; $trimR = 0; $trimB = 0
+  for ($step=0; $step -lt 8; $step++) {
+    $e = Test-MaguroEdges $work
+    $dl = 0; $dt = 0; $dr = 0; $db = 0
+    if ($e.LeftBand) { $dl = 1 }
+    if ($e.TopBand) { $dt = 1 }
+    if ($e.RightBand) { $dr = 1 }
+    if ($e.BotBand) { $db = 1 }
+    if (($dl + $dt + $dr + $db) -eq 0) { break }
+    $nw = $work.Width - $dl - $dr
+    $nh = $work.Height - $dt - $db
     if ($nw -lt 80 -or $nh -lt 80) { break }
-    $rect = New-Object Drawing.Rectangle $inset, $inset, $nw, $nh
-    $crop = $bmp.Clone($rect, $bmp.PixelFormat)
-    if ((Test-MaguroEdges $crop).Ok) {
-      Write-Host ("frame-inset {0}px" -f $inset)
-      $bmp.Dispose()
-      return $crop
+    $rect = New-Object Drawing.Rectangle $dl, $dt, $nw, $nh
+    $crop = $work.Clone($rect, $work.PixelFormat)
+    if ($owned) { $work.Dispose() }
+    $work = $crop
+    $owned = $true
+    $trimL += $dl; $trimT += $dt; $trimR += $dr; $trimB += $db
+    if ((Test-MaguroEdges $work).Ok) {
+      Write-Host ("frame-trim L={0} T={1} R={2} B={3}" -f $trimL,$trimT,$trimR,$trimB)
+      if ($work -ne $bmp) { $bmp.Dispose() }
+      return $work
     }
-    $crop.Dispose()
   }
+  if ($owned) { $work.Dispose() }
   return $null
 }
 
