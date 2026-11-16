@@ -686,7 +686,7 @@ fn open_family_verb(verb: &str) -> bool {
 }
 
 fn properties_verb(verb: &str) -> bool {
-    verb.trim().eq_ignore_ascii_case("properties")
+    super::fav::properties_verb(verb)
 }
 
 fn label_stem(folded: &str) -> &str {
