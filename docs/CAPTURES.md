@@ -253,7 +253,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 
 ## 변경 이력 (관련)
 
-- **2026-11-16:** Jun 지시(t1107u)로 크롭 규칙 수정. 바깥 검은 여백만 지우고 앱 자체의 1px 테두리는 남긴다. 이전에 `Crop-MaguroFrame`의 1px inset으로 테두리를 잘라낸 샷(예: `search*`, `feature_win_shift_v*`, `preview.ko`/`preview.ja`의 1204×811)은 이 규칙에 맞지 않으므로 다음 재촬영 때 테두리가 남은 1206×813으로 다시 찍는다. `cap-lib.ps1`의 `Test-MaguroEdges`/`Crop-MaguroFrame`도 이 규칙에 맞게 고쳐야 한다(1px 테두리 선 허용, inset으로 테두리 제거 금지).
+- **2026-11-16:** Jun 지시(t1107u)로 크롭 규칙 수정. 바깥 검은 여백만 지우고 앱 자체의 1px 테두리는 남긴다. 이전에 `Crop-MaguroFrame`의 1px inset으로 테두리를 잘라낸 샷(예: `search*`, `feature_win_shift_v*`, `preview.ko`/`preview.ja`의 1204×811)은 이 규칙에 맞지 않으므로 다음 재촬영 때 테두리가 남은 1206×813으로 다시 찍는다. `cap-lib.ps1`의 `Test-MaguroEdges`/`Crop-MaguroFrame`는 이 규칙에 맞게 고쳤다. 맨 바깥 1px 앱 테두리 선은 허용하고, 2px째가 어두운 띠이거나 테두리 바깥에 검은 여백이 남을 때만 그 바깥 여백을 잘라 내며, 테두리 자체를 inset으로 지우지 않는다.
 
 - **2026-11-13 (pane badge):** MaguroMain 계열 47장(`hero_*`, `layout*`, `favorites*`, `tabs*`, `pane_tabs*`, `pane_colors*`, `preview` (not peek), `panedrag_*`, `search*`, `address_toolbar*`, `feature_win_shift_v*`)을 현재 main(3424272, PR #411 패널 번호 배지)에서 다시 찍어 `docs/images-v8/{common,en,ko,ja}/` 같은 경로에 넣음. 즐겨찾기·트리 둘 다 켠 시드(`fav_panel`+`tree_panel`, `side_split=0.5`). 대화상자·설정·`preview_peek*`·`workspaces*`·README 데모 GIF/mp4는 그대로. 메인 창은 대체로 1206×813, 주소 줄 1212×160, 패널 탭 크롭 1212×420. `search*`·`feature_win_shift_v*`와 `preview.ko`/`preview.ja`는 가장자리 1px inset으로 1204×811.
 
