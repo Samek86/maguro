@@ -16,7 +16,7 @@
   <a href="https://github.com/Samek86/maguro"><img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <a href="https://github.com/Samek86/maguro"><img alt="Language: Rust" src="https://img.shields.io/badge/language-Rust-000000?logo=rust&logoColor=white"></a>
-  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="Release 0.2.24" src="https://img.shields.io/badge/release-0.2.24-0A9BD6"></a>
+  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="Release 0.2.25" src="https://img.shields.io/badge/release-0.2.25-0A9BD6"></a>
 </p>
 
 <p align="center">
@@ -102,17 +102,17 @@ Start with one pane, then pick any built-in grid (up to 4×4). Drag boundaries t
 
 Chrome-style tabs across the window, plus tabs inside each pane. A tab is named after its active folder (full path in the tooltip). Duplicate a tab, move it to a new window, or save it as a session.
 
-<p align="center"><img width="760" alt="Window and pane tabs" src="docs/images-v8/en/tabs.png"></p>
+<p align="center"><img width="760" alt="Window and pane tabs" src="docs/images-v9/en/tabs.png"></p>
 
 ### 3. Vertical window tabs
 
-The main-window tab list can be shown as a vertical strip to the right of the favourites panel (Settings → Appearance → Vertical tabs; off by default). Drag the strip's right edge to change its width. Double-click the edge to reset it. The width is remembered.
+The main-window tab list can be shown as a vertical strip to the right of the favourites panel (Settings → Appearance → Vertical tabs, or the gear menu → View → Vertical tabs; off by default). Drag the strip's right edge to change its width. Double-click the edge to reset it. The width is remembered.
 
-<p align="center"><img width="760" alt="Vertical window tabs" src="docs/images-v8/en/vertical_tabs.png"></p>
+<p align="center"><img width="760" alt="Vertical window tabs" src="docs/images-v9/en/vertical_tabs.png"></p>
 
 ### 4. Pin, lock, and colour tabs
 
-Double-click or right-click a tab → Rename to pin your own name. Lock a tab so it cannot be closed by accident. Pick a tab colour so related work stands out at a glance.
+Double-click or right-click a tab → Rename to pin your own name. Lock a tab so it cannot be closed by accident. Pick a tab colour so related work stands out at a glance. The selected coloured tab shows a colour stripe on its left; other coloured tabs show a light tint.
 
 ### 5. Drag a pane to move it — Ctrl+drag to copy
 
@@ -155,9 +155,9 @@ F3 opens Quick look for pictures, PDF, Office, HTML, Markdown, code, CSV, ZIP, H
 
 ### 10. Configurable context menu
 
-Settings → Right-click menu items lets you show or hide Maguro's own commands on the Explorer context menu — keep the list lean, or bring every action back.
+Settings → Right-click menu items can hide Windows' own commands (the Windows commands group) as well as each Maguro command (the Maguro commands group). Both start on. Hiding a command only affects Maguro's menu, not Explorer. Properties always stays at the bottom, with Maguro's items just above it.
 
-<p align="center"><img width="560" alt="Configurable context menu settings" src="docs/images-v8/en/settings_ctxmenu.png"></p>
+<p align="center"><img width="560" alt="Configurable context menu settings" src="docs/images-v9/en/settings_ctxmenu.png"></p>
 
 ### 11. Batch rename with live name preview
 

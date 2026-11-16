@@ -1,8 +1,8 @@
-# 스크린샷 캡처 기록 (docs/images-v8)
+# 스크린샷 캡처 기록 (docs/images-v8, 일부 docs/images-v9)
 
-**현재 스크린샷 자산 폴더는 `docs/images-v8/`이다.** 캐시 회피용이다. 새로 찍는 샷은 이 폴더에만 넣는다. 같은 경로를 덮어쓰면 GitHub·브라우저 캐시에 옛 그림이 남으므로, `docs/images-v7`·`docs/images-v6`·`docs/images-v5`·`docs/images-v0.2.6`은 새 샷의 대상으로 쓰지 않는다.
+**대부분 스크린샷은 `docs/images-v8/`에 있다.** v0.2.25에서 다시 찍은 창 탭·세로 탭·우클릭 메뉴 설정·보기 메뉴는 `docs/images-v9/{en,ko,ja}/`에 있다. 같은 경로를 덮어쓰면 GitHub·브라우저 캐시에 옛 그림이 남으므로, `docs/images-v8`과 그 이전 폴더는 새 샷의 대상으로 쓰지 않는다. 다음 재촬영은 `docs/images-v10/` 같은 새 폴더에 넣는다.
 
-README(en/ja/ko)와 도움말(en/ja/ko)의 UI 이미지 경로는 `docs/images-v8/`을 가리킨다. `docs/images-v7/`는 **대체됨(superseded)**: 다음 재촬영은 새 폴더(`docs/images-v9/` 등)에 넣는다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
+README(en/ja/ko)와 도움말(en/ja/ko)은 바뀌지 않은 UI 이미지를 `docs/images-v8/`로, 2026-11-16에 다시 찍은 이미지만 `docs/images-v9/`로 가리킨다. `docs/images-v7/` 이하는 대체됨(superseded)이며 트리에 남긴다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
 
 Maguro README / 도움말용 스크린샷. 모든 제품 이미지는 **포터블 빌드만** 사용하고, AppData·레지스트리·grids.ini·설치본 경로를 쓰지 않는다.
 
@@ -189,9 +189,9 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 | settings.ja.png | 설정 일반 | MaguroSettings General | light/ja | dialogs 시드 | 46373 B (986×633) | Ctrl+, + RedrawWindow | DWM |  |
 | settings.ko.png | 설정 일반 | MaguroSettings General | light/ko | dialogs 시드 | 33848 B (986×633) | Ctrl+, + RedrawWindow | DWM |  |
 | settings.png | 설정 일반 | MaguroSettings General | light/en | dialogs 시드 | 35243 B (986×633) | Ctrl+, + RedrawWindow | DWM |  |
-| settings_ctxmenu.ja.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/ja | 시드 | 45203 B (984×631) | Click-MaguroSettingsPage(8) | DWM | Right-click menu items 페이지인지 눈확인 |
-| settings_ctxmenu.ko.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/ko | 시드 | 26016 B (984×631) | Click-MaguroSettingsPage(8) | DWM | Right-click menu items 페이지인지 눈확인 |
-| settings_ctxmenu.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/en | 시드 | 28309 B (984×631) | Click-MaguroSettingsPage(8) | DWM | Right-click menu items 페이지인지 눈확인 |
+| settings_ctxmenu.ja.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/ja | hero_light.ja.json | 27932 B (986×633) | WM_COMMAND 1114 + Click-MaguroSettingsPage(8) | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** 클래식 메뉴, 위에 Windows のコマンド와 안내문. 옛 v8은 984×631 |
+| settings_ctxmenu.ko.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/ko | favorites.ko.json | 21379 B (986×633) | WM_COMMAND 1114 + Click-MaguroSettingsPage(8) | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** 클래식 메뉴, 위에 Windows 명령과 안내문. 옛 v8은 984×631 |
+| settings_ctxmenu.png | 설정 우클릭 메뉴 | MaguroSettings CTX_PAGE=8 | light/en | dialogs.json | 22909 B (986×633) | WM_COMMAND 1114 + Click-MaguroSettingsPage(8) | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** Classic menu, Windows commands heading and note at the top. Old v8 was 984×631 |
 | settings_general.ja.png | 설정 일반(별칭) | MaguroSettings General | light/ja | 동일 | 46373 B (986×633) | Ctrl+, | DWM |  |
 | settings_general.ko.png | 설정 일반(별칭) | MaguroSettings General | light/ko | 동일 | 33848 B (986×633) | Ctrl+, | DWM |  |
 | settings_general.png | 설정 일반(별칭) | MaguroSettings General | light/en | 동일 | 34694 B (986×633) | Ctrl+, | DWM |  |
@@ -199,9 +199,15 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 | settings_panes.ko.png | 설정 패널·보기 | MaguroSettings page2 | light/ko | dialogs/fav 시드 | 31688 B (986×633) | capture-settings-panes.ps1 | DWM |  |
 | settings_panes.png | 설정 패널·보기 | MaguroSettings page2 | light/en | dialogs/fav 시드 | 34309 B (986×633) | capture-settings-panes.ps1 | DWM |  |
 | tab_list.png | 탭 목록 | MaguroTabList | light/en | tabs.json | 17406 B (562×532) | WM_COMMAND 탭목록 | DWM |  |
-| tabs.ja.png | 창 탭·패널 탭 | MaguroMain | light/ja | tabs.json | 228878 B (1206×813) | tabs cfg | DWM |  |
-| tabs.ko.png | 창 탭·패널 탭 | MaguroMain | light/ko | tabs.json | 226168 B (1206×813) | tabs cfg | DWM |  |
-| tabs.png | 창 탭·패널 탭 | MaguroMain | light/en | tabs.json | 225801 B (1206×813) | tabs cfg | DWM |  |
+| tabs.ja.png | 창 탭·패널 탭 | MaguroMain | light/ja | tabs.ja.json | 228887 B (1206×813) | tabs cfg | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** Photos(선택, 파랑 줄) / Mixed·Docs는 옅은 색만 / Music 무색. G:\\Photos 2026 + G:\\Mixed. 폴더 트리는 Archive부터 |
+| tabs.ko.png | 창 탭·패널 탭 | MaguroMain | light/ko | tabs.ko.json | 225918 B (1206×813) | tabs cfg | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** 선택 탭만 색 줄. 폴더 트리는 Archive부터 |
+| tabs.png | 창 탭·패널 탭 | MaguroMain | light/en | tabs.json | 225835 B (1206×813) | tabs cfg | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** Selected Photos has the blue stripe. Mixed and Docs are tint only. Music is uncoloured. Folder tree starts at Archive |
+| vertical_tabs.ja.png | 세로 창 탭 | MaguroMain | light/ja | tabs.ja.json + vertical_tabs | 234051 B (1206×813) | 같은 시드에 vertical_tabs=true | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** 옛 v8은 1px inset으로 1204×811. 선택 탭만 색 줄. 폴더 트리는 Archive부터 |
+| vertical_tabs.ko.png | 세로 창 탭 | MaguroMain | light/ko | tabs.ko.json + vertical_tabs | 231820 B (1206×813) | 같은 시드에 vertical_tabs=true | DWM, 1px 테두리 유지 | **2026-11-16 images-v9.** 폴더 트리는 Archive부터 |
+| vertical_tabs.png | 세로 창 탭 | MaguroMain | light/en | tabs.json + vertical_tabs | 230660 B (1206×813) | same seed with vertical_tabs=true | DWM, 1px frame kept | **2026-11-16 images-v9.** Old v8 was 1204×811 after a 1px inset. Only the selected tab has a stripe. Folder tree starts at Archive |
+| view_menu.ja.png | 톱니 보기 메뉴 | #32768 두 장 | light/ja | tabs.ja.json | 21896 B (738×437) | WM_COMMAND 207, 表示 하위 메뉴 | 메뉴만 흰 캔버스 | **2026-11-16 images-v9.** タブを縦に並べる, 단축키 없음, 체크 없음. 메뉴 사이 흰 칸은 캔버스 |
+| view_menu.ko.png | 톱니 보기 메뉴 | #32768 두 장 | light/ko | tabs.ko.json | 16079 B (575×437) | WM_COMMAND 207, 보기 하위 메뉴 | 메뉴만 흰 캔버스 | **2026-11-16 images-v9.** 탭을 세로로 표시 |
+| view_menu.png | 톱니 보기 메뉴 | #32768 두 장 | light/en | tabs.json | 20839 B (693×437) | WM_COMMAND 207, View submenu | menus only, white canvas | **2026-11-16 images-v9.** Vertical tabs, no shortcut, unchecked. The white corner is the canvas, not another window |
 | images-v5/workspaces.ja.png | 워크스페이스 메뉴 | 톱니 메뉴 → 작업 공간 하위 메뉴 | light/ja | workspaces 시드 Photos/Docs/Work | 20925 B (618×491) | WM_COMMAND 207 → 메뉴 HWND에 VK_DOWN×3, VK_RIGHT PostMessage | 화면 복사(흰 배경) | 슬롯 1–3 이름, 4–9 빈 슬롯 |
 | images-v5/workspaces.ko.png | 워크스페이스 메뉴 | 톱니 메뉴 → 작업 공간 하위 메뉴 | light/ko | workspaces 시드 Photos/Docs/Work | 18119 B (525×491) | WM_COMMAND 207 → 메뉴 HWND에 VK_DOWN×3, VK_RIGHT PostMessage | 화면 복사(흰 배경) | 슬롯 1–3 이름, 4–9 빈 슬롯 |
 | images-v5/workspaces.png | 워크스페이스 메뉴 | 톱니 메뉴 → 작업 공간 하위 메뉴 | light/en | workspaces 시드 Photos/Docs/Work | 21624 B (622×491) | WM_COMMAND 207 → 메뉴 HWND에 VK_DOWN×3, VK_RIGHT PostMessage | 화면 복사(흰 배경) | 슬롯 1–3 이름, 4–9 빈 슬롯 |
@@ -252,6 +258,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 시스템 대화상자(IFileOperation 진행, 탐색기 메뉴, 공통 파일 대화상자)는 그대로다. 이름 묻기, 즐겨찾기 관리, 정보, Excel, 확인 창, 그리고 팝업·알림(폴더 감시 토스트, 즐겨찾기 없음, 네트워크 실패, 빠른 복사 진행·이름 충돌, 세션 목록, 단축키, 레이아웃 고르기, 선택 칸, 서버 연결의 저장/취소)은 공유 토큰으로 옮겼다. 설정 창의 토글은 모양과 동작이 이전과 같다.
 
 ## 변경 이력 (관련)
+
+- **2026-11-16 (v0.2.25 follow-up):** `docs/images-v9/{en,ko,ja}/tabs.png`와 `vertical_tabs.png`만 다시 찍음. 같은 시드·같은 창(1206×813, 1px 테두리 유지). G: 폴더 트리를 스크롤해 첫 보이는 자식이 Archive가 되게 함. `_qa-chunk1`, `_qa-s22`, `_qa-s23-chunk2`, `_qa-s25`, `_review`는 화면 밖. Photos 2026은 선택된 채로 보임. 바이트: en tabs 225835, en vertical 230660, ko tabs 225918, ko vertical 231820, ja tabs 228887, ja vertical 234051. G:의 폴더는 바꾸지 않음.
+
+- **2026-11-16 (v0.2.25):** main `7d1954de34677a94c1e204781550539b411ace2f`에서 바뀐 화면만 `docs/images-v9/{en,ko,ja}/`에 다시 찍음. 시드는 `readme2-cfgs-v6`의 `tabs.json` / `tabs.ko.json` / `tabs.ja.json`(세로 탭은 그 복사본에 `vertical_tabs: true`), 설정은 `dialogs.json` / `favorites.ko.json` / `hero_light.ja.json`. 라이트 테마. 창 탭·세로 탭은 1206×813(1px 테두리 유지). 우클릭 설정은 986×633, 클래식 메뉴, 위에 Windows 명령 묶음. 보기 메뉴는 톱니 WM_COMMAND 207로 연 두 팝업만 흰 캔버스에 붙임(en 693×437, ko 575×437, ja 738×437). `docs/images-v8/`은 그대로 두고, README·도움말에서 이 파일들만 v9를 가리킴. 나머지 샷은 v8.
 
 - **2026-11-16:** Jun 지시(t1107u)로 크롭 규칙 수정. 바깥 검은 여백만 지우고 앱 자체의 1px 테두리는 남긴다. 이전에 `Crop-MaguroFrame`의 1px inset으로 테두리를 잘라낸 샷(예: `search*`, `feature_win_shift_v*`, `preview.ko`/`preview.ja`의 1204×811)은 이 규칙에 맞지 않으므로 다음 재촬영 때 테두리가 남은 1206×813으로 다시 찍는다. `cap-lib.ps1`의 `Test-MaguroEdges`/`Crop-MaguroFrame`는 이 규칙에 맞게 고쳤다. 맨 바깥 1px 앱 테두리 선은 허용하고, 2px째가 어두운 띠이거나 테두리 바깥에 검은 여백이 남을 때만 그 바깥 여백을 잘라 내며, 테두리 자체를 inset으로 지우지 않는다.
 
