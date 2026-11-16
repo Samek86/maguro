@@ -8,7 +8,7 @@
 
 use std::f32::consts::{PI, TAU};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub(crate) enum LineIcon {
     /// Cog: eight rounded teeth around a hole.
     Gear,
@@ -45,7 +45,91 @@ pub(crate) enum LineIcon {
     StarFilled,
     /// The outline with a plus in its middle. Add to favourites.
     StarAdd,
+    // Approved pack. Masters live in `icon_pack`. The nineteen arms above stay pixel-identical.
+    NewFile,
+    Duplicate,
+    Move,
+    Properties,
+    Edit,
+    SaveAs,
+    Print,
+    Restore,
+    EmptyTrash,
+    Shred,
+    Recent,
+    Compare,
+    Hidden,
+    FileLink,
+    FindDupes,
+    OpenFolder,
+    FolderTree,
+    Root,
+    NetworkFolder,
+    SymlinkFolder,
+    FolderSize,
+    Cut,
+    Copy,
+    Paste,
+    ClipHistory,
+    View,
+    ViewList,
+    ViewIcons,
+    Preview,
+    SidebarLeft,
+    SidebarRight,
+    Fullscreen,
+    ZoomIn,
+    ZoomOut,
+    ThemeLight,
+    ThemeDark,
+    Refresh,
+    Home,
+    Breadcrumb,
+    Drive,
+    Eject,
+    Server,
+    DiskUsage,
+    SelectAll,
+    Invert,
+    Deselect,
+    Search,
+    Filter,
+    FilterClear,
+    Glob,
+    SortName,
+    SortDate,
+    SortSize,
+    SortAsc,
+    SortDesc,
+    NewTab,
+    Close,
+    SplitSide,
+    SplitStack,
+    Important,
+    Bookmark,
+    Tag,
+    PinFile,
+    Compress,
+    Extract,
+    Terminal,
+    Help,
+    About,
+    Shortcuts,
+    Undo,
+    Redo,
+    More,
+    Lock,
+    Unlock,
+    Share,
+    OpenExternal,
+    Download,
+    Upload,
+    Sync,
+    Permissions,
 }
+
+#[path = "icon_pack.rs"]
+mod icon_pack;
 
 /// Design box, icon units. Odd, so a 1px stroke through the middle is centred.
 const BOX: f32 = 17.0;
@@ -189,6 +273,7 @@ fn master(kind: LineIcon, p: &mut Pen) {
                 p.cross((0.0, 1.0), 2.0);
             }
         }
+        other => icon_pack::draw(other, p),
     }
 }
 
@@ -329,6 +414,12 @@ impl Pen {
 
     fn frame(&mut self, a: (f32, f32), b: (f32, f32), r: f32) {
         let sh = Shape::Frame(self.at(a), self.at(b), r * self.s);
+        self.ink(sh);
+    }
+
+    /// Filled rounded box. The pack uses this for a gauge bar and a selected half.
+    fn fill_round(&mut self, a: (f32, f32), b: (f32, f32), r: f32) {
+        let sh = Shape::Slab(self.at(a), self.at(b), r * self.s);
         self.ink(sh);
     }
 

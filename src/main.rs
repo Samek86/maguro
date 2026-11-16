@@ -45,6 +45,12 @@ fn main() -> Result<()> {
     if crash::helper(&raw) || apply_helper(&raw) {
         return Ok(());
     }
+    // Gated grid of the icon catalog. Off unless this build has the feature and the env var is set.
+    // Returns before folder-app repair, COM, and the main window.
+    #[cfg(feature = "icon-catalog-preview")]
+    if std::env::var_os("MAGURO_ICON_CATALOG").is_some_and(|v| v == "1") {
+        return ui::icon_catalog_preview::run();
+    }
     // Hooks and the fast-fail watcher go in before settings, COM, or a window, so a fault
     // while a folder opens still leaves a report. Helper processes above must not install them.
     crash::install();

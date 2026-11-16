@@ -4,6 +4,9 @@ mod confirm;
 mod draw;
 mod drives;
 mod sicon;
+pub(crate) mod icon_catalog;
+#[cfg(feature = "icon-catalog-preview")]
+pub(crate) mod icon_catalog_preview;
 mod favlist;
 mod favmiss;
 mod favpanel;
@@ -41,6 +44,7 @@ pub(crate) use confirm::{ask_confirm, Confirm};
 pub(crate) use draw::*;
 pub(crate) use drives::*;
 pub(crate) use sicon::*;
+pub(crate) use icon_catalog::ICON_CREDIT;
 pub(crate) use keys::*;
 pub(crate) use font::*;
 pub(crate) use layout::*;

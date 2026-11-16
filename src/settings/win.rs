@@ -2746,12 +2746,29 @@ fn about_version_label() -> String {
 }
 
 fn live_about() -> AboutCopy {
-    about_copy(
+    with_icon_credit(about_copy(
         &about_version_label(),
         tx(crate::Key::FastMultiPaneFileManagerForWindows),
         tx(crate::Key::MitLicense2026Efww),
         tx(crate::Key::MaguroIsForkOfEfwwGridsBy2),
-    )
+    ))
+}
+
+/// Appends the IconMCP credit under the product licence. The window measures this text, so the row grows.
+/// Reading the catalog here keeps the enumerable icon list in the shipping binary.
+pub(crate) fn with_icon_credit(mut copy: AboutCopy) -> AboutCopy {
+    let catalog = crate::ui::icon_catalog::icons();
+    let gear = crate::ui::icon_catalog::icon_by_key("gear");
+    if catalog.len() != 99 || gear.is_none_or(|e| e.name_ko.is_empty() || e.kind != crate::LineIcon::Gear) {
+        return copy;
+    }
+    if !copy.license.contains(crate::ICON_CREDIT) {
+        if !copy.license.is_empty() {
+            copy.license.push('\n');
+        }
+        copy.license.push_str(crate::ICON_CREDIT);
+    }
+    copy
 }
 
 unsafe fn about_line_h(text: &str, width: i32, font: HFONT, dpi: i32) -> i32 {
@@ -3469,6 +3486,24 @@ mod tests {
         assert_eq!(about_icon_group(true), crate::ICON_GROUP_DARK);
         assert_eq!(crate::window_icon_group(false), about_icon_group(false));
         assert_eq!(crate::window_icon_group(true), about_icon_group(true));
+    }
+
+    #[test]
+    fn about_license_names_the_icon_pack() {
+        let copy = with_icon_credit(about_copy(
+            "0.2.25",
+            "Fast multi-pane file manager for Windows",
+            "MIT License · © 2026 efww, Samek86",
+            "Fork of github.com/efww/grids",
+        ));
+        let body = about_body(&copy);
+        assert!(body.contains(crate::ICON_CREDIT));
+        assert!(body.contains("Copyright (c) 2026 UI8"));
+        assert!(copy.license.ends_with(crate::ICON_CREDIT));
+        assert!(!body.contains("http"));
+        assert!(!body.contains('?'));
+        let again = with_icon_credit(copy);
+        assert_eq!(again.license.matches(crate::ICON_CREDIT).count(), 1);
     }
 
     #[test]
