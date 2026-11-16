@@ -72,6 +72,12 @@ pub(crate) unsafe fn set_hotkey(main: HWND, on: bool) -> bool {
         let _ = UnregisterHotKey(Some(main), CLIP_HOTKEY_ID);
         return false;
     }
+    // Shortcut capture needs the chord as a normal key. The wish stays on; nothing is toasted.
+    if !crate::keys::register_hotkey_now(crate::keys::capturing(), true) {
+        let _ = UnregisterHotKey(Some(main), CLIP_HOTKEY_ID);
+        crate::keys::set_hot_hold(true);
+        return true;
+    }
     let Some(chord) = crate::keys::clip_chord() else { return false };
     let Some(mods) = chord_mods(chord) else { return false };
     RegisterHotKey(Some(main), CLIP_HOTKEY_ID, mods, chord.vk as u32).is_ok()

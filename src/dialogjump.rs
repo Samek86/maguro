@@ -409,6 +409,13 @@ fn pick_owner() -> HWND {
     }
 }
 
+/// Shortcut capture needs the chord as a normal key. The watch puts it back when capture ends.
+pub(crate) unsafe fn suspend_for_capture() {
+    if with(|w| w.live) {
+        drop_hotkey();
+    }
+}
+
 unsafe fn drop_hotkey() {
     let (live, owner) = with(|w| (w.live, w.owner));
     if live && !owner.0.is_null() {
@@ -423,6 +430,12 @@ unsafe fn drop_hotkey() {
 }
 
 unsafe fn apply_dialog_hotkey(want: bool) {
+    if !crate::keys::register_hotkey_now(crate::keys::capturing(), true) {
+        if with(|w| w.live) {
+            drop_hotkey();
+        }
+        return;
+    }
     if !want {
         if with(|w| w.live) {
             drop_hotkey();

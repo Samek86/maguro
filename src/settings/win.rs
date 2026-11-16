@@ -2142,6 +2142,12 @@ fn key_click(g: &Geo, x: i32, y: i32) -> Option<(usize, u8)> {
     None
 }
 
+/// Start waiting for a chord and drop global hotkeys so the keys reach this window.
+unsafe fn arm_capture(i: usize) {
+    crate::keys::begin(i);
+    crate::suspend_global_hotkeys();
+}
+
 pub(crate) unsafe fn confirm_swap(chord: &str, other: &str) -> bool {
     let q = tf(crate::Key::ShortcutSwap, &[("other", other), ("chord", chord)]);
     confirm_box(hwnd(), &q)
@@ -2158,7 +2164,7 @@ unsafe fn on_click(h: HWND, x: i32, y: i32) {
     let g = geo(rc, &sn);
     if let Some((i, kind)) = key_click(&g, x, y) {
         if kind == 1 {
-            crate::keys::begin(i);
+            arm_capture(i);
             let _ = InvalidateRect(Some(h), None, false);
             return;
         }
@@ -2417,7 +2423,7 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let _ = GetClientRect(h, &mut rc);
                 let g = geo(rc, &sn);
                 if let Some((i, 0)) = key_click(&g, x, y) {
-                    crate::keys::begin(i);
+                    arm_capture(i);
                     let _ = InvalidateRect(Some(h), None, false);
                 }
             }
@@ -2606,6 +2612,8 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 crate::drop_side(h);
                 crate::everything::bind_settings(0);
                 crate::keys::cancel();
+                // Capture may have dropped Win+Shift+E. Put it back when the window goes away.
+                crate::resume_global_hotkeys();
                 // Shared faces belong to the app. Dropping the struct only releases the family list.
                 ST.with(|s| *s.borrow_mut() = St::default());
             }
@@ -3051,6 +3059,9 @@ pub(crate) unsafe fn show_about(owner: HWND) {
                 continue;
             }
         }
+        if crate::eat_for_capture(&msg, mine) {
+            continue;
+        }
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -3410,6 +3421,9 @@ unsafe fn ask_with(owner: HWND, title: &str, initial: &str) -> Option<String> {
                 let _ = SendMessageW(h, WM_COMMAND, Some(WPARAM(cmd)), Some(LPARAM(0)));
                 continue;
             }
+        }
+        if crate::eat_for_capture(&msg, mine) {
+            continue;
         }
         // Owner-draw buttons have no hot state. Track the pointer the way the session list does.
         if msg.message == WM_MOUSEMOVE || msg.message == WM_MOUSELEAVE {

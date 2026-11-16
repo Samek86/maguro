@@ -153,6 +153,10 @@ pub(crate) unsafe fn open_server_dialog(owner: HWND, parent: &[usize], edit: Opt
             }
             break;
         }
+        let mine = msg.hwnd == hwnd || IsChild(hwnd, msg.hwnd).as_bool();
+        if crate::eat_for_capture(&msg, mine) {
+            continue;
+        }
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
         if !IsWindow(Some(hwnd)).as_bool() {

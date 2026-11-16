@@ -359,6 +359,21 @@ unsafe fn composition_pending(start: HWND) -> bool {
 }
 
 pub(crate) unsafe fn key(m: &MSG) -> bool {
+    // A Settings shortcut row is waiting. Record the chord and do not run the command,
+    // refresh the pane, or hand the key to the shell view. This sits above the drag,
+    // preview, and modal checks so none of those can let the key through.
+    if crate::keys::capture_gate(crate::keys::capturing()).block_app {
+        let vk = m.wParam.0 as u16;
+        // The Windows key is a modifier, so a chord such as Win+Shift+E can be recorded.
+        // A repeat of the key that is already down must not bind twice.
+        if matches!(vk, 0x5B | 0x5C) || m.lParam.0 & (1 << 30) != 0 {
+            return true;
+        }
+        let down = |k: VIRTUAL_KEY| GetKeyState(k.0 as i32) < 0;
+        let (ctrl, shift, alt) = (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU));
+        let win = down(VK_LWIN) || down(VK_RWIN);
+        return finish_capture(vk, ctrl, shift, alt, win);
+    }
     let vk = m.wParam.0 as u16;
     // A pane drag in progress: Esc drops it and does not also clear a filter or close a dialog.
     if VIRTUAL_KEY(vk) == VK_ESCAPE && cancel_pane_drag() {
@@ -384,13 +399,6 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
     // The key that just finished a capture must not also run the command.
     if crate::keys::swallows(vk) {
         return true;
-    }
-    if crate::keys::capturing() {
-        // The Windows key is a modifier, so a chord such as Win+Shift+E can be recorded.
-        if matches!(vk, 0x5B | 0x5C) || m.lParam.0 & (1 << 30) != 0 {
-            return true;
-        }
-        return finish_capture(vk, ctrl, shift, alt, win);
     }
     // Typing in Settings must not fire pane shortcuts. Esc closes the window.
     if settings::captures(m.hwnd) {
@@ -496,6 +504,10 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
     // Focus often sits on MaguroPane (the host) rather than DefView. Ctrl+A/C/V and other
     // Explorer accelerators must still reach the shell view, or copy/paste creates nothing.
     let shell = || {
+        // Capture already returned above. A later caller must still not translate.
+        if crate::keys::capture_gate(crate::keys::capturing()).block_pane {
+            return true;
+        }
         let Some(sv) = view_of::<IShellView>(a) else { return false };
         let svh = sv.GetWindow().unwrap_or_default();
         if svh.0.is_null() {
@@ -567,6 +579,10 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
     // A hold does not retry again. This runs before key bindings, so a rebound F5 still retries.
     let repeat = m.lParam.0 & (1 << 30) != 0;
     let plain_f5 = VIRTUAL_KEY(vk) == VK_F5 && !ctrl && !alt && !shift;
+    // Shortcut capture records F5. It must not retry or reload the pane.
+    if plain_f5 && crate::keys::capture_gate(crate::keys::capturing()).block_f5 {
+        return true;
+    }
     if net_failed(a) && plain_f5 {
         if f5_act(true, repeat, true, false) == F5Act::Retry {
             retry_failed(a);
@@ -735,17 +751,27 @@ unsafe fn finish_capture(vk: u16, ctrl: bool, shift: bool, alt: bool, win: bool)
         crate::keys::Offer::Ignore => true,
         crate::keys::Offer::Cancel | crate::keys::Offer::Same => {
             crate::keys::swallow(vk);
+            resume_global_hotkeys();
             settings::redraw();
             true
         }
         crate::keys::Offer::Bind { row, chord, other } => {
-            if let Some(other) = other {
+            let ok = if let Some(other) = other {
                 let name = crate::keys::action(other);
-                if !settings::confirm_swap(&crate::keys::format_chord(&chord), &name) {
-                    crate::keys::swallow(vk);
-                    settings::redraw();
-                    return true;
-                }
+                // The row is already clear. Hold the block so the dialog's pump cannot
+                // run the chord, and so registered hotkeys stay dropped until it returns.
+                crate::keys::hold_block(true);
+                let ok = settings::confirm_swap(&crate::keys::format_chord(&chord), &name);
+                crate::keys::hold_block(false);
+                ok
+            } else {
+                true
+            };
+            if !ok {
+                crate::keys::swallow(vk);
+                resume_global_hotkeys();
+                settings::redraw();
+                return true;
             }
             crate::keys::rebind(row, chord);
             crate::keys::swallow(vk);
@@ -1112,6 +1138,10 @@ unsafe fn take_browser_key(m: &MSG) -> bool {
     if m.message != WM_KEYDOWN {
         return false;
     }
+    // Shortcut capture records the key. History must not move.
+    if crate::keys::capture_gate(crate::keys::capturing()).block_app {
+        return false;
+    }
     let Some(dir) = browser_key_dir(m.wParam.0 as u16) else { return false };
     if !same_process(m.hwnd) || side_popup(m.hwnd) {
         return false;
@@ -1130,7 +1160,27 @@ unsafe fn take_browser_key(m: &MSG) -> bool {
     true
 }
 
+/// `true` when a nested message pump must not dispatch `m`.
+/// While a shortcut is being captured, keys are recorded here and hotkeys are dropped.
+pub(crate) unsafe fn eat_for_capture(m: &MSG, for_dialog: bool) -> bool {
+    if crate::keys::dispatch_input(crate::keys::capturing(), for_dialog, m.message) {
+        return false;
+    }
+    if crate::keys::input_msg(m.message) == crate::keys::InputMsg::Key {
+        let _ = pre_translate(m);
+    }
+    true
+}
+
 pub(crate) unsafe fn pre_translate(m: &MSG) -> bool {
+    // Registered hotkeys and app commands never become WM_KEYDOWN. Drop them while capturing
+    // so Win+Shift+E, the clipboard chord, and browser history do not run.
+    if crate::keys::capturing() {
+        match crate::keys::input_msg(m.message) {
+            crate::keys::InputMsg::Hotkey | crate::keys::InputMsg::AppCommand => return true,
+            _ => {}
+        }
+    }
     bind_hwnd(m.hwnd);
     if take_side_button(m) {
         return true;
@@ -1204,7 +1254,8 @@ pub(crate) unsafe fn pre_translate(m: &MSG) -> bool {
             }
             app(|a| a.held = a.held.filter(|&k| k != vk));
             crate::keys::clear_swallow(vk);
-            false
+            // The shell must not see the key-up of a chord that was only being recorded.
+            crate::keys::capturing()
         }
         _ => false,
     }
