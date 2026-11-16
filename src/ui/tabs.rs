@@ -563,11 +563,54 @@ pub(crate) fn title_clipped(text_px: i32, room: i32) -> bool {
     room < text_px
 }
 
+/// How one window tab is painted. Horizontal and vertical share the stripe rule:
+/// a colour stripe is drawn only while that coloured tab is selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TabFace {
+    pub(crate) bg: u32,
+    /// Left colour bar. `None` draws no stripe.
+    pub(crate) stripe: Option<u32>,
+    /// 2 DIP top edge of a selected horizontal tab. The tab colour, or the accent when uncoloured.
+    pub(crate) top_bar: Option<u32>,
+    /// 3 DIP left accent of a selected vertical tab that has no colour.
+    pub(crate) accent_mark: bool,
+    pub(crate) title: u32,
+}
+
+/// Face of one main-window tab. `ground` is the light or dark palette, not the live theme.
+/// Hover on a selected tab keeps the selected face.
+pub(crate) fn tab_face(selected: bool, hover: bool, color: Option<u32>, vertical: bool, ground: &Palette, accent: u32) -> TabFace {
+    let bg = match (selected, hover, color) {
+        (true, _, Some(c)) => blend(ground.card, c, 0.18),
+        (true, _, None) => ground.card,
+        (_, true, Some(c)) => blend(blend(ground.card, ground.bg, 0.45), c, 0.16),
+        (_, true, None) => blend(ground.card, ground.bg, 0.45),
+        (_, _, Some(c)) => blend(ground.bg, c, 0.18),
+        _ => ground.bg,
+    };
+    let stripe = if selected { color } else { None };
+    let top_bar = if selected && !vertical { Some(color.unwrap_or(accent)) } else { None };
+    let accent_mark = selected && vertical && color.is_none();
+    let title = if selected { ground.text } else { ground.sub };
+    TabFace { bg, stripe, top_bar, accent_mark, title }
+}
+
+/// Left colour bar, 4 DIP, flush with the tab. Only a selected coloured tab fills it.
+pub(crate) fn tab_color_stripe_rect(body: RECT, dpi: i32) -> RECT {
+    let w = 4 * dpi.max(1) / 96;
+    RECT { left: body.left, top: body.top, right: body.left + w, bottom: body.bottom }
+}
+
+/// Extra left inset for a coloured tab's title, in pixels.
+/// Kept whether or not the stripe is drawn, so the title does not jump on selection.
+pub(crate) fn tab_color_label_nudge(colored: bool, dpi: i32) -> i32 {
+    if colored { 5 * dpi.max(1) / 96 } else { 0 }
+}
+
 /// Width of the title inside one tab. The insets match the rectangle [`paint_tabs`] draws into.
 pub(crate) fn tab_label_room(body: RECT, close: Option<RECT>, dpi: i32, colored: bool) -> i32 {
     let s = |v: i32| v * dpi.max(1) / 96;
-    let nudge = if colored { s(5) } else { 0 };
-    let left = body.left + s(8) + nudge;
+    let left = body.left + s(8) + tab_color_label_nudge(colored, dpi);
     let right = close.map(|c| c.left).unwrap_or(body.right - s(8));
     (right - left).max(0)
 }
@@ -1529,33 +1572,25 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
             let on = i == active;
             let over = hot == Some(i);
             let col = colors.get(i).copied().flatten();
-            let bg = match (on, over, col) {
-                (true, _, Some(c)) => blend(pal().card, c, 0.18),
-                (true, _, None) => pal().card,
-                (_, true, Some(c)) => blend(blend(pal().card, pal().bg, 0.45), c, 0.16),
-                (_, true, None) => blend(pal().card, pal().bg, 0.45),
-                (_, _, Some(c)) => blend(pal().bg, c, 0.18),
-                _ => pal().bg,
-            };
-            fill(dc, *r, bg);
+            // Horizontal and vertical share this face. The colour stripe is only on a
+            // selected coloured tab. A selected horizontal tab also draws `top_bar`.
+            // A selected vertical tab with no colour draws the accent mark instead.
+            let face = tab_face(on, over, col, vertical, pal(), accent);
+            fill(dc, *r, face.bg);
             if !on {
                 frame(dc, *r, 1, pal().line);
             }
-            if on && vertical {
-                // The active mark is the left edge. A colour label already paints that stripe.
-                if col.is_none() {
-                    fill(dc, RECT { right: r.left + s(3), ..*r }, accent);
-                }
-            } else if on {
-                fill(dc, RECT { bottom: r.top + s(2), ..*r }, col.unwrap_or(accent));
+            if let Some(c) = face.top_bar {
+                fill(dc, RECT { bottom: r.top + s(2), ..*r }, c);
                 fill(dc, RECT { top: r.bottom - 1, bottom: r.bottom, ..*r }, pal().card);
+            } else if face.accent_mark {
+                fill(dc, RECT { right: r.left + s(3), ..*r }, accent);
             }
-            if let Some(c) = col {
-                let inset = if on { 0 } else { 1 };
-                fill(dc, RECT { left: r.left + inset, top: r.top + inset, right: r.left + inset + s(4), bottom: r.bottom - inset }, c);
+            if let Some(c) = face.stripe {
+                fill(dc, tab_color_stripe_rect(*r, dpi), c);
             }
             let lock = lay.lock.get(i).copied().unwrap_or(false);
-            let nudge = if col.is_some() { s(5) } else { 0 };
+            let nudge = tab_color_label_nudge(col.is_some(), dpi);
             let mut label = *r;
             label.left += s(8) + nudge;
             if let Some(c) = lay.close[i] {
@@ -1568,7 +1603,7 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
             // At the minimum width a locked tab keeps the lock and drops the name.
             let room = label.right - label.left;
             if room >= s(8) && !(lock && room < s(18)) {
-                text(dc, label, names.get(i).map(|n| n.as_str()).unwrap_or(""), font, if on { pal().text } else { pal().sub }, DT_LEFT | DT_END_ELLIPSIS);
+                text(dc, label, names.get(i).map(|n| n.as_str()).unwrap_or(""), font, face.title, DT_LEFT | DT_END_ELLIPSIS);
             }
         }
         // Same hover and the same icon ink for the + and the chevron.
@@ -1738,7 +1773,7 @@ pub(crate) unsafe fn place_tab_edit() {
     let lay = current_tab_lay();
     let Some(r) = lay.body.get(i).copied().filter(|r| r.right > r.left) else { return };
     let s = |v: i32| v * dpi / 96;
-    let nudge = if color.is_some() { s(5) } else { 0 };
+    let nudge = tab_color_label_nudge(color.is_some(), dpi);
     let left = r.left + s(8) + nudge;
     let right = lay.close.get(i).and_then(|c| *c).map(|c| c.left).unwrap_or(r.right - s(8)).max(left + 1);
     place_edit(edit, RECT { left, top: r.top, right, bottom: r.bottom }, true);
@@ -2486,6 +2521,149 @@ mod tests {
         assert_eq!(vtab_drag_finish(180, None), 180);
         assert!(!vtab_should_place(180, 180));
         assert!(vtab_should_place(180, 240));
+    }
+
+    fn contrast(a: u32, b: u32) -> f32 {
+        let chan = |c: u32| {
+            let f = c as f32 / 255.0;
+            if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+        };
+        let rel = |rgb: u32| 0.2126 * chan(rgb >> 16) + 0.7152 * chan(rgb >> 8 & 0xFF) + 0.0722 * chan(rgb & 0xFF);
+        let (x, y) = (rel(a), rel(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn selected_colored_tab_keeps_a_light_tint_and_the_color_stripe() {
+        let red = TAB_COLORS[0].0;
+        let accent = 0x0A9BD6;
+        for (name, pal) in [("light", &LIGHT), ("dark", &DARK)] {
+            for vertical in [false, true] {
+                let face = tab_face(true, false, Some(red), vertical, pal, accent);
+                let plain = tab_face(true, false, None, vertical, pal, accent);
+                assert_eq!(face.stripe, Some(red), "{name} vertical={vertical}");
+                assert_ne!(face.bg, red, "{name} vertical={vertical}");
+                assert_ne!(face.bg, plain.bg, "{name} vertical={vertical}");
+                assert_eq!(face.bg, blend(pal.card, red, 0.18), "{name} vertical={vertical}");
+                assert_eq!(face.title, pal.text);
+                assert!(!face.accent_mark, "the colour stripe is the vertical selected mark");
+                if vertical {
+                    assert_eq!(face.top_bar, None);
+                } else {
+                    assert_eq!(face.top_bar, Some(red));
+                }
+                // Hover on the selected tab does not drop the stripe or change the wash.
+                let hot = tab_face(true, true, Some(red), vertical, pal, accent);
+                assert_eq!((hot.stripe, hot.bg, hot.top_bar, hot.accent_mark), (face.stripe, face.bg, face.top_bar, face.accent_mark));
+            }
+        }
+    }
+
+    #[test]
+    fn unselected_colored_tab_is_a_tint_without_a_stripe() {
+        let red = TAB_COLORS[0].0;
+        let accent = 0x0A9BD6;
+        for (name, pal) in [("light", &LIGHT), ("dark", &DARK)] {
+            for vertical in [false, true] {
+                let face = tab_face(false, false, Some(red), vertical, pal, accent);
+                let plain = tab_face(false, false, None, vertical, pal, accent);
+                assert_eq!(face.stripe, None, "{name} vertical={vertical}");
+                assert_eq!(face.top_bar, None);
+                assert!(!face.accent_mark);
+                assert_ne!(face.bg, red);
+                assert_ne!(face.bg, plain.bg);
+                assert_eq!(face.bg, blend(pal.bg, red, 0.18));
+                assert_eq!(plain.bg, pal.bg);
+                assert_eq!(face.title, pal.sub);
+            }
+        }
+    }
+
+    #[test]
+    fn hovered_colored_tab_is_a_different_tint_without_a_stripe() {
+        let red = TAB_COLORS[0].0;
+        let accent = 0x0A9BD6;
+        for (name, pal) in [("light", &LIGHT), ("dark", &DARK)] {
+            for vertical in [false, true] {
+                let hover = tab_face(false, true, Some(red), vertical, pal, accent);
+                let idle = tab_face(false, false, Some(red), vertical, pal, accent);
+                let selected = tab_face(true, false, Some(red), vertical, pal, accent);
+                let plain = tab_face(false, true, None, vertical, pal, accent);
+                assert_eq!(hover.stripe, None, "{name} vertical={vertical}");
+                assert_eq!(hover.top_bar, None);
+                assert!(!hover.accent_mark);
+                assert_ne!(hover.bg, idle.bg);
+                assert_ne!(hover.bg, selected.bg);
+                assert_ne!(hover.bg, red);
+                assert_ne!(hover.bg, plain.bg);
+                let wash = blend(pal.card, pal.bg, 0.45);
+                assert_eq!(hover.bg, blend(wash, red, 0.16));
+                assert_eq!(plain.bg, wash);
+                assert_eq!(hover.title, pal.sub);
+            }
+        }
+    }
+
+    #[test]
+    fn uncolored_tabs_keep_their_faces_and_have_no_color_stripe() {
+        let accent = 0x0A9BD6;
+        for pal in [&LIGHT, &DARK] {
+            let selected_h = tab_face(true, false, None, false, pal, accent);
+            let selected_v = tab_face(true, false, None, true, pal, accent);
+            let hover = tab_face(false, true, None, false, pal, accent);
+            let idle = tab_face(false, false, None, true, pal, accent);
+            assert_eq!(selected_h.stripe, None);
+            assert_eq!(selected_v.stripe, None);
+            assert_eq!(hover.stripe, None);
+            assert_eq!(idle.stripe, None);
+            assert_eq!(selected_h.bg, pal.card);
+            assert_eq!(selected_v.bg, pal.card);
+            assert_eq!(hover.bg, blend(pal.card, pal.bg, 0.45));
+            assert_eq!(idle.bg, pal.bg);
+            assert_eq!(selected_h.top_bar, Some(accent));
+            assert!(!selected_h.accent_mark);
+            assert_eq!(selected_v.top_bar, None);
+            assert!(selected_v.accent_mark);
+            assert_eq!(hover.top_bar, None);
+            assert!(!hover.accent_mark);
+            assert_eq!(idle.top_bar, None);
+            assert!(!idle.accent_mark);
+            assert_eq!(selected_h.title, pal.text);
+            assert_eq!(hover.title, pal.sub);
+            assert_eq!(idle.title, pal.sub);
+        }
+    }
+
+    #[test]
+    fn colored_tab_ink_stays_readable_on_light_and_dark_washes() {
+        let accent = 0x0A9BD6;
+        for pal in [&LIGHT, &DARK] {
+            for &(color, _) in &TAB_COLORS {
+                for vertical in [false, true] {
+                    let selected = tab_face(true, false, Some(color), vertical, pal, accent);
+                    let idle = tab_face(false, false, Some(color), vertical, pal, accent);
+                    let hover = tab_face(false, true, Some(color), vertical, pal, accent);
+                    assert!(contrast(selected.title, selected.bg) >= 4.5, "selected {color:#08X} on {:#08X} vs {:#08X}", pal.bg, selected.bg);
+                    assert!(contrast(idle.title, idle.bg) >= 3.0, "idle {color:#08X} on {:#08X} vs {:#08X}", pal.bg, idle.bg);
+                    assert!(contrast(hover.title, hover.bg) >= 3.0, "hover {color:#08X} on {:#08X} vs {:#08X}", pal.bg, hover.bg);
+                    assert_ne!(selected.bg, color);
+                    assert_ne!(idle.bg, color);
+                    assert_ne!(hover.bg, color);
+                }
+            }
+        }
+        let body = RECT { left: 10, top: 4, right: 140, bottom: 30 };
+        assert_eq!(tab_color_stripe_rect(body, 96), RECT { left: 10, top: 4, right: 14, bottom: 30 });
+        assert_eq!(tab_color_stripe_rect(body, 192), RECT { left: 10, top: 4, right: 18, bottom: 30 });
+        // The title inset stays on every coloured tab, selected or not, so the label does not jump.
+        assert_eq!(tab_color_label_nudge(true, 96), 5);
+        assert_eq!(tab_color_label_nudge(false, 96), 0);
+        assert_eq!(tab_color_label_nudge(true, 192), 10);
+        let close = RECT { left: 154, top: 11, right: 170, bottom: 27 };
+        let labeled = RECT { left: 6, top: 6, right: 174, bottom: 32 };
+        assert_eq!(tab_label_room(labeled, Some(close), 96, true), 135);
+        assert_eq!(tab_label_room(labeled, Some(close), 96, false), 140);
     }
 }
 
