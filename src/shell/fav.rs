@@ -6,6 +6,7 @@ use crate::session::*;
 use crate::i18n::*;
 use crate::settings;
 use super::{forget_hosts, launches, open_leaf};
+use windows::Win32::System::DataExchange::{EnumClipboardFormats, GetClipboardFormatNameW};
 
 // ---------- favourites: ☆+ in each pane header; Ctrl+B opens the same list ----------
 
@@ -560,15 +561,128 @@ pub(crate) fn clear_verbs() {
     VERB_INDEX.with(|v| *v.borrow_mut() = None);
 }
 
-unsafe fn insert_fast_paste_idx(menu: HMENU, verbs: &VerbIndex) {
+/// Clipboard formats that matter for Fast paste. Text and pictures are not files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FastPasteFmt {
+    Hdrop,
+    ShellIdList,
+    FileContents,
+    FileGroupDescriptorW,
+    FileGroupDescriptor,
+    #[cfg(test)]
+    Text,
+    #[cfg(test)]
+    UnicodeText,
+    #[cfg(test)]
+    Png,
+    #[cfg(test)]
+    Dib,
+    #[cfg(test)]
+    DibV5,
+    #[cfg(test)]
+    Bitmap,
+}
+
+/// True when Fast paste can copy files. Empty, text-only, and image-only clipboards cannot,
+/// even when shell Paste stays enabled for a picture.
+pub(crate) fn fast_paste_has_files(formats: impl IntoIterator<Item = FastPasteFmt>) -> bool {
+    formats.into_iter().any(|fmt| {
+        matches!(
+            fmt,
+            FastPasteFmt::Hdrop
+                | FastPasteFmt::ShellIdList
+                | FastPasteFmt::FileContents
+                | FastPasteFmt::FileGroupDescriptorW
+                | FastPasteFmt::FileGroupDescriptor
+        )
+    })
+}
+
+/// `MF_STRING` when files are present. Otherwise the row stays visible and grayed.
+pub(crate) fn fast_paste_menu_flags(has_files: bool) -> MENU_ITEM_FLAGS {
+    if has_files { MF_STRING } else { MF_STRING | MF_GRAYED }
+}
+
+/// Registered clipboard format name. Standard formats such as `CF_HDROP` are not names.
+pub(crate) fn fast_paste_fmt_name(name: &str) -> Option<FastPasteFmt> {
+    match name {
+        "Shell IDList Array" => Some(FastPasteFmt::ShellIdList),
+        "FileContents" => Some(FastPasteFmt::FileContents),
+        "FileGroupDescriptorW" => Some(FastPasteFmt::FileGroupDescriptorW),
+        "FileGroupDescriptor" => Some(FastPasteFmt::FileGroupDescriptor),
+        _ => None,
+    }
+}
+
+/// Closes a clipboard opened for a format probe. Does not empty it.
+struct ClipboardOpen;
+
+impl Drop for ClipboardOpen {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseClipboard();
+        }
+    }
+}
+
+/// File formats currently on the clipboard. Opening failure grays Fast paste.
+unsafe fn clipboard_has_pasteable_files() -> bool {
+    if OpenClipboard(None).is_err() {
+        return false;
+    }
+    let _close = ClipboardOpen;
+    fast_paste_has_files(clipboard_formats())
+}
+
+unsafe fn clipboard_formats() -> Vec<FastPasteFmt> {
+    let mut out = Vec::new();
+    let mut fmt = 0u32;
+    for _ in 0..128 {
+        fmt = EnumClipboardFormats(fmt);
+        if fmt == 0 {
+            break;
+        }
+        if let Some(kind) = classify_clipboard_format(fmt) {
+            out.push(kind);
+        }
+    }
+    out
+}
+
+unsafe fn classify_clipboard_format(fmt: u32) -> Option<FastPasteFmt> {
+    if fmt == CF_HDROP.0 as u32 {
+        return Some(FastPasteFmt::Hdrop);
+    }
+    // Registered names start at 0xC000. Standard picture and text formats are not files.
+    if fmt < 0xC000 {
+        return None;
+    }
+    let mut buf = [0u16; 128];
+    let n = GetClipboardFormatNameW(fmt, &mut buf);
+    if n <= 0 {
+        return None;
+    }
+    let n = (n as usize).min(buf.len());
+    let name = String::from_utf16_lossy(&buf[..n]);
+    fast_paste_fmt_name(&name)
+}
+
+unsafe fn remove_fast_paste(menu: HMENU) {
     if let Some(i) = menu_index(menu, ID_CTX_FAST as usize) {
         let _ = DeleteMenu(menu, i, MF_BYPOSITION);
     }
+}
+
+unsafe fn insert_fast_paste_idx(menu: HMENU, verbs: &VerbIndex) {
     if !super::ctxmenu::maguro_shown("fast") {
+        remove_fast_paste(menu);
         return;
     }
-    let Some(at) = verbs.find_pos_after(menu, "paste") else { return };
-    let _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_FAST as usize, &HSTRING::from(tr(crate::Key::FastPaste)));
+    let Some(at) = verbs.find_pos_after(menu, "paste") else {
+        remove_fast_paste(menu);
+        return;
+    };
+    place_fast_paste(menu, at);
 }
 
 /// Index of the "properties" verb. Shell command ids are `id_first + offset`; separators and submenus have no id.
@@ -599,15 +713,16 @@ pub(crate) unsafe fn fav_anchor_pos(menu: HMENU, cm: &IContextMenu, id_first: u3
 }
 
 /// Puts Fast paste directly under the shell Paste row. No row when Paste is absent.
+/// Gray when the clipboard has no pasteable files. A row already in that slot stays,
+/// and its enabled state is refreshed so a stale insert cannot leave it enabled.
 unsafe fn insert_fast_paste(menu: HMENU, cm: &IContextMenu) {
-    if let Some(i) = menu_index(menu, ID_CTX_FAST as usize) {
-        let _ = DeleteMenu(menu, i, MF_BYPOSITION);
-    }
     if !super::ctxmenu::maguro_shown("fast") {
+        remove_fast_paste(menu);
         return;
     }
     let n = GetMenuItemCount(Some(menu));
     if n <= 0 {
+        remove_fast_paste(menu);
         return;
     }
     let mut at = None;
@@ -624,8 +739,32 @@ unsafe fn insert_fast_paste(menu: HMENU, cm: &IContextMenu) {
             break;
         }
     }
-    let Some(at) = at else { return };
-    let _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_FAST as usize, &HSTRING::from(tr(crate::Key::FastPaste)));
+    let Some(at) = at else {
+        remove_fast_paste(menu);
+        return;
+    };
+    place_fast_paste(menu, at);
+}
+
+unsafe fn place_fast_paste(menu: HMENU, at: u32) {
+    place_fast_paste_with(menu, at, clipboard_has_pasteable_files());
+}
+
+unsafe fn place_fast_paste_with(menu: HMENU, mut at: u32, has_files: bool) {
+    let flags = fast_paste_menu_flags(has_files);
+    if let Some(i) = menu_index(menu, ID_CTX_FAST as usize) {
+        if i == at {
+            let state = MF_BYPOSITION | if has_files { MF_ENABLED } else { MF_GRAYED };
+            let _ = EnableMenuItem(menu, i, state);
+            return;
+        }
+        let _ = DeleteMenu(menu, i, MF_BYPOSITION);
+        if i < at {
+            at = at.saturating_sub(1);
+        }
+    }
+    let label = HSTRING::from(tr(crate::Key::FastPaste));
+    let _ = InsertMenuW(menu, at, flags | MF_BYPOSITION, ID_CTX_FAST as usize, &label);
 }
 
 /// Directly under the top shell Open row. A csv file selected with an xlsx file
@@ -2239,6 +2378,81 @@ pub(crate) unsafe fn popup_menu(menu: HMENU, id: i32) {
         _ = GetWindowRect(b, &mut rc);
     }
     _ = TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, rc.left, rc.bottom + 4, None, main, None);
+}
+
+#[cfg(test)]
+mod fast_paste_tests {
+    use super::*;
+
+    fn flags_grayed(has_files: bool) -> bool {
+        fast_paste_menu_flags(has_files).contains(MF_GRAYED)
+    }
+
+    #[test]
+    fn empty_text_and_image_clipboards_gray_fast_paste() {
+        assert!(!fast_paste_has_files([]));
+        assert!(flags_grayed(false));
+        assert_eq!(fast_paste_menu_flags(false), MF_STRING | MF_GRAYED);
+        for text in [FastPasteFmt::Text, FastPasteFmt::UnicodeText] {
+            assert!(!fast_paste_has_files([text]));
+        }
+        assert!(!fast_paste_has_files([FastPasteFmt::Text, FastPasteFmt::UnicodeText]));
+        for picture in [FastPasteFmt::Png, FastPasteFmt::Dib, FastPasteFmt::DibV5, FastPasteFmt::Bitmap] {
+            assert!(!fast_paste_has_files([picture]), "{picture:?}");
+        }
+        assert!(!fast_paste_has_files([FastPasteFmt::Png, FastPasteFmt::UnicodeText, FastPasteFmt::Dib, FastPasteFmt::Bitmap]));
+        assert_eq!(fast_paste_fmt_name("PNG"), None);
+        assert_eq!(fast_paste_fmt_name("HTML Format"), None);
+    }
+
+    #[test]
+    fn file_formats_enable_fast_paste_even_beside_text_or_a_picture() {
+        assert!(fast_paste_has_files([FastPasteFmt::Hdrop]));
+        assert!(fast_paste_has_files([FastPasteFmt::Hdrop, FastPasteFmt::UnicodeText, FastPasteFmt::Png]));
+        assert!(fast_paste_has_files([FastPasteFmt::ShellIdList]));
+        assert!(fast_paste_has_files([FastPasteFmt::FileContents]));
+        assert!(fast_paste_has_files([FastPasteFmt::FileGroupDescriptorW]));
+        assert!(fast_paste_has_files([FastPasteFmt::FileGroupDescriptor]));
+        assert!(!flags_grayed(true));
+        assert_eq!(fast_paste_menu_flags(true), MF_STRING);
+        assert_eq!(fast_paste_fmt_name("Shell IDList Array"), Some(FastPasteFmt::ShellIdList));
+        assert_eq!(fast_paste_fmt_name("FileContents"), Some(FastPasteFmt::FileContents));
+        assert_eq!(fast_paste_fmt_name("FileGroupDescriptorW"), Some(FastPasteFmt::FileGroupDescriptorW));
+        assert_eq!(fast_paste_fmt_name("FileGroupDescriptor"), Some(FastPasteFmt::FileGroupDescriptor));
+    }
+
+    fn grayed_at(menu: HMENU, pos: u32) -> bool {
+        let mut info = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_STATE,
+            ..Default::default()
+        };
+        unsafe { GetMenuItemInfoW(menu, pos, true, &mut info).is_ok() && info.fState.0 & (MF_GRAYED.0 | MF_DISABLED.0) != 0 }
+    }
+
+    #[test]
+    fn a_kept_fast_paste_row_stays_visible_and_tracks_the_clipboard() {
+        unsafe {
+            let menu = CreatePopupMenu().unwrap();
+            let _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from("Paste"));
+            // Already sitting somewhere else. The refresh must move it under Paste, not hide it.
+            let _ = InsertMenuW(menu, 0, MF_STRING | MF_BYPOSITION, ID_CTX_FAST as usize, &HSTRING::from("Fast paste"));
+            place_fast_paste_with(menu, 2, false);
+            let ids = (0..GetMenuItemCount(Some(menu))).map(|i| GetMenuItemID(menu, i)).collect::<Vec<_>>();
+            assert_eq!(ids, vec![1, ID_CTX_FAST], "{ids:?}");
+            assert!(grayed_at(menu, 1));
+            assert_eq!(super::super::ctxmenu::item_text(menu, 1), "Fast paste");
+            // Same slot on the next open: keep the row and refresh the state.
+            place_fast_paste_with(menu, 1, true);
+            let ids = (0..GetMenuItemCount(Some(menu))).map(|i| GetMenuItemID(menu, i)).collect::<Vec<_>>();
+            assert_eq!(ids, vec![1, ID_CTX_FAST], "{ids:?}");
+            assert!(!grayed_at(menu, 1));
+            place_fast_paste_with(menu, 1, false);
+            assert!(grayed_at(menu, 1));
+            assert_eq!(GetMenuItemCount(Some(menu)), 2);
+            let _ = DestroyMenu(menu);
+        }
+    }
 }
 
 #[cfg(test)]
