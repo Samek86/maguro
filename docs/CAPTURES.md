@@ -11,8 +11,8 @@ Maguro README / 도움말용 스크린샷. 모든 제품 이미지는 **포터�
 - **실행 파일:** 포터블 maguro.exe (작업 디렉터리 = exe 옆). 설정은 같은 폴더의 maguro.json만.
 - **테마:** README 히어로 다크를 제외하면 라이트. 언어는 파일 접미사 .ko / .ja / (없음=en).
 - **배경:** 흰 백드롭 창을 대상 창 뒤에 깔고 CopyFromScreen (스크립트: docs/capture/white-backdrop.ps1).
-- **크롭:** DwmGetWindowAttribute(..., DWMWA_EXTENDED_FRAME_BOUNDS) 로 그림자·다크 가장자리 없이 프레임만.
-- **가장자리 검사:** 왼쪽 어두운 픽셀 ≥3 또는 높이의 5% 초과면 거부. 다른 변은 5% 스트립 초과만 거부.
+- **크롭:** DwmGetWindowAttribute(..., DWMWA_EXTENDED_FRAME_BOUNDS) 로 그림자·바깥 검은 여백 없이 프레임만. **앱 자체의 1px 테두리(창 외곽선)는 지우지 않고 그대로 남긴다.**
+- **가장자리 검사:** 검사 대상은 앱 테두리 **바깥**의 검은 여백이다. 맨 바깥 1px이 변 전체를 따라 이어지는 앱 테두리 선이면 정상으로 보고, 그 안쪽(2px째부터)에 어두운 띠가 있거나 테두리 바깥에 검은 영역이 남으면 거부. 앱 테두리 1px을 없애려고 안쪽으로 잘라 들어가는(inset) 크롭은 하지 않는다.
 - **페인트:** ShowWindow는 셸 확장 열거 중 데드락 위험이 있어 쓰지 않는다. 대신 RedrawWindow(RDW_INVALIDATE|RDW_UPDATENOW|RDW_ALLCHILDREN) 후 캡처 (docs/capture/cap-lib.ps1).
 - **닫기:** 대상 프로세스 PID의 창에만 WM_CLOSE (다른 Maguro 인스턴스에 닿지 않음).
 - **재사용 스크립트:** docs/capture/ — 경로는 환경변수 MAGURO_PORTABLE, MAGURO_CFG_DIR, MAGURO_SHOT_DIR 로만 지정. 개인 경로·실서버·실비밀번호를 스크립트에 넣지 말 것.
@@ -47,10 +47,11 @@ Maguro README / 도움말용 스크린샷. 모든 제품 이미지는 **포터�
 - About 창 캡처는 README에 넣지 않는다.
 
 ### 테두리·좌표·배경
-- **검은색·어두운 굵은 바깥 테두리 금지.** 캡처 좌표/크롭이 틀리면 즉시 재촬영.
+- **검은색·어두운 굵은 바깥 테두리(주변 여백) 금지.** 캡처 좌표/크롭이 틀리면 즉시 재촬영.
+- **단, 앱 자체의 1px 검은 테두리는 그대로 둔다.** 이것은 Maguro 창의 일부이므로 지우거나 1px 안쪽으로 잘라내지 않는다. 지우는 것은 창 바깥의 검은 여백뿐이다.
 - 우리 쪽 **흰 백드롭 창**을 대상 창 뒤에 깐 뒤 CopyFromScreen (`docs/capture/white-backdrop.ps1`). Jun 바탕화면은 바꾸지 말 것.
-- 크롭은 `DwmGetWindowAttribute(..., DWMWA_EXTENDED_FRAME_BOUNDS)` 로 그림자·다크 가장자리 없이 프레임만 (`cap-lib.ps1`).
-- 가장자리 픽셀 검사: 왼쪽 어두운 픽셀 ≥3 또는 높이의 5% 초과 → 거부. 다른 변은 5% 스트립 초과만 거부. **네 변을 픽셀 단위로 확인**한 뒤에만 커밋.
+- 크롭은 `DwmGetWindowAttribute(..., DWMWA_EXTENDED_FRAME_BOUNDS)` 로 그림자·바깥 검은 여백 없이 프레임만 (`cap-lib.ps1`). 결과 PNG의 네 변 맨 바깥 1px에는 앱 테두리 선이 남아 있어야 한다.
+- 가장자리 픽셀 검사: 맨 바깥 1px의 앱 테두리 선은 허용. 그 바깥(또는 2px째 이후)에 검은 여백·어두운 띠가 있으면 거부. **네 변을 픽셀 단위로 확인**한 뒤에만 커밋. 1px inset 크롭으로 앱 테두리를 없앤 샷도 거부.
 - 커밋·릴리스·채팅 첨부 전에 **PNG를 직접 열어** 눈으로 확인한다. 다른 앱 창·에러 대화상자가 들어오면 안 된다. 대상 Maguro 창만.
 
 ### 촬영 환경·스크립트
@@ -71,6 +72,9 @@ Maguro README / 도움말용 스크린샷. 모든 제품 이미지는 **포터�
 - t763u–t764u: 위 내용은 원래 이 주의사항 파일에 있어야 함. 지킨 뒤 찍을 것.
 - t765u: 채팅 지시를 모아 이 파일에 추가할 것.
 - t766u: 캐시 문제 → **폴더 이름을 다른 것**으로 (`docs/images-v5`).
+
+### 채팅에서 확인된 구체 지시 (2026-11-16)
+- t1107u: 주변의 검은색은 지우되, **앱 자체의 1px 검은 테두리는 그대로 둘 것.** 1px 안쪽으로 잘라 테두리를 없애지 말 것.
 
 ### 시드·픽스처 경로 (PC)
 - 데모 루트: `C:\WORK\pgtest\MaguroDemo` + `subst G: C:\WORK\pgtest\MaguroDemo` (폴더가 없으면 다시 만들 것).
@@ -248,6 +252,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 시스템 대화상자(IFileOperation 진행, 탐색기 메뉴, 공통 파일 대화상자)는 그대로다. 이름 묻기, 즐겨찾기 관리, 정보, Excel, 확인 창, 그리고 팝업·알림(폴더 감시 토스트, 즐겨찾기 없음, 네트워크 실패, 빠른 복사 진행·이름 충돌, 세션 목록, 단축키, 레이아웃 고르기, 선택 칸, 서버 연결의 저장/취소)은 공유 토큰으로 옮겼다. 설정 창의 토글은 모양과 동작이 이전과 같다.
 
 ## 변경 이력 (관련)
+
+- **2026-11-16:** Jun 지시(t1107u)로 크롭 규칙 수정. 바깥 검은 여백만 지우고 앱 자체의 1px 테두리는 남긴다. 이전에 `Crop-MaguroFrame`의 1px inset으로 테두리를 잘라낸 샷(예: `search*`, `feature_win_shift_v*`, `preview.ko`/`preview.ja`의 1204×811)은 이 규칙에 맞지 않으므로 다음 재촬영 때 테두리가 남은 1206×813으로 다시 찍는다. `cap-lib.ps1`의 `Test-MaguroEdges`/`Crop-MaguroFrame`도 이 규칙에 맞게 고쳐야 한다(1px 테두리 선 허용, inset으로 테두리 제거 금지).
 
 - **2026-11-13 (pane badge):** MaguroMain 계열 47장(`hero_*`, `layout*`, `favorites*`, `tabs*`, `pane_tabs*`, `pane_colors*`, `preview` (not peek), `panedrag_*`, `search*`, `address_toolbar*`, `feature_win_shift_v*`)을 현재 main(3424272, PR #411 패널 번호 배지)에서 다시 찍어 `docs/images-v8/{common,en,ko,ja}/` 같은 경로에 넣음. 즐겨찾기·트리 둘 다 켠 시드(`fav_panel`+`tree_panel`, `side_split=0.5`). 대화상자·설정·`preview_peek*`·`workspaces*`·README 데모 GIF/mp4는 그대로. 메인 창은 대체로 1206×813, 주소 줄 1212×160, 패널 탭 크롭 1212×420. `search*`·`feature_win_shift_v*`와 `preview.ko`/`preview.ja`는 가장자리 1px inset으로 1204×811.
 
