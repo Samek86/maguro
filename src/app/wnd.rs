@@ -784,6 +784,9 @@ pub(crate) unsafe fn paint_main(h: HWND) {
         if vertical && g.top > 0 {
             fill(dc, RECT { left: 0, top: g.top - 1, right: g.w, bottom: g.top }, pal().line);
         }
+        for r in crate::toolbar::separator_rects() {
+            fill(dc, r, pal().line);
+        }
         if g.side > 0 {
             let side = side_rect(&g);
             fill(dc, side, side_ground());

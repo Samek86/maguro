@@ -143,6 +143,13 @@ pub(crate) const OUTER_PAD_DIP: i32 = 8;
 /// DIP, scaled by the DPI. The side panel's favourites/tree divider uses the same gap.
 pub(crate) const PLATE_GAP_DIP: i32 = 4;
 
+/// Command column when window tabs are on the top row. Icon only, not the 180 DIP tab strip.
+pub(crate) const CMD_COL_DIP: i32 = 40;
+
+pub(crate) fn command_col_px(dpi: i32) -> i32 {
+    CMD_COL_DIP * dpi.max(1) / 96
+}
+
 /// DIP added on each safe side of a plate gap when hit-testing.
 /// 2 DIP is the pane's Explorer inset, and header controls start at 4 DIP, so this slop
 /// stays off scrollbars and off those controls. A row splitter does not use the lower side:
@@ -169,6 +176,7 @@ pub(crate) fn split_hit_extra(gap: i32) -> i32 {
 /// The icon row already spans the full width, so the strip is only on the content side.
 /// With the panel closed the strip sits on the window edge (it is a plate, like the side panel).
 /// The grid still keeps one plate gap after the strip. The outer pad is only for a client with no left plate.
+/// Horizontal tabs reserve the command column the same way, at [`CMD_COL_DIP`], instead of that outer pad.
 pub(crate) fn client_min_for(heights: &[usize], dpi: i32, tree_on: bool, bar: bool, preview_on: bool, vertical: bool) -> (i32, i32) {
     let s = |v: i32| v * dpi.max(1) / 96;
     let (pad, gap) = (outer_pad_px(dpi), plate_gap_px(dpi));
@@ -180,10 +188,9 @@ pub(crate) fn client_min_for(heights: &[usize], dpi: i32, tree_on: bool, bar: bo
     let left = if vtab > 0 {
         let strip_at = if tree_on { s(120) + gap } else { 0 };
         strip_at + vtab + gap
-    } else if tree_on {
-        s(120) + gap
     } else {
-        pad
+        let strip_at = if tree_on { s(120) + gap } else { 0 };
+        strip_at + command_col_px(dpi) + gap
     };
     let preview = if preview_on { gap + s(PREVIEW_DEF_DIP) } else { 0 };
     let width = (left + grid_w + pad + preview).max(super::tabs::icon_group_min(dpi, bar));
@@ -433,6 +440,8 @@ pub(crate) struct Geo {
     pub(crate) top: i32, // toolbar / tab-row bottom = plates top
     /// Width of the vertical window-tab strip. 0 keeps the tabs on the top row.
     pub(crate) vtab: i32,
+    /// Command column width when the tabs are on the top row. 0 while the tabs are vertical.
+    pub(crate) cmd: i32,
     pub(crate) bot: i32, // plates bottom = status line top
     pub(crate) pad: i32,
     pub(crate) gap: i32,
@@ -498,7 +507,8 @@ pub(crate) fn geo(a: &App) -> Geo {
     // The session field stays at the width from before the press until the gesture ends.
     let dip = a.vtab_live.map(|l| l.shown).unwrap_or(a.s.vertical_tabs_width);
     let (side, vtab) = vtab_and_side(a.s.vertical_tabs, dip, a.dpi, rc.right, a.s.side_shown(), a.s.side, a.s.heights.len() as i32);
-    let gx = grid_left(vtab, side, gap, pad);
+    let cmd = if a.s.vertical_tabs { 0 } else { command_col_px(a.dpi) };
+    let gx = grid_left(if vtab > 0 { vtab } else { cmd }, side, gap, pad);
     let preview = preview_plate(a.s.preview_on, a.s.preview_w, a.dpi, rc.right, gx, gap, pad);
     let grid_w = (rc.right - pad - gx - if preview > 0 { preview + gap } else { 0 }).max(0);
     let top = s(32); // tab strip. `bar` hides the icon group except the gear, not this row.
@@ -512,6 +522,7 @@ pub(crate) fn geo(a: &App) -> Geo {
         h: rc.bottom,
         top,
         vtab,
+        cmd,
         bot,
         pad,
         gap,
@@ -1126,14 +1137,18 @@ fn side_hit_xs(g: &Geo, extra: i32, grip_left: Option<i32>) -> Option<(i32, i32)
     if g.side <= 0 {
         return None;
     }
-    let gap_r = if g.vtab > 0 { vtab_left(g.side, g.gap) } else { g.gx };
+    // A left plate (vertical tabs or the command column) keeps the side grip in the gap
+    // before that plate. Without one, the grip runs up to the grid.
+    let gap_r = if g.vtab > 0 || g.cmd > 0 { vtab_left(g.side, g.gap) } else { g.gx };
     let mut x0 = (g.side - extra).max(0);
     let mut x1 = gap_r + extra;
-    if g.vtab > 0 {
+    if g.vtab > 0 || g.cmd > 0 {
         let strip_left = vtab_left(g.side, g.gap);
         x1 = x1.min(strip_left + extra);
-        if let Some(gl) = grip_left {
-            x1 = x1.min(gl);
+        if g.vtab > 0 {
+            if let Some(gl) = grip_left {
+                x1 = x1.min(gl);
+            }
         }
     }
     if x1 <= g.side {
@@ -1468,6 +1483,7 @@ mod tests {
             h: 600,
             top: 34,
             vtab: 0,
+            cmd: 0,
             bot: 576,
             pad: 8,
             gap: 8,
@@ -1604,19 +1620,20 @@ mod tests {
     #[test]
     fn client_min_is_the_current_layout_plus_chrome() {
         // 2×2, tree, toolbar, status, 96 dpi.
-        // side 120 + gap 4 + two panes 280 + gap 4 + pad 8 = 416, but the icon row is wider (450).
+        // side 120 + gap 4 + command column 40 + gap 4 + two panes 280 + gap 4 + pad 8 = 460.
         // Height is the tab strip, two panes, one 4px gap, and the status line: 32 + 244 + 24.
-        assert_eq!(client_min(&[2, 2], 96, true, true, false), (450, 300));
-        // one pane, no tree, toolbar hidden: the gear row is wider than the pane.
+        assert_eq!(client_min(&[2, 2], 96, true, true, false), (460, 300));
+        // one pane, no tree, toolbar hidden: the gear row is still wider than the pane plus the column.
         // 96 dpi: tab reserve 116 + gap 4 + list 32 + gap 4 + gear 32 + pad 8 = 196.
         // Height is the tab strip, one pane, and the status line: 32 + 120 + 24. No plate gap in that sum.
         assert_eq!(client_min(&[1], 96, false, false, false), (196, 176));
         let (w, h) = client_min(&[1, 1, 1], 192, false, true, false);
-        // Preview adds one gap and the 280 DIP plate. 120+4+280+4+8 + 4+280 = 700. Height matches the 2×2 above.
-        assert_eq!(client_min(&[2, 2], 96, true, true, true), (700, 300));
-        // Three columns at 192 DPI: two gaps shrank from 16 to 8 (888). The icon row is 900, so that wins.
+        // Preview adds one gap and the 280 DIP plate.
+        // 120+4+40+4 + two panes 280 + gap 4 + pad 8 + gap 4 + preview 280 = 744.
+        assert_eq!(client_min(&[2, 2], 96, true, true, true), (744, 300));
+        // Three columns at 192 DPI. The command column is 80, then a gap of 8, three panes, and the pad: 960.
         // One row, so the height does not include a plate gap: 64 + 240 + 48.
-        assert_eq!((w, h), (900, 352));
+        assert_eq!((w, h), (960, 352));
         assert_eq!((pane_min_w(96), pane_min_h(96), pane_min_w(192), pane_min_h(144)), (140, 120, 280, 180));
     }
 
@@ -1656,6 +1673,7 @@ mod tests {
             h: 800,
             top: 66,
             vtab: 0,
+            cmd: 0,
             bot: 700,
             pad: 8,
             gap: 8,
@@ -1709,6 +1727,7 @@ mod tests {
             h: 800,
             top: 66,
             vtab: 0,
+            cmd: 0,
             bot: 700,
             pad: 8,
             gap: 8,
@@ -1739,6 +1758,7 @@ mod tests {
             h: 800,
             top: 66,
             vtab: 0,
+            cmd: 0,
             bot: 700,
             pad: 8,
             gap: 8,
@@ -1783,10 +1803,10 @@ mod tests {
             assert!(t.right <= t.left || t.bottom <= t.top);
             assert!(side_gap_rect(&only_fav).is_none());
         }
-        // Neither: no plate, so the grid starts at the pad.
+        // Neither: no plate, so the tree takes no height.
         assert_eq!(side_tree_h(0, plate_h, 0.5, gap, min, false, false), 0);
-        // The panel is 120. It replaces the 8px outer pad and adds a 4px gap, so the width grows by 116.
-        assert_eq!(client_min(&[2, 2, 2], 96, false, false, false).0 + 116, client_min(&[2, 2, 2], 96, true, false, false).0);
+        // The panel is 120 and adds its own 4px gap in front of the command column. The column stays.
+        assert_eq!(client_min(&[2, 2, 2], 96, false, false, false).0 + 124, client_min(&[2, 2, 2], 96, true, false, false).0);
     }
 
     #[test]
@@ -1860,7 +1880,35 @@ mod tests {
         assert_eq!(grid_left(180, 0, 8, 8), shut.right + 8);
         assert_eq!(vtab_left(0, 4), 0);
         assert_eq!(grid_left(180, 0, 4, 8), 184);
-        assert_eq!(grid_left(0, 0, 4, 8), 8, "horizontal, no panel: the outer pad stays 8");
+        assert_eq!(grid_left(0, 0, 4, 8), 8, "no left plate: the outer pad stays 8");
+        // Horizontal tabs pass the command column in place of a vertical strip.
+        assert_eq!(command_col_px(96), 40);
+        assert_eq!(command_col_px(192), 80);
+        assert_eq!(grid_left(command_col_px(96), 0, 4, 8), 44);
+        assert_eq!(grid_left(command_col_px(96), 240, 4, 8), 288);
+        let col = Geo {
+            w: 1000,
+            h: 800,
+            top: 32,
+            vtab: 0,
+            cmd: 40,
+            bot: 776,
+            pad: 8,
+            gap: 4,
+            side: 240,
+            tree_h: 0,
+            fav_top: false,
+            show_fav: true,
+            show_tree: true,
+            gx: 288,
+            preview: 0,
+            xs: vec![(288, 700)],
+            ys: vec![vec![(32, 776)]],
+            zoom: false,
+        };
+        assert_eq!(hit(&col, 242, 200), Some(Hit::Side));
+        assert_eq!(hit(&col, 252, 200), None, "a command button is not the side splitter");
+        assert_eq!(gap_line(&col, Hit::VTab, 2), None, "the command column has no drag grip");
         assert_eq!(grid_left(0, 240, 4, 8), 244);
         // A short client clips the column and does not invert it. A panel that eats the client
         // collapses the column at the right edge instead of turning it back into the top row.
@@ -1950,6 +1998,7 @@ mod tests {
             h: 800,
             top: 32,
             vtab: 180,
+            cmd: 0,
             bot: 776,
             pad: 8,
             gap: 4,

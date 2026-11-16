@@ -3,9 +3,9 @@
 //! Settings reset does not open this file. A missing file uses the default layout.
 //! A file that cannot be parsed is left on disk and the default layout is used instead.
 //!
-//! The bar is drawn only while window tabs are vertical, on the left of the top strip,
-//! inside the width already reserved as `tab_w`. Horizontal tabs do not draw it:
-//! the vertical command column is a later change. Buttons are icon-only.
+//! Vertical window tabs draw the bar across the left of the top strip, inside `tab_w`.
+//! Horizontal window tabs draw the same buttons down a narrow left column (about 40px
+//! at 100%), where the vertical tab strip would sit. Buttons are icon-only.
 //! The pinned Change button does not open an editor in this version.
 
 use std::path::Path;
@@ -120,11 +120,43 @@ impl BarLay {
 }
 
 pub(crate) struct LayIn {
+    /// Window tabs run down the left. The command bar is then the horizontal top strip.
+    pub vertical_tabs: bool,
+    /// Right edge of the horizontal command area. Unused for the vertical column.
+    pub tab_w: i32,
+    /// Horizontal bar: button top. Vertical column: top of the column (below the tab row).
+    pub top: i32,
+    /// Bottom of the vertical column. Unused for the horizontal bar.
+    pub bottom: i32,
+    /// Left edge of the vertical column. Unused for the horizontal bar.
+    pub left: i32,
+    pub dpi: i32,
+    pub max_buttons: usize,
+}
+
+/// Where the live window wants the bar. Built from the main client, not from a test.
+#[derive(Clone, Copy)]
+pub(crate) struct Origin {
     pub vertical_tabs: bool,
     pub tab_w: i32,
     pub top: i32,
+    pub bottom: i32,
+    pub left: i32,
     pub dpi: i32,
-    pub max_buttons: usize,
+}
+
+impl Origin {
+    fn lay_in(self) -> LayIn {
+        LayIn {
+            vertical_tabs: self.vertical_tabs,
+            tab_w: self.tab_w,
+            top: self.top,
+            bottom: self.bottom,
+            left: self.left,
+            dpi: self.dpi,
+            max_buttons: CMD_SLOTS as usize,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -450,10 +482,19 @@ fn button_metrics(dpi: i32) -> (i32, i32, i32, i32) {
 }
 
 pub(crate) fn layout(pieces: &[Piece], input: &LayIn) -> BarLay {
+    if input.vertical_tabs {
+        layout_row(pieces, input)
+    } else {
+        layout_column(pieces, input)
+    }
+}
+
+/// Buttons across the top strip. Change sits at the right edge. Overflow sits just left of it.
+fn layout_row(pieces: &[Piece], input: &LayIn) -> BarLay {
     let dpi = input.dpi.max(1);
     let (btn_w, btn_h, gap, pad) = button_metrics(dpi);
     let sep_w = scale(dpi, 1).max(1);
-    if !input.vertical_tabs || input.tab_w < btn_w {
+    if input.tab_w < btn_w {
         return BarLay::hidden_bar();
     }
     let top = input.top;
@@ -527,23 +568,119 @@ pub(crate) fn layout(pieces: &[Piece], input: &LayIn) -> BarLay {
     }
 }
 
+/// Buttons down the left column. Change sits at the bottom. Overflow sits just above it.
+/// The column is not dragged. A short column keeps Change and folds the rest into ».
+fn layout_column(pieces: &[Piece], input: &LayIn) -> BarLay {
+    let dpi = input.dpi.max(1);
+    let (btn_w, btn_h, gap, _) = button_metrics(dpi);
+    let col_w = crate::command_col_px(dpi);
+    let sep_h = scale(dpi, 1).max(1);
+    let pad_y = (scale(dpi, 32) - btn_h) / 2;
+    if col_w < btn_w || input.bottom <= input.top {
+        return BarLay::hidden_bar();
+    }
+    let x = input.left + (col_w - btn_w) / 2;
+    let content_top = input.top + pad_y.max(0);
+    let edit_bottom = input.bottom - pad_y.max(0);
+    let edit_top = edit_bottom - btn_h;
+    if edit_top < content_top {
+        return BarLay::hidden_bar();
+    }
+    let edit = Px { left: x, top: edit_top, right: x + btn_w, bottom: edit_bottom };
+    let piece_h = |p: &Piece| match p {
+        Piece::Command { .. } => btn_h,
+        Piece::Separator => sep_h,
+    };
+    let take = |room: i32| -> usize {
+        let mut n = 0;
+        let mut buttons = 0usize;
+        let mut used = 0i32;
+        for (i, p) in pieces.iter().enumerate() {
+            let add = piece_h(p) + if i == 0 { 0 } else { gap };
+            if used + add > room {
+                break;
+            }
+            if matches!(p, Piece::Command { .. }) {
+                if buttons >= input.max_buttons {
+                    break;
+                }
+                buttons += 1;
+            }
+            used += add;
+            n = i + 1;
+        }
+        while n > 0 && matches!(pieces.get(n - 1), Some(Piece::Separator)) {
+            n -= 1;
+        }
+        n
+    };
+    let room_full = (edit.top - gap - content_top).max(0);
+    let all = take(room_full);
+    let (n, overflow) = if all == pieces.len() {
+        (all, None)
+    } else {
+        let over_bottom = edit.top - gap;
+        let over_top = over_bottom - btn_h;
+        if over_top < content_top {
+            (0, None)
+        } else {
+            let room = (over_top - gap - content_top).max(0);
+            let over = Px { left: x, top: over_top, right: x + btn_w, bottom: over_bottom };
+            (take(room), Some(over))
+        }
+    };
+    let mut y = content_top;
+    let mut commands = Vec::new();
+    let mut command_at = Vec::new();
+    let mut separators = Vec::new();
+    for (i, p) in pieces.iter().enumerate().take(n) {
+        let h = piece_h(p);
+        let r = Px { left: x, top: y, right: x + btn_w, bottom: y + h };
+        match p {
+            Piece::Command { .. } => {
+                commands.push(r);
+                command_at.push(i);
+            }
+            Piece::Separator => separators.push(r),
+        }
+        y += h + gap;
+    }
+    BarLay {
+        shown: true,
+        commands,
+        command_at,
+        separators,
+        overflow,
+        edit,
+        hidden: (n..pieces.len()).collect(),
+    }
+}
+
 fn live_doc() -> Doc {
     state().doc.clone()
 }
 
-fn layout_now(tab_w: i32, top: i32, dpi: i32, vertical: bool) -> (Doc, BarLay) {
+fn layout_now(o: &Origin) -> (Doc, BarLay) {
     let doc = live_doc();
-    let lay = layout(&doc.pieces(), &LayIn { vertical_tabs: vertical, tab_w, top, dpi, max_buttons: CMD_SLOTS as usize });
+    let lay = layout(&doc.pieces(), &o.lay_in());
     (doc, lay)
 }
 
-/// Top-strip origin shared with the right-hand icons. `(tab_w, button top, dpi, vertical tabs)`.
-pub(crate) fn bar_origin(a: &crate::App) -> (i32, i32, i32, bool) {
+/// Top strip when the tabs are vertical. Left column when the tabs are horizontal.
+pub(crate) fn bar_origin(a: &crate::App) -> Origin {
+    let g = crate::geo(a);
     let s = |v: i32| v * a.dpi / 96;
     let btn_top = (s(32) - crate::tool_icon_px(a.dpi).1) / 2;
     let drives = crate::drive_slots(a.s.drive_buttons, a.drives.len());
-    let icons = crate::icon_slots(crate::geo(a).w, btn_top, a.dpi, drives, a.s.bar);
-    (icons.tab_w, btn_top, a.dpi, a.s.vertical_tabs)
+    let icons = crate::icon_slots(g.w, btn_top, a.dpi, drives, a.s.bar);
+    Origin {
+        vertical_tabs: a.s.vertical_tabs,
+        tab_w: icons.tab_w,
+        top: if a.s.vertical_tabs { btn_top } else { g.top },
+        bottom: g.bot,
+        left: crate::vtab_left(g.side, g.gap),
+        dpi: a.dpi,
+    }
 }
 
 pub(crate) struct SlotMove {
@@ -552,8 +689,8 @@ pub(crate) struct SlotMove {
     pub show: bool,
 }
 
-pub(crate) fn moves(tab_w: i32, top: i32, dpi: i32, vertical: bool) -> Vec<SlotMove> {
-    let (_, lay) = layout_now(tab_w, top, dpi, vertical);
+pub(crate) fn moves(o: &Origin) -> Vec<SlotMove> {
+    let (_, lay) = layout_now(o);
     let mut out = Vec::with_capacity(CMD_SLOTS as usize + 2);
     for i in 0..CMD_SLOTS {
         let rect = lay.commands.get(i as usize).copied().unwrap_or_else(Px::empty);
@@ -574,14 +711,14 @@ pub(crate) fn icon_for_control(id: i32) -> Option<LineIcon> {
     if !is_command_control(id) {
         return None;
     }
-    let (tab_w, top, dpi, vertical) = app(|a| {
+    let origin = app(|a| {
         if a.main.0.is_null() {
             None
         } else {
             Some(bar_origin(a))
         }
     })?;
-    let (doc, lay) = layout_now(tab_w, top, dpi, vertical);
+    let (doc, lay) = layout_now(&origin);
     if !lay.shown {
         return None;
     }
@@ -643,8 +780,8 @@ pub(crate) unsafe fn refresh_tips() {
     if main.0.is_null() {
         return;
     }
-    let (tab_w, top, dpi, vertical) = app(|a| bar_origin(a));
-    let (doc, lay) = layout_now(tab_w, top, dpi, vertical);
+    let origin = app(|a| bar_origin(a));
+    let (doc, lay) = layout_now(&origin);
     let pieces = doc.pieces();
     for i in 0..CMD_SLOTS {
         let id = ID_CMD_FIRST + i;
@@ -690,8 +827,8 @@ pub(crate) unsafe fn sync_enabled() {
     if main.0.is_null() {
         return;
     }
-    let (tab_w, top, dpi, vertical) = app(|a| bar_origin(a));
-    let (doc, lay) = layout_now(tab_w, top, dpi, vertical);
+    let origin = app(|a| bar_origin(a));
+    let (doc, lay) = layout_now(&origin);
     let input = enable_input();
     let pieces = doc.pieces();
     for i in 0..CMD_SLOTS {
@@ -749,8 +886,8 @@ pub(crate) unsafe fn command(owner: HWND, id: usize) -> bool {
     if !is_command_control(id) {
         return false;
     }
-    let (tab_w, top, dpi, vertical) = app(|a| bar_origin(a));
-    let (doc, lay) = layout_now(tab_w, top, dpi, vertical);
+    let origin = app(|a| bar_origin(a));
+    let (doc, lay) = layout_now(&origin);
     let Some(action) = action_for(id, &doc, &lay) else { return true };
     if !lay.shown {
         return true;
@@ -784,12 +921,35 @@ unsafe fn run(owner: HWND, action: Action, doc: &Doc, lay: &BarLay, from: i32) {
 }
 
 unsafe fn button_point(id: i32) -> POINT {
-    let main = app(|a| a.main);
+    let (main, vertical_tabs) = app(|a| (a.main, a.s.vertical_tabs));
     let mut rc = RECT::default();
     if let Ok(b) = GetDlgItem(Some(main), id) {
         _ = GetWindowRect(b, &mut rc);
     }
-    POINT { x: rc.left, y: rc.bottom }
+    // Top strip: the menu opens under the button. Left column: it opens to the right,
+    // so a button at the bottom of the column is not pushed off the screen.
+    if vertical_tabs {
+        POINT { x: rc.left, y: rc.bottom }
+    } else {
+        POINT { x: rc.right, y: rc.top }
+    }
+}
+
+/// Separator lines for the current bar. Empty when the bar is hidden or has no separators.
+pub(crate) fn separator_rects() -> Vec<RECT> {
+    let origin = app(|a| {
+        if a.main.0.is_null() {
+            None
+        } else {
+            Some(bar_origin(a))
+        }
+    });
+    let Some(origin) = origin else { return Vec::new() };
+    let (_, lay) = layout_now(&origin);
+    if !lay.shown {
+        return Vec::new();
+    }
+    lay.separators.into_iter().filter(|r| r.live()).map(|r| r.to_rect()).collect()
 }
 
 unsafe fn popup_overflow(owner: HWND, doc: &Doc, lay: &BarLay) {
@@ -816,7 +976,28 @@ mod tests {
     use super::*;
 
     fn placed(vertical: bool, tab_w: i32, pieces: &[Piece]) -> BarLay {
-        layout(pieces, &LayIn { vertical_tabs: vertical, tab_w, top: 4, dpi: 96, max_buttons: CMD_SLOTS as usize })
+        layout(pieces, &LayIn {
+            vertical_tabs: vertical,
+            tab_w,
+            top: 4,
+            bottom: 0,
+            left: 0,
+            dpi: 96,
+            max_buttons: CMD_SLOTS as usize,
+        })
+    }
+
+    /// `height` is the column, starting under a 32px tab row, at the window's left edge.
+    fn column(height: i32, left: i32, pieces: &[Piece]) -> BarLay {
+        layout(pieces, &LayIn {
+            vertical_tabs: false,
+            tab_w: 0,
+            top: 32,
+            bottom: 32 + height,
+            left,
+            dpi: 96,
+            max_buttons: CMD_SLOTS as usize,
+        })
     }
 
     fn defaults() -> Vec<Piece> {
@@ -1035,12 +1216,63 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_tabs_do_not_draw_the_command_bar() {
-        let lay = placed(false, 900, &defaults());
-        assert!(!lay.shown);
-        assert!(lay.commands.is_empty());
+    fn horizontal_tabs_stack_icons_in_a_narrow_column() {
+        let lay = column(700, 0, &defaults());
+        assert!(lay.shown);
         assert!(lay.overflow.is_none());
-        assert!(!lay.edit.live());
+        assert_eq!(lay.commands.len(), 8);
+        assert!(lay.hidden.is_empty());
+        assert_eq!(lay.edit.left, 4, "32px button centered in the 40px column");
+        assert_eq!(lay.edit.right - lay.edit.left, 32);
+        assert_eq!(lay.edit.bottom - lay.edit.top, 24);
+        assert_eq!(lay.edit.bottom, 32 + 700 - 4);
+        assert!(lay.edit.top >= 32, "the column starts under the tab row");
+        let mut prev = 32;
+        for r in &lay.commands {
+            assert_eq!((r.left, r.right), (lay.edit.left, lay.edit.right));
+            assert!(r.top >= prev);
+            assert_eq!(r.bottom - r.top, 24);
+            assert!(r.bottom + 4 <= lay.edit.top);
+            prev = r.bottom;
+        }
+        let beside = column(700, 244, &defaults());
+        assert_eq!(beside.edit.left, 248, "open side panel: column starts after the panel and the gap");
+        assert!(beside.commands.iter().all(|r| r.left >= 244));
+    }
+
+    #[test]
+    fn short_column_puts_overflow_above_change() {
+        let lay = column(120, 0, &defaults());
+        assert!(lay.shown);
+        let over = lay.overflow.expect("overflow");
+        assert_eq!(over.bottom + 4, lay.edit.top);
+        assert_eq!(over.left, lay.edit.left);
+        assert_eq!(over.right - over.left, 32);
+        assert!(lay.commands.len() < 8);
+        assert!(!lay.hidden.is_empty());
+        for r in &lay.commands {
+            assert!(r.bottom + 4 <= over.top);
+            assert!(r.bottom < lay.edit.top);
+            assert!(r.top >= 32);
+        }
+        assert_eq!(lay.commands.len() + lay.hidden.len(), 8);
+    }
+
+    #[test]
+    fn column_separator_is_a_horizontal_line() {
+        let pieces = vec![
+            Piece::Command { action: Action::NewFolder, icon: IconChoice::Auto },
+            Piece::Separator,
+            Piece::Command { action: Action::Paste, icon: IconChoice::Auto },
+        ];
+        let lay = column(400, 0, &pieces);
+        assert_eq!(lay.separators.len(), 1);
+        let sep = lay.separators[0];
+        assert_eq!(sep.bottom - sep.top, 1);
+        assert_eq!(sep.right - sep.left, 32);
+        assert!(sep.top >= lay.commands[0].bottom);
+        assert!(sep.bottom <= lay.commands[1].top);
+        assert_eq!(sep.left, lay.commands[0].left);
     }
 
     #[test]

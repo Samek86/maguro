@@ -320,9 +320,9 @@ pub(crate) unsafe fn relayout() {
         // The last letters hide first so a minimum tab stays clear of the group.
         // The gear and the tab list stay when the toolbar is off; the other icons and the letters do not.
         let icons = icon_slots(g.w, btn_top, a.dpi, drive_slots(a.s.drive_buttons, a.drives.len()), show_bar);
-        // Command toolbar uses tab_w (left of the tab list). It stays up when the right icons are hidden.
-        // Horizontal tabs keep this row for the tab strip, so the command bar is not placed.
-        let cmd_bar = (icons.tab_w, btn_top, a.dpi, a.s.vertical_tabs);
+        // Vertical tabs: the command bar uses tab_w on this row. Horizontal tabs: the same
+        // buttons move to the left column, under this row, so they do not cover the tabs.
+        let cmd_bar = crate::toolbar::bar_origin(a);
         moves.push((tb(ID_TB_LIST), icons.list));
         for (id, r) in icons.icons {
             moves.push((tb(id), r));
@@ -358,8 +358,7 @@ pub(crate) unsafe fn relayout() {
     }) else {
         return;
     };
-    let (cmd_w, cmd_top, cmd_dpi, cmd_vertical) = cmd_bar;
-    for slot in crate::toolbar::moves(cmd_w, cmd_top, cmd_dpi, cmd_vertical) {
+    for slot in crate::toolbar::moves(&cmd_bar) {
         if let Ok(b) = GetDlgItem(Some(main), slot.id) {
             moves.push((b, slot.rect));
         }
@@ -376,7 +375,7 @@ pub(crate) unsafe fn relayout() {
     for (h, on) in &drive_vis {
         _ = ShowWindow(*h, if *on { SW_SHOW } else { SW_HIDE });
     }
-    for slot in crate::toolbar::moves(cmd_w, cmd_top, cmd_dpi, cmd_vertical) {
+    for slot in crate::toolbar::moves(&cmd_bar) {
         if let Ok(b) = GetDlgItem(Some(main), slot.id) {
             // A zero rect still takes the click. Hide every slot the layout did not place.
             _ = ShowWindow(b, if slot.show { SW_SHOWNA } else { SW_HIDE });
@@ -418,8 +417,8 @@ pub(crate) unsafe fn relayout() {
             _ = SetWindowPos(*h, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
     }
-    // Above the tab strip. Horizontal tabs hide these, so they do not cover the tabs.
-    for slot in crate::toolbar::moves(cmd_w, cmd_top, cmd_dpi, cmd_vertical) {
+    // Above the tab strip when the tabs are vertical. Horizontal tabs put these in the left column.
+    for slot in crate::toolbar::moves(&cmd_bar) {
         if slot.show {
             if let Ok(b) = GetDlgItem(Some(main), slot.id) {
                 _ = SetWindowPos(b, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
