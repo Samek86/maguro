@@ -603,7 +603,10 @@ pub(crate) unsafe fn draw_button(d: &DRAWITEMSTRUCT) {
         if marked {
             fill(dc, RECT { left: rc.left + s(7), top: rc.bottom - s(2), right: rc.right - s(7), bottom: rc.bottom }, accent);
         }
-        return text(dc, rc, &text_of(d.hwndItem), font, if marked { pal().text } else { fg }, DT_CENTER);
+        // Caps sit high next to the line icons. One DIP lowers the letter without touching the underline.
+        let drop = s(1);
+        let letter = RECT { top: rc.top + drop, bottom: rc.bottom + drop, ..rc };
+        return text(dc, letter, &text_of(d.hwndItem), font, if marked { pal().text } else { fg }, DT_CENTER);
     }
     if id == ID_TB_LAYOUT {
         // the one label in the chrome: the current grid, after the 2×2 icon

@@ -946,11 +946,26 @@ pub(crate) enum Key {
     ToolbarView,
     ToolbarOverflow,
     ToolbarChange,
+    ToolbarEdit,
+    ToolbarEditHint,
+    ToolbarRestore,
+    ToolbarRestoreAsk,
+    ToolbarDone,
+    ToolbarSeparator,
+    ToolbarZoom,
+    ToolbarSplitRight,
+    ToolbarSplitBelow,
+    ToolbarOpen,
+    ToolbarPaneColor,
+    ToolbarTerminal,
+    ToolbarIconDefault,
+    ToolbarIconSet,
+    ToolbarCopyPath,
 }
 
-pub(crate) const KEY_COUNT: usize = 941;
+pub(crate) const KEY_COUNT: usize = 956;
 
-const _: () = assert!((Key::ToolbarChange as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::ToolbarCopyPath as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1894,6 +1909,21 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "View",
     "More commands",
     "Change",
+    "Customize Toolbar",
+    "Drag an icon onto the bar. Drag one off the bar to remove it.",
+    "Use Default Set",
+    "Restore the original commands?",
+    "Done",
+    "Separator",
+    "Zoom",
+    "Duplicate pane to the right",
+    "Duplicate pane below",
+    "Open",
+    "Pane colour",
+    "Open Terminal",
+    "Default",
+    "Choose",
+    "Copy path",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2839,4 +2869,19 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "toolbar_view",
     "toolbar_overflow",
     "toolbar_change",
+    "toolbar_edit",
+    "toolbar_edit_hint",
+    "toolbar_restore",
+    "toolbar_restore_ask",
+    "toolbar_done",
+    "toolbar_separator",
+    "toolbar_zoom",
+    "toolbar_split_right",
+    "toolbar_split_below",
+    "toolbar_open",
+    "toolbar_pane_color",
+    "toolbar_terminal",
+    "toolbar_icon_default",
+    "toolbar_icon_set",
+    "toolbar_copy_path",
 ];

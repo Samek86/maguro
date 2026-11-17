@@ -144,7 +144,8 @@ pub(crate) const OUTER_PAD_DIP: i32 = 8;
 pub(crate) const PLATE_GAP_DIP: i32 = 4;
 
 /// Command column when window tabs are on the top row. Icon only, not the 180 DIP tab strip.
-pub(crate) const CMD_COL_DIP: i32 = 40;
+/// Same width as the tool button, so the column has no side margin.
+pub(crate) const CMD_COL_DIP: i32 = 30;
 
 pub(crate) fn command_col_px(dpi: i32) -> i32 {
     CMD_COL_DIP * dpi.max(1) / 96
@@ -1620,20 +1621,20 @@ mod tests {
     #[test]
     fn client_min_is_the_current_layout_plus_chrome() {
         // 2×2, tree, toolbar, status, 96 dpi.
-        // side 120 + gap 4 + command column 40 + gap 4 + two panes 280 + gap 4 + pad 8 = 460.
+        // side 120 + gap 4 + command column 30 + gap 4 + two panes 280 + gap 4 + pad 8 = 450.
         // Height is the tab strip, two panes, one 4px gap, and the status line: 32 + 244 + 24.
-        assert_eq!(client_min(&[2, 2], 96, true, true, false), (460, 300));
+        assert_eq!(client_min(&[2, 2], 96, true, true, false), (450, 300));
         // one pane, no tree, toolbar hidden: the gear row is still wider than the pane plus the column.
-        // 96 dpi: tab reserve 116 + gap 4 + list 32 + gap 4 + gear 32 + pad 8 = 196.
+        // 96 dpi: tab reserve 116 + gap 2 + list 30 + gap 2 + gear 30 + pad 8 = 188.
         // Height is the tab strip, one pane, and the status line: 32 + 120 + 24. No plate gap in that sum.
-        assert_eq!(client_min(&[1], 96, false, false, false), (196, 176));
+        assert_eq!(client_min(&[1], 96, false, false, false), (188, 176));
         let (w, h) = client_min(&[1, 1, 1], 192, false, true, false);
         // Preview adds one gap and the 280 DIP plate.
-        // 120+4+40+4 + two panes 280 + gap 4 + pad 8 + gap 4 + preview 280 = 744.
-        assert_eq!(client_min(&[2, 2], 96, true, true, true), (744, 300));
-        // Three columns at 192 DPI. The command column is 80, then a gap of 8, three panes, and the pad: 960.
+        // 120+4+30+4 + two panes 280 + gap 4 + pad 8 + gap 4 + preview 280 = 734.
+        assert_eq!(client_min(&[2, 2], 96, true, true, true), (734, 300));
+        // Three columns at 192 DPI. The command column is 60, then a gap of 8, three panes, and the pad: 940.
         // One row, so the height does not include a plate gap: 64 + 240 + 48.
-        assert_eq!((w, h), (960, 352));
+        assert_eq!((w, h), (940, 352));
         assert_eq!((pane_min_w(96), pane_min_h(96), pane_min_w(192), pane_min_h(144)), (140, 120, 280, 180));
     }
 
@@ -1882,10 +1883,10 @@ mod tests {
         assert_eq!(grid_left(180, 0, 4, 8), 184);
         assert_eq!(grid_left(0, 0, 4, 8), 8, "no left plate: the outer pad stays 8");
         // Horizontal tabs pass the command column in place of a vertical strip.
-        assert_eq!(command_col_px(96), 40);
-        assert_eq!(command_col_px(192), 80);
-        assert_eq!(grid_left(command_col_px(96), 0, 4, 8), 44);
-        assert_eq!(grid_left(command_col_px(96), 240, 4, 8), 288);
+        assert_eq!(command_col_px(96), 30);
+        assert_eq!(command_col_px(192), 60);
+        assert_eq!(grid_left(command_col_px(96), 0, 4, 8), 34);
+        assert_eq!(grid_left(command_col_px(96), 240, 4, 8), 278);
         let col = Geo {
             w: 1000,
             h: 800,

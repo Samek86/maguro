@@ -2194,7 +2194,7 @@ unsafe fn open_pane_in_explorer(i: usize) {
 
 /// New column to the right, or new row under this pane. The new pane shows this folder
 /// with the same sort, column widths and view, and an empty back/forward list.
-unsafe fn header_split(i: usize, below: bool) {
+pub(crate) unsafe fn header_split(i: usize, below: bool) {
     let plan = app(|a| {
         if i >= a.s.panes() {
             return None;
@@ -2214,7 +2214,7 @@ unsafe fn header_split(i: usize, below: bool) {
 }
 
 /// Remove this pane. The active pane follows it to a neighbour; every other pane keeps its folder.
-unsafe fn header_close(i: usize) {
+pub(crate) unsafe fn header_close(i: usize) {
     let plan = app(|a| {
         if i >= a.s.panes() {
             return None;

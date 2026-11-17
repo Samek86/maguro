@@ -24,5 +24,10 @@ pub(crate) use fav::*;
 pub(crate) use itemopen::*;
 pub(crate) use fastcopy::apply_fast_note;
 pub(crate) use fileop::*;
+pub(crate) use termadmin::open_here;
+
+pub(crate) fn terminal_dir(shown: &str) -> Option<String> {
+    termadmin::terminal_folder(true, shown, &[])
+}
 pub(crate) use gather::*;
 pub(crate) use pins::*;

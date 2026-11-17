@@ -13,6 +13,7 @@ mod favpanel;
 mod hovertip;
 mod favpop;
 mod itemdlg;
+pub(crate) mod toolbaredit;
 mod iconpick;
 mod srvdlg;
 mod keys;

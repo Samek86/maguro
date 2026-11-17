@@ -176,7 +176,9 @@ pub(crate) fn drive_slots(show: bool, n: usize) -> usize {
 /// Glyph button on the main-window tool row, width in DIP.
 /// Save, load, the star, the gear, drive letters, and the tab list share it.
 /// The layout button is wider because it also shows the grid. Height is [`BTN_H_TOOL`].
-pub(crate) const TOOL_ICON_W: i32 = 32;
+pub(crate) const TOOL_ICON_W: i32 = 30;
+/// Space between neighbouring icon buttons on the tab row, in DIP.
+pub(crate) const TOOL_ICON_GAP: i32 = 2;
 
 pub(crate) fn tool_icon_px(dpi: i32) -> (i32, i32) {
     let s = |v: i32| v * dpi / 96;
@@ -220,7 +222,7 @@ fn icon_on(bar: bool) -> [bool; ICON_N] {
 /// Drive letters are not part of this: they hide before the group does.
 pub(crate) fn icon_group_min(dpi: i32, bar: bool) -> i32 {
     let s = |v: i32| v * dpi / 96;
-    let (pad, gap) = (s(8), s(4));
+    let (pad, gap) = (s(8), s(TOOL_ICON_GAP));
     let on = icon_on(bar);
     let n_on = on.iter().filter(|v| **v).count() as i32;
     let icons_w = icon_widths(dpi).iter().zip(&on).filter(|(_, v)| **v).map(|(w, _)| *w).sum::<i32>() + gap * (n_on - 1).max(0);
@@ -236,7 +238,7 @@ pub(crate) fn icon_group_min(dpi: i32, bar: bool) -> i32 {
 pub(crate) fn icon_slots(row_w: i32, top: i32, dpi: i32, drives: usize, bar: bool) -> IconLay {
     let s = |v: i32| v * dpi / 96;
     let (icon_w, bh) = tool_icon_px(dpi);
-    let (pad, gap) = (s(8), s(4));
+    let (pad, gap) = (s(8), s(TOOL_ICON_GAP));
     let specs = [ID_TB_LAYOUT, ID_TB_SAVE, ID_TB_LOAD, ID_TB_FAV, ID_TB_BASKET, ID_TB_WATCH, ID_TB_SET];
     let widths = icon_widths(dpi);
     // The gear is the mouse path to settings, so a hidden toolbar still reserves its slot.
@@ -2094,26 +2096,26 @@ mod tests {
     fn icon_slots_stay_right_aligned_without_drives() {
         let lay = icon_slots(1000, 6, 96, 0, true);
         assert_eq!(lay.drive_n, 0);
-        assert_eq!(lay.tab_w, 666);
-        assert_eq!(lay.list, RECT { left: 670, top: 6, right: 702, bottom: 30 });
-        assert_eq!(lay.list.right + 4, lay.icons[0].1.left);
+        assert_eq!(lay.tab_w, 696);
+        assert_eq!(lay.list, RECT { left: 698, top: 6, right: 728, bottom: 30 });
+        assert_eq!(lay.list.right + 2, lay.icons[0].1.left);
         assert_eq!(lay.icons.map(|s| s.0), [ID_TB_LAYOUT, ID_TB_SAVE, ID_TB_LOAD, ID_TB_FAV, ID_TB_BASKET, ID_TB_WATCH, ID_TB_SET]);
-        assert_eq!(lay.icons[0].1, RECT { left: 706, top: 6, right: 776, bottom: 30 });
-        assert_eq!(lay.icons[1].1.left, 780);
+        assert_eq!(lay.icons[0].1, RECT { left: 730, top: 6, right: 800, bottom: 30 });
+        assert_eq!(lay.icons[1].1.left, 802);
         assert_eq!(lay.icons[GEAR].1.right, 992);
-        // Star, basket, watch, gear: 32px buttons, 4px gaps, one line.
+        // Star, basket, watch, gear: 30px buttons, 2px gaps, one line.
         assert_eq!(lay.icons[3].0, ID_TB_FAV);
         assert_eq!(lay.icons[4].0, ID_TB_BASKET);
         assert_eq!(lay.icons[5].0, ID_TB_WATCH);
-        assert_eq!(lay.icons[5].1.right + 4, lay.icons[GEAR].1.left);
+        assert_eq!(lay.icons[5].1.right + 2, lay.icons[GEAR].1.left);
         for i in 3..ICON_N {
-            assert_eq!(lay.icons[i].1.right - lay.icons[i].1.left, 32);
+            assert_eq!(lay.icons[i].1.right - lay.icons[i].1.left, 30);
             assert_eq!((lay.icons[i].1.top, lay.icons[i].1.bottom), (lay.icons[GEAR].1.top, lay.icons[GEAR].1.bottom));
         }
-        assert!(lay.icons.windows(2).all(|w| w[0].1.right + 4 == w[1].1.left));
+        assert!(lay.icons.windows(2).all(|w| w[0].1.right + 2 == w[1].1.left));
         assert_eq!(tab_area_width(1000, 96, true, 0), lay.tab_w);
-        // Hidden toolbar keeps the gear (right 992, 32px) and the gap in front of it.
-        assert_eq!(tab_area_width(1000, 96, false, 8), 920);
+        // Hidden toolbar keeps the gear (right 992, 30px) and the gap in front of it.
+        assert_eq!(tab_area_width(1000, 96, false, 8), 928);
     }
 
     #[test]
@@ -2136,14 +2138,14 @@ mod tests {
         let lay = icon_slots(1000, 4, 96, n, true);
         assert_eq!(lay.drive_n, n);
         assert_eq!(lay.icons, bare.icons);
-        assert_eq!(lay.drives[n - 1].right + 4, lay.icons[0].1.left);
-        assert_eq!(lay.list.right + 4, lay.drives[0].left);
-        assert_eq!(lay.tab_w, lay.list.left - 4);
+        assert_eq!(lay.drives[n - 1].right + 2, lay.icons[0].1.left);
+        assert_eq!(lay.list.right + 2, lay.drives[0].left);
+        assert_eq!(lay.tab_w, lay.list.left - 2);
         for i in 0..n {
-            assert_eq!(lay.drives[i].right - lay.drives[i].left, 32);
+            assert_eq!(lay.drives[i].right - lay.drives[i].left, 30);
             assert_eq!((lay.drives[i].top, lay.drives[i].bottom), (4, 28));
             if i > 0 {
-                assert_eq!(lay.drives[i - 1].right + 4, lay.drives[i].left);
+                assert_eq!(lay.drives[i - 1].right + 2, lay.drives[i].left);
             }
         }
         // One minimum tab, +, and ▾ (116px) stay clear of the buttons. Tabs paint only in tab_w.
@@ -2170,10 +2172,10 @@ mod tests {
         let hi = icon_slots(2000, 8, 192, n, true);
         assert_eq!(hi.drive_n, n);
         assert_eq!(hi.tab_w, lay.tab_w * 2);
-        assert_eq!(hi.drives[0].right - hi.drives[0].left, 64);
-        assert_eq!(hi.drives[n - 1].right + 8, hi.icons[0].1.left);
+        assert_eq!(hi.drives[0].right - hi.drives[0].left, 60);
+        assert_eq!(hi.drives[n - 1].right + 4, hi.icons[0].1.left);
         assert_eq!(tab_area_width(2000, 192, true, n), hi.tab_w);
-        assert_eq!(tab_area_width(2000, 192, false, n), 1840);
+        assert_eq!(tab_area_width(2000, 192, false, n), 1856);
     }
 
     #[test]
@@ -2207,8 +2209,8 @@ mod tests {
             assert_eq!(off.icons[i].1.left, off.icons[GEAR].1.left);
             assert_eq!(off.icons[i].1.right, off.icons[i].1.left);
         }
-        assert_eq!(off.list.right + 4, off.icons[GEAR].1.left);
-        assert_eq!(off.tab_w, off.list.left - 4);
+        assert_eq!(off.list.right + 2, off.icons[GEAR].1.left);
+        assert_eq!(off.tab_w, off.list.left - 2);
         assert!(off.tab_w > on.tab_w);
         assert_eq!(tab_area_width(1000, 96, false, 5), off.tab_w);
         assert_eq!(tab_area_width(1000, 96, true, 5), on.tab_w);
@@ -2216,8 +2218,8 @@ mod tests {
         let hi_on = icon_slots(2000, 8, 192, 5, true);
         let hi_off = icon_slots(2000, 8, 192, 5, false);
         assert_eq!(hi_off.icons[GEAR].1, hi_on.icons[GEAR].1);
-        assert_eq!(hi_off.list.right + 8, hi_off.icons[GEAR].1.left);
-        assert_eq!(hi_off.tab_w, hi_off.list.left - 8);
+        assert_eq!(hi_off.list.right + 4, hi_off.icons[GEAR].1.left);
+        assert_eq!(hi_off.tab_w, hi_off.list.left - 4);
         assert_eq!(tab_area_width(2000, 192, false, 5), hi_off.tab_w);
     }
 

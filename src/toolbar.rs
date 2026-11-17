@@ -4,9 +4,9 @@
 //! A file that cannot be parsed is left on disk and the default layout is used instead.
 //!
 //! Vertical window tabs draw the bar across the left of the top strip, inside `tab_w`.
-//! Horizontal window tabs draw the same buttons down a narrow left column (about 40px
+//! Horizontal window tabs draw the same buttons down a narrow left column (30px
 //! at 100%), where the vertical tab strip would sit. Buttons are icon-only.
-//! The pinned Change button does not open an editor in this version.
+//! The pinned Change button opens the customize window.
 
 use std::path::Path;
 
@@ -37,9 +37,26 @@ pub(crate) enum Action {
     ViewMode,
     Properties,
     Mark,
-    /// Pinned. A click does nothing until the editor exists.
+    /// Pinned. Opens the customize window.
     EditToolbar,
     Overflow,
+    /// Commands that are not already a pane-header button or a right-hand icon.
+    CopyPath,
+    BatchRename,
+    InvertSelection,
+    NewTab,
+    CloseTab,
+    DuplicateTab,
+    ShowHidden,
+    Zoom,
+    QuickLook,
+    PreviewPane,
+    SplitRight,
+    SplitBelow,
+    Open,
+    PaneColor,
+    ClosePane,
+    Terminal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +213,22 @@ pub(crate) fn command_id(action: Action) -> Option<&'static str> {
         Action::Properties => "file.properties",
         Action::Mark => "file.mark",
         Action::EditToolbar | Action::Overflow => return None,
+        Action::CopyPath => "file.path",
+        Action::BatchRename => "file.rename",
+        Action::InvertSelection => "file.invert",
+        Action::NewTab => "tab.new",
+        Action::CloseTab => "tab.close",
+        Action::DuplicateTab => "tab.dup",
+        Action::ShowHidden => "view.hidden",
+        Action::Zoom => "view.zoom",
+        Action::QuickLook => "view.peek",
+        Action::PreviewPane => "view.preview",
+        Action::SplitRight => "pane.split.right",
+        Action::SplitBelow => "pane.split.below",
+        Action::Open => "file.open",
+        Action::PaneColor => "pane.color",
+        Action::ClosePane => "pane.close",
+        Action::Terminal => "file.terminal",
     })
 }
 
@@ -209,6 +242,22 @@ pub(crate) fn action_of(id: &str) -> Option<Action> {
         "view.mode" => Action::ViewMode,
         "file.properties" => Action::Properties,
         "file.mark" => Action::Mark,
+        "file.path" => Action::CopyPath,
+        "file.rename" => Action::BatchRename,
+        "file.invert" => Action::InvertSelection,
+        "tab.new" => Action::NewTab,
+        "tab.close" => Action::CloseTab,
+        "tab.dup" => Action::DuplicateTab,
+        "view.hidden" => Action::ShowHidden,
+        "view.zoom" => Action::Zoom,
+        "view.peek" => Action::QuickLook,
+        "view.preview" => Action::PreviewPane,
+        "pane.split.right" => Action::SplitRight,
+        "pane.split.below" => Action::SplitBelow,
+        "file.open" => Action::Open,
+        "pane.color" => Action::PaneColor,
+        "pane.close" => Action::ClosePane,
+        "file.terminal" => Action::Terminal,
         _ => return None,
     })
 }
@@ -220,6 +269,16 @@ pub(crate) fn key_id(action: Action) -> Option<&'static str> {
         Action::NewFolder => Some("file.dir"),
         Action::NewFile => Some("file.new"),
         Action::Mark => Some("file.mark"),
+        Action::CopyPath => Some("file.path"),
+        Action::BatchRename => Some("file.rename"),
+        Action::InvertSelection => Some("file.invert"),
+        Action::NewTab => Some("tab.new"),
+        Action::CloseTab => Some("tab.close"),
+        Action::DuplicateTab => Some("tab.dup"),
+        Action::ShowHidden => Some("view.hidden"),
+        Action::Zoom => Some("view.zoom"),
+        Action::QuickLook => Some("view.peek"),
+        Action::PreviewPane => Some("view.preview"),
         _ => None,
     }
 }
@@ -245,6 +304,22 @@ pub(crate) fn label_key(action: Action) -> crate::Key {
         Action::Mark => crate::Key::MarkAsImportant,
         Action::EditToolbar => crate::Key::ToolbarChange,
         Action::Overflow => crate::Key::ToolbarOverflow,
+        Action::CopyPath => crate::Key::ToolbarCopyPath,
+        Action::BatchRename => crate::Key::BatchRename,
+        Action::InvertSelection => crate::Key::InvertSelection,
+        Action::NewTab => crate::Key::NewTab,
+        Action::CloseTab => crate::Key::CloseTab,
+        Action::DuplicateTab => crate::Key::DuplicateTab,
+        Action::ShowHidden => crate::Key::ShowHiddenFiles,
+        Action::Zoom => crate::Key::ToolbarZoom,
+        Action::QuickLook => crate::Key::QuickLook,
+        Action::PreviewPane => crate::Key::PreviewPane,
+        Action::SplitRight => crate::Key::ToolbarSplitRight,
+        Action::SplitBelow => crate::Key::ToolbarSplitBelow,
+        Action::Open => crate::Key::ToolbarOpen,
+        Action::PaneColor => crate::Key::ToolbarPaneColor,
+        Action::ClosePane => crate::Key::ClosePane,
+        Action::Terminal => crate::Key::ToolbarTerminal,
     }
 }
 
@@ -276,6 +351,22 @@ pub(crate) fn drawn_icon(action: Action, icon: &IconChoice) -> LineIcon {
         Action::Mark => LineIcon::Important,
         Action::EditToolbar => LineIcon::Edit,
         Action::Overflow => LineIcon::Chevrons,
+        Action::CopyPath => LineIcon::Copy,
+        Action::BatchRename => LineIcon::Rename,
+        Action::InvertSelection => LineIcon::Invert,
+        Action::NewTab => LineIcon::Add,
+        Action::CloseTab => LineIcon::Close,
+        Action::DuplicateTab => LineIcon::Duplicate,
+        Action::ShowHidden => LineIcon::Hidden,
+        Action::Zoom => LineIcon::ZoomIn,
+        Action::QuickLook => LineIcon::Preview,
+        Action::PreviewPane => LineIcon::SidebarLeft,
+        Action::SplitRight => LineIcon::Fwd,
+        Action::SplitBelow => LineIcon::Down,
+        Action::Open => LineIcon::OpenFolder,
+        Action::PaneColor => LineIcon::Tag,
+        Action::ClosePane => LineIcon::Del,
+        Action::Terminal => LineIcon::Terminal,
     }
 }
 
@@ -291,11 +382,9 @@ pub(crate) fn clipboard_pasteable(has_files: bool, has_picture: bool) -> bool {
 pub(crate) fn enabled(action: Action, input: &EnableInput) -> bool {
     match action {
         Action::NewFolder | Action::NewFile => input.folder_can_receive,
-        Action::DeleteSelection | Action::RenameInPlace | Action::Properties | Action::Mark => input.selection > 0,
+        Action::DeleteSelection | Action::RenameInPlace | Action::Properties | Action::Mark | Action::BatchRename | Action::InvertSelection | Action::QuickLook => input.selection > 0,
         Action::Paste => input.folder_can_receive && input.clipboard_pasteable,
-        Action::ViewMode | Action::Overflow => true,
-        // Present and clickable-looking. The handler does not open an editor.
-        Action::EditToolbar => true,
+        Action::ViewMode | Action::Overflow | Action::EditToolbar | Action::NewTab | Action::CloseTab | Action::DuplicateTab | Action::ShowHidden | Action::Zoom | Action::PreviewPane | Action::SplitRight | Action::SplitBelow | Action::Open | Action::PaneColor | Action::ClosePane | Action::Terminal | Action::CopyPath => true,
     }
 }
 
@@ -348,6 +437,126 @@ impl Doc {
         }
         serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_else(|_| "{\"version\":1,\"items\":[]}".into()) + "\n"
     }
+
+    pub(crate) fn current() -> Self {
+        state().doc.clone()
+    }
+
+    /// Write `toolbar.json` and use this layout on the bar.
+    pub(crate) fn install(self) -> bool {
+        if save(&file_path(), &self).is_err() {
+            return false;
+        }
+        state().doc = self;
+        true
+    }
+
+    pub(crate) fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
+    pub(crate) fn is_separator(&self, i: usize) -> bool {
+        matches!(self.items.get(i), Some(Item::Separator))
+    }
+
+    pub(crate) fn label_at(&self, i: usize) -> String {
+        match self.items.get(i) {
+            Some(Item::Command { action: Some(action), .. }) => crate::tr(label_key(*action)).to_string(),
+            Some(Item::Command { id, .. }) => id.clone(),
+            Some(Item::Separator) => crate::tr(crate::Key::ToolbarSeparator).to_string(),
+            Some(Item::Folder { path, .. }) => file_tail(path),
+            Some(Item::File { path, .. }) => file_tail(path),
+            Some(Item::Program { exe, .. }) => file_tail(exe),
+            Some(Item::Raw(_)) => String::new(),
+            None => String::new(),
+        }
+    }
+
+    pub(crate) fn glyph_at(&self, i: usize) -> Option<LineIcon> {
+        match self.items.get(i)? {
+            Item::Separator => None,
+            Item::Command { action: Some(action), icon, .. } => Some(drawn_icon(*action, icon)),
+            Item::Command { .. } => Some(LineIcon::NewFile),
+            Item::Folder { icon, .. } => Some(choice_icon(icon, LineIcon::OpenFolder)),
+            Item::File { icon, .. } => Some(choice_icon(icon, LineIcon::NewFile)),
+            Item::Program { icon, .. } => Some(choice_icon(icon, LineIcon::OpenIn)),
+            Item::Raw(_) => Some(LineIcon::NewFile),
+        }
+    }
+
+    pub(crate) fn insert_action(&mut self, at: usize, action: Action) {
+        let Some(id) = command_id(action) else { return };
+        let at = at.min(self.items.len());
+        self.items.insert(at, Item::Command { id: id.to_string(), action: Some(action), icon: IconChoice::Auto });
+    }
+
+    pub(crate) fn insert_separator(&mut self, at: usize) {
+        let at = at.min(self.items.len());
+        self.items.insert(at, Item::Separator);
+    }
+
+    pub(crate) fn remove_at(&mut self, i: usize) -> bool {
+        if i >= self.items.len() {
+            return false;
+        }
+        self.items.remove(i);
+        true
+    }
+
+    /// `to` is the index before the move. Dropping on the same gap is a no-op.
+    pub(crate) fn move_item(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.items.len() {
+            return false;
+        }
+        let to = to.min(self.items.len());
+        if from == to || from + 1 == to {
+            return false;
+        }
+        let item = self.items.remove(from);
+        let to = if to > from { to - 1 } else { to };
+        self.items.insert(to, item);
+        true
+    }
+
+    pub(crate) fn reset_default(&mut self) {
+        *self = Self::default_layout();
+    }
+
+    pub(crate) fn manual_icon(&self, i: usize) -> bool {
+        matches!(self.items.get(i), Some(Item::Command { icon: IconChoice::Manual { .. }, .. } | Item::Folder { icon: IconChoice::Manual { .. }, .. } | Item::File { icon: IconChoice::Manual { .. }, .. } | Item::Program { icon: IconChoice::Manual { .. }, .. }))
+    }
+
+    pub(crate) fn has_action(&self, action: Action) -> bool {
+        self.items.iter().any(|it| matches!(it, Item::Command { action: Some(found), .. } if *found == action))
+    }
+
+    /// `None` restores the command's automatic icon. A key selects a catalog icon.
+    pub(crate) fn set_pack(&mut self, i: usize, key: Option<&str>) {
+        let icon = match key {
+            None => IconChoice::Auto,
+            Some(k) => IconChoice::Manual { pack: Some(k.to_string()), file: None },
+        };
+        let Some(slot) = (match self.items.get_mut(i) {
+            Some(Item::Command { icon, .. } | Item::Folder { icon, .. } | Item::File { icon, .. } | Item::Program { icon, .. }) => Some(icon),
+            _ => None,
+        }) else {
+            return;
+        };
+        *slot = icon;
+    }
+}
+
+fn file_tail(path: &str) -> String {
+    path.rsplit(['\\', '/']).next().filter(|s| !s.is_empty()).unwrap_or(path).to_string()
+}
+
+fn choice_icon(icon: &IconChoice, auto: LineIcon) -> LineIcon {
+    if let IconChoice::Manual { pack: Some(key), .. } = icon {
+        if let Some(def) = crate::ui::icon_catalog::icon_by_key(key) {
+            return def.kind;
+        }
+    }
+    auto
 }
 
 impl Item {
@@ -492,7 +701,9 @@ pub(crate) fn layout(pieces: &[Piece], input: &LayIn) -> BarLay {
 /// Buttons across the top strip. Change sits at the right edge. Overflow sits just left of it.
 fn layout_row(pieces: &[Piece], input: &LayIn) -> BarLay {
     let dpi = input.dpi.max(1);
-    let (btn_w, btn_h, gap, pad) = button_metrics(dpi);
+    let (btn_w, btn_h, _, pad) = button_metrics(dpi);
+    // Horizontal neighbours sit 2 DIP apart. The vertical column keeps the 4 DIP gap.
+    let gap = scale(dpi, 2);
     let sep_w = scale(dpi, 1).max(1);
     if input.tab_w < btn_w {
         return BarLay::hidden_bar();
@@ -915,8 +1126,24 @@ unsafe fn run(owner: HWND, action: Action, doc: &Doc, lay: &BarLay, from: i32) {
         Action::ViewMode => crate::popup_view_modes(owner, pane, button_point(from)),
         Action::Properties => crate::show_selection_properties(pane),
         Action::Mark => crate::marks::toggle_pane(pane),
-        Action::EditToolbar => {}
+        Action::EditToolbar => crate::ui::toolbaredit::open(owner),
         Action::Overflow => popup_overflow(owner, doc, lay),
+        Action::CopyPath => crate::copy_location(pane),
+        Action::BatchRename => crate::rename::open_pane(pane),
+        Action::InvertSelection => crate::invert_selection(pane),
+        Action::NewTab => crate::new_tab(),
+        Action::CloseTab => crate::close_tab(app(|x| x.s.tab)),
+        Action::DuplicateTab => crate::duplicate_tab(app(|x| x.s.tab)),
+        Action::ShowHidden => crate::toggle_hidden(),
+        Action::Zoom => crate::toggle_zoom(),
+        Action::QuickLook => crate::open_peek(pane),
+        Action::PreviewPane => crate::toggle_preview(),
+        Action::SplitRight => crate::header_split(pane, false),
+        Action::SplitBelow => crate::header_split(pane, true),
+        Action::Open => open_folder_or_file(owner, pane, from),
+        Action::PaneColor => popup_pane_color(owner, from),
+        Action::ClosePane => crate::header_close(pane),
+        Action::Terminal => open_terminal(owner, pane),
     }
 }
 
@@ -933,6 +1160,54 @@ unsafe fn button_point(id: i32) -> POINT {
     } else {
         POINT { x: rc.right, y: rc.top }
     }
+}
+
+unsafe fn open_folder_or_file(owner: HWND, pane: usize, from: i32) {
+    let Ok(menu) = CreatePopupMenu() else { return };
+    let _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from(crate::tr(crate::Key::Folder)));
+    let _ = AppendMenuW(menu, MF_STRING, 2, &HSTRING::from(crate::tr(crate::Key::File)));
+    let pt = button_point(from);
+    let pick = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, None, owner, None).0 as usize;
+    _ = DestroyMenu(menu);
+    match pick {
+        1 => {
+            if let Some(path) = crate::pick_folder(owner) {
+                let _ = crate::navigate(pane, &path);
+            }
+        }
+        2 => {
+            if let Some(path) = crate::pick_files(owner).into_iter().next() {
+                let _ = ShellExecuteW(Some(owner), w!("open"), &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+            }
+        }
+        _ => {}
+    }
+}
+
+unsafe fn popup_pane_color(owner: HWND, from: i32) {
+    let Ok(menu) = CreatePopupMenu() else { return };
+    let _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from(crate::tr(crate::Key::None)));
+    for (k, &(_, label)) in crate::TAB_COLORS.iter().enumerate() {
+        let _ = AppendMenuW(menu, MF_STRING, (2 + k) as usize, &HSTRING::from(crate::tr(label)));
+    }
+    let pt = button_point(from);
+    let pick = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, None, owner, None).0 as usize;
+    _ = DestroyMenu(menu);
+    let tab = app(|a| a.s.tab);
+    match pick {
+        1 => crate::set_tab_color(tab, None),
+        n if n >= 2 && n - 2 < crate::TAB_COLORS.len() => crate::set_tab_color(tab, Some(crate::TAB_COLORS[n - 2].0)),
+        _ => {}
+    }
+}
+
+unsafe fn open_terminal(owner: HWND, pane: usize) {
+    let shown = crate::pane_parsing_name(pane);
+    let Some(dir) = crate::terminal_dir(&shown) else {
+        let _ = MessageBeep(MB_ICONWARNING);
+        return;
+    };
+    crate::open_here(owner, &dir);
 }
 
 /// Separator lines for the current bar. Empty when the bar is hidden or has no separators.
@@ -1169,14 +1444,14 @@ mod tests {
         assert_eq!(lay.commands.len(), 8);
         assert!(lay.hidden.is_empty());
         assert_eq!(lay.edit.right, 900);
-        assert_eq!(lay.edit.right - lay.edit.left, 32);
+        assert_eq!(lay.edit.right - lay.edit.left, 30);
         assert_eq!(lay.edit.bottom - lay.edit.top, 24);
         assert_eq!(lay.edit.top, 4);
         let mut prev = 0;
         for r in &lay.commands {
             assert!(r.left >= prev);
-            assert_eq!(r.right - r.left, 32);
-            assert!(r.right + 4 <= lay.edit.left, "command {:?} overlaps change {:?}", r, lay.edit);
+            assert_eq!(r.right - r.left, 30);
+            assert!(r.right + 2 <= lay.edit.left, "command {:?} overlaps change {:?}", r, lay.edit);
             prev = r.right;
         }
         let icons = crate::icon_slots(1400, 4, 96, 4, true);
@@ -1204,12 +1479,12 @@ mod tests {
         assert!(lay.shown);
         let over = lay.overflow.expect("overflow");
         assert_eq!(lay.edit.right, 200);
-        assert_eq!(over.right + 4, lay.edit.left);
-        assert_eq!(over.right - over.left, 32);
+        assert_eq!(over.right + 2, lay.edit.left);
+        assert_eq!(over.right - over.left, 30);
         assert!(lay.commands.len() < 8);
         assert!(!lay.hidden.is_empty());
         for r in &lay.commands {
-            assert!(r.right + 4 <= over.left);
+            assert!(r.right + 2 <= over.left);
             assert!(r.right < lay.edit.left);
         }
         assert_eq!(lay.commands.len() + lay.hidden.len(), 8);
@@ -1222,8 +1497,8 @@ mod tests {
         assert!(lay.overflow.is_none());
         assert_eq!(lay.commands.len(), 8);
         assert!(lay.hidden.is_empty());
-        assert_eq!(lay.edit.left, 4, "32px button centered in the 40px column");
-        assert_eq!(lay.edit.right - lay.edit.left, 32);
+        assert_eq!(lay.edit.left, 0, "30px button fills the 30px column");
+        assert_eq!(lay.edit.right - lay.edit.left, 30);
         assert_eq!(lay.edit.bottom - lay.edit.top, 24);
         assert_eq!(lay.edit.bottom, 32 + 700 - 4);
         assert!(lay.edit.top >= 32, "the column starts under the tab row");
@@ -1236,7 +1511,7 @@ mod tests {
             prev = r.bottom;
         }
         let beside = column(700, 244, &defaults());
-        assert_eq!(beside.edit.left, 248, "open side panel: column starts after the panel and the gap");
+        assert_eq!(beside.edit.left, 244, "open side panel: column starts after the panel and the gap");
         assert!(beside.commands.iter().all(|r| r.left >= 244));
     }
 
@@ -1247,7 +1522,7 @@ mod tests {
         let over = lay.overflow.expect("overflow");
         assert_eq!(over.bottom + 4, lay.edit.top);
         assert_eq!(over.left, lay.edit.left);
-        assert_eq!(over.right - over.left, 32);
+        assert_eq!(over.right - over.left, 30);
         assert!(lay.commands.len() < 8);
         assert!(!lay.hidden.is_empty());
         for r in &lay.commands {
@@ -1269,7 +1544,7 @@ mod tests {
         assert_eq!(lay.separators.len(), 1);
         let sep = lay.separators[0];
         assert_eq!(sep.bottom - sep.top, 1);
-        assert_eq!(sep.right - sep.left, 32);
+        assert_eq!(sep.right - sep.left, 30);
         assert!(sep.top >= lay.commands[0].bottom);
         assert!(sep.bottom <= lay.commands[1].top);
         assert_eq!(sep.left, lay.commands[0].left);
@@ -1293,7 +1568,7 @@ mod tests {
         let sep = lay.separators[0];
         assert!(sep.left >= lay.commands[0].right);
         assert!(sep.right <= lay.commands[1].left);
-        assert!(sep.right - sep.left < 32);
+        assert!(sep.right - sep.left < 30);
     }
 
     #[test]
@@ -1321,6 +1596,28 @@ mod tests {
         assert!(!folder_can_receive("shell:Recent", true));
         assert!(!folder_can_receive(r"D:\data", true));
         assert!(folder_can_receive(r"D:\data", false));
+    }
+
+    #[test]
+    fn edit_moves_inserts_and_restores_the_default_set() {
+        let mut doc = Doc::default_layout();
+        let n = doc.item_count();
+        assert!(n >= 2);
+        let first = doc.label_at(0);
+        assert!(!doc.move_item(0, 0));
+        assert!(!doc.move_item(0, 1));
+        assert!(doc.move_item(0, 2));
+        assert_ne!(doc.label_at(0), first);
+        assert_eq!(doc.label_at(1), first);
+        doc.insert_separator(1);
+        assert!(doc.is_separator(1));
+        assert!(doc.remove_at(1));
+        assert!(!doc.is_separator(1));
+        doc.insert_action(0, Action::Paste);
+        assert_eq!(doc.label_at(0), crate::tr(label_key(Action::Paste)));
+        doc.reset_default();
+        assert_eq!(doc.item_count(), n);
+        assert_eq!(doc.label_at(0), first);
     }
 
     #[test]

@@ -132,6 +132,35 @@ pub(crate) unsafe fn insert(menu: HMENU, verb_of: impl Fn(u32) -> String) {
     let _ = InsertMenuW(menu, anchor.at, flags | MF_BYPOSITION, ID_CTX_TERM as usize, &label);
 }
 
+/// Open a terminal in `folder` without asking for administrator.
+pub(crate) unsafe fn open_here(owner: HWND, folder: &str) {
+    if folder.is_empty() || !std::path::Path::new(folder).is_dir() {
+        let _ = MessageBeep(MB_ICONWARNING);
+        return;
+    }
+    let host = find_host();
+    let (file, params) = if let Some(wt) = host {
+        (wt, format!("-d {}", quote_arg(folder)))
+    } else {
+        ("cmd.exe".into(), format!("/s /k pushd {}", quote_arg(folder)))
+    };
+    let file = HSTRING::from(file.as_str());
+    let params = HSTRING::from(params.as_str());
+    let dir = HSTRING::from(folder);
+    let mut sei = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        hwnd: owner,
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        lpDirectory: PCWSTR(dir.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    if ShellExecuteExW(&mut sei).is_err() {
+        let _ = MessageBeep(MB_ICONWARNING);
+    }
+}
+
 pub(crate) unsafe fn launch(owner: HWND, folder: &str) {
     let host = find_host();
     let Some(spec) = admin_term(folder, host.as_deref()) else { return };
