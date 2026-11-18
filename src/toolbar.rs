@@ -453,7 +453,8 @@ pub(crate) fn enabled(action: Action, input: &EnableInput) -> bool {
     }
 }
 
-/// Accent paint for a toggle. `show_hidden` is the shell "show all objects" flag.
+/// Whether the command icon is drawn in the accent. The button fill stays the
+/// resting ground. `show_hidden` is the shell "show all objects" flag.
 pub(crate) fn command_toggled(action: Action, show_hidden: bool) -> bool {
     match action {
         Action::ShowHidden => show_hidden,
