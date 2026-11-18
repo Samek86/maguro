@@ -1343,6 +1343,37 @@ impl Drop for TipGuard {
     }
 }
 
+/// Puts the keyboard back if showing or hiding the tip moved it onto the tip.
+/// A button that is tracking a press keeps capture: moving focus then releases
+/// that capture and the click never becomes `BN_CLICKED`.
+struct TipFocus {
+    main: HWND,
+    prior: HWND,
+}
+
+impl Drop for TipFocus {
+    fn drop(&mut self) {
+        unsafe { keep_focus_off_tip(self.main, self.prior) }
+    }
+}
+
+unsafe fn keep_focus_off_tip(main: HWND, prior: HWND) {
+    if !GetCapture().0.is_null() {
+        return;
+    }
+    let tip = HWND(state().tip as *mut std::ffi::c_void);
+    let now = GetFocus();
+    if tip.0.is_null() || now != tip {
+        return;
+    }
+    let prior_ok = !prior.0.is_null() && prior != tip && IsWindow(Some(prior)).as_bool();
+    if prior_ok && !restore_list_after_toolbar(toolbar_seat_of(prior, main)) {
+        _ = SetFocus(Some(prior));
+        return;
+    }
+    restore_toolbar_focus(main);
+}
+
 fn track_info(owner: HWND, label: &HSTRING) -> TTTOOLINFOW {
     TTTOOLINFOW { cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32, uFlags: TTF_TRACK | TTF_ABSOLUTE, hwnd: owner, uId: TIP_TOOL, lpszText: PWSTR(label.as_ptr() as *mut u16), ..Default::default() }
 }
@@ -1364,8 +1395,13 @@ unsafe fn ensure_tip(owner: HWND) -> HWND {
         }
     }
     // TTS_ALWAYSTIP | TTS_NOPREFIX | TTS_NOANIMATE | TTS_NOFADE.
+    // WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW: a tracking tip is a popup owned by the
+    // main frame. Without those styles ShowWindow inside TTM_TRACKACTIVATE can make
+    // the tip the foreground window. SetFocus to the command button or the file
+    // list then fails, and the keyboard stays off the pane.
     let style = WS_POPUP | WINDOW_STYLE(0x01 | 0x02 | 0x10 | 0x20);
-    let Ok(tip) = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, None, style, 0, 0, 0, 0, Some(owner), None, None, None) else {
+    let ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    let Ok(tip) = CreateWindowExW(ex, TOOLTIPS_CLASSW, None, style, 0, 0, 0, 0, Some(owner), None, None, None) else {
         return HWND::default();
     };
     crate::set_tip_font(tip);
@@ -1431,6 +1467,9 @@ unsafe fn apply_tip(main: HWND, next: Option<LiveTip>) {
         return;
     }
     let _guard = TipGuard;
+    // Drop runs while TIP_BUSY is still set, so a focus fix cannot re-enter the tip.
+    let prior = GetFocus();
+    let _back = TipFocus { main, prior };
     let live = state().live_tip.clone();
     match tip_step(live.as_ref(), next.as_ref()) {
         TipStep::Idle => return,
@@ -1514,7 +1553,14 @@ unsafe fn cmd_btn_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usi
         }
         _ => {}
     }
-    DefSubclassProc(h, msg, wp, lp)
+    let result = DefSubclassProc(h, msg, wp, lp);
+    // Mouse-down gives the button focus and capture. Moving focus before the
+    // button finishes the click releases that capture, so `BN_CLICKED` never
+    // arrives. Restore only after the click, the menu, or the dialog returns.
+    if matches!(msg, WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_KEYUP) {
+        restore_toolbar_focus(GetParent(h).unwrap_or_default());
+    }
+    result
 }
 
 /// Mouse moves over a disabled command button are delivered to the main window.
@@ -1568,51 +1614,132 @@ pub(crate) unsafe fn remove_clipboard(main: HWND) {
 
 /// Where the keyboard is when a toolbar action returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ToolbarFocus {
+pub(crate) enum FocusSeat {
     /// A command button, More, Change, or a child of one of those.
     Toolbar,
-    /// A dialog, the address bar, rename, or some other window.
+    /// The main frame itself. A menu or a dialog often returns focus here,
+    /// and a failed `SetFocus` on the button lands here too.
+    Frame,
+    /// The toolbar's tracking tooltip took the keyboard.
+    Tooltip,
+    /// `GetFocus` is null or the window is gone.
+    Lost,
+    /// A dialog, the address bar, rename, the editor, or some other window.
     Elsewhere,
 }
 
-/// The file list gets the keyboard back only while the toolbar still has it.
-/// The toolbar editor, Settings, Properties, rename, and the address bar keep
-/// whatever focus they took.
-pub(crate) fn restore_list_after_toolbar(focus: ToolbarFocus) -> bool {
-    matches!(focus, ToolbarFocus::Toolbar)
+/// One window on the parent walk from `GetFocus` toward the main frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FocusHop {
+    pub id: i32,
+    pub parent_is_main: bool,
+    pub is_main: bool,
+    pub is_tooltip: bool,
+}
+
+/// The file list gets the keyboard back when nothing the action opened still
+/// has it. The toolbar editor, Settings, Properties, rename, and the address
+/// bar are [`FocusSeat::Elsewhere`] and keep focus. The top strip and the left
+/// column use the same control ids, and More runs inside the same command, so
+/// one decision covers both bars and the overflow menu.
+pub(crate) fn restore_list_after_toolbar(seat: FocusSeat) -> bool {
+    matches!(seat, FocusSeat::Toolbar | FocusSeat::Frame | FocusSeat::Tooltip | FocusSeat::Lost)
+}
+
+/// `hops` is `GetFocus`, then each parent, including the main frame when the
+/// walk reaches it. A command slot, More, and Change count only when that
+/// window's parent is the main frame, so a dialog that reuses a command id
+/// does not. Reaching the frame from any other window keeps focus there.
+pub(crate) fn seat_from_chain(hops: &[FocusHop]) -> FocusSeat {
+    let Some(first) = hops.first() else {
+        return FocusSeat::Lost;
+    };
+    if first.is_tooltip {
+        return FocusSeat::Tooltip;
+    }
+    if first.is_main {
+        return FocusSeat::Frame;
+    }
+    for hop in hops {
+        if hop.is_main {
+            return FocusSeat::Elsewhere;
+        }
+        if hop.parent_is_main && is_command_control(hop.id) {
+            return FocusSeat::Toolbar;
+        }
+    }
+    FocusSeat::Elsewhere
 }
 
 /// One window on the parent walk. `id` is that window's control id.
-/// `parent_is_main` is true only when its parent is the main frame, so a dialog
-/// that reuses a command id is not the toolbar. A command slot, More, and Change
-/// all count. The top strip and the left column use the same ids.
-pub(crate) fn toolbar_focus_from(id: i32, parent_is_main: bool) -> ToolbarFocus {
-    if parent_is_main && is_command_control(id) {
-        ToolbarFocus::Toolbar
-    } else {
-        ToolbarFocus::Elsewhere
+/// `parent_is_main` is true only when its parent is the main frame.
+#[cfg(test)]
+pub(crate) fn toolbar_focus_from(id: i32, parent_is_main: bool) -> FocusSeat {
+    seat_from_chain(&[FocusHop { id, parent_is_main, is_main: false, is_tooltip: false }])
+}
+
+fn focus_hop(h: HWND, main: HWND, tip: HWND) -> FocusHop {
+    FocusHop {
+        id: unsafe { GetDlgCtrlID(h) },
+        parent_is_main: unsafe { GetParent(h).unwrap_or_default() == main },
+        is_main: h == main,
+        is_tooltip: !tip.0.is_null() && h == tip,
     }
 }
 
-/// `GetFocus` after the action. Null, or a window that is not a toolbar button
-/// (or a child of one), is [`ToolbarFocus::Elsewhere`].
-unsafe fn toolbar_focus_now(main: HWND) -> ToolbarFocus {
-    let focus = GetFocus();
+/// `GetFocus` after the action, walked up to the main frame.
+unsafe fn toolbar_seat_of(focus: HWND, main: HWND) -> FocusSeat {
     if main.0.is_null() || focus.0.is_null() || !IsWindow(Some(focus)).as_bool() {
-        return ToolbarFocus::Elsewhere;
+        return FocusSeat::Lost;
     }
+    let tip = HWND(state().tip as *mut std::ffi::c_void);
+    let mut hops = Vec::with_capacity(8);
     let mut h = focus;
     for _ in 0..8 {
-        if h.0.is_null() || h == main {
-            return ToolbarFocus::Elsewhere;
+        if h.0.is_null() {
+            break;
         }
-        let kind = toolbar_focus_from(GetDlgCtrlID(h), GetParent(h).unwrap_or_default() == main);
-        if kind == ToolbarFocus::Toolbar {
-            return kind;
+        let hop = focus_hop(h, main, tip);
+        let at_main = hop.is_main;
+        hops.push(hop);
+        if at_main {
+            break;
         }
         h = GetParent(h).unwrap_or_default();
     }
-    ToolbarFocus::Elsewhere
+    seat_from_chain(&hops)
+}
+
+unsafe fn toolbar_seat_now(main: HWND) -> FocusSeat {
+    toolbar_seat_of(GetFocus(), main)
+}
+
+thread_local! {
+    static FOCUS_BUSY: Cell<bool> = const { Cell::new(false) };
+}
+
+struct FocusGuard;
+impl Drop for FocusGuard {
+    fn drop(&mut self) {
+        FOCUS_BUSY.with(|c| c.set(false));
+    }
+}
+
+unsafe fn restore_toolbar_focus(main: HWND) {
+    if main.0.is_null() || FOCUS_BUSY.with(|c| c.replace(true)) {
+        return;
+    }
+    let _guard = FocusGuard;
+    if !restore_list_after_toolbar(toolbar_seat_now(main)) {
+        return;
+    }
+    // The tip used to become the foreground window. `SetFocus` onto the list
+    // only works while this frame is foreground.
+    let tip = HWND(state().tip as *mut std::ffi::c_void);
+    if !tip.0.is_null() && GetForegroundWindow() == tip {
+        _ = SetForegroundWindow(main);
+    }
+    crate::focus_view(app(|a| a.s.active));
 }
 
 pub(crate) unsafe fn command(owner: HWND, id: usize) -> bool {
@@ -1633,11 +1760,10 @@ pub(crate) unsafe fn command(owner: HWND, id: usize) -> bool {
     // the same buttons and the same `command` entry.
     run(owner, fired, &doc, &lay, id);
     // The button took focus on the click. Give it back to the active pane's
-    // list when it is still on the toolbar. A window or field the action
-    // opened (toolbar editor, properties, rename, address bar) keeps focus.
-    if restore_list_after_toolbar(toolbar_focus_now(owner)) {
-        crate::focus_view(app(|a| a.s.active));
-    }
+    // list unless the action left it on a field or a window it opened
+    // (toolbar editor, properties, rename, address bar). More's menu and the
+    // chosen command both return here, and the left column uses this entry.
+    restore_toolbar_focus(owner);
     true
 }
 
@@ -2106,28 +2232,77 @@ mod tests {
         assert!(sep.right - sep.left < 30);
     }
 
+    fn hop(id: i32, parent_is_main: bool) -> FocusHop {
+        FocusHop { id, parent_is_main, is_main: false, is_tooltip: false }
+    }
+
+    fn frame() -> FocusHop {
+        FocusHop { id: 0, parent_is_main: false, is_main: true, is_tooltip: false }
+    }
+
     #[test]
     fn list_focus_returns_only_while_the_toolbar_still_has_it() {
         // A click leaves focus on the button. More and Change are the same kind of control.
         // The left column and the top strip share these ids, so both bars use one rule.
         // A child of More is decided when the walk reaches More itself.
-        assert_eq!(toolbar_focus_from(ID_CMD_FIRST, true), ToolbarFocus::Toolbar);
-        assert_eq!(toolbar_focus_from(ID_CMD_FIRST + CMD_CAPACITY - 1, true), ToolbarFocus::Toolbar);
-        assert_eq!(toolbar_focus_from(ID_CMD_OVERFLOW, true), ToolbarFocus::Toolbar);
-        assert_eq!(toolbar_focus_from(ID_CMD_EDIT, true), ToolbarFocus::Toolbar);
+        assert_eq!(toolbar_focus_from(ID_CMD_FIRST, true), FocusSeat::Toolbar);
+        assert_eq!(toolbar_focus_from(ID_CMD_FIRST + CMD_CAPACITY - 1, true), FocusSeat::Toolbar);
+        assert_eq!(toolbar_focus_from(ID_CMD_OVERFLOW, true), FocusSeat::Toolbar);
+        assert_eq!(toolbar_focus_from(ID_CMD_EDIT, true), FocusSeat::Toolbar);
         assert!(restore_list_after_toolbar(toolbar_focus_from(ID_CMD_OVERFLOW, true)));
 
         // The address bar and the filter are not toolbar buttons. A dialog that
         // reuses a command id fails the main-frame parent check and keeps focus.
-        assert_eq!(toolbar_focus_from(ID_EDIT, true), ToolbarFocus::Elsewhere);
-        assert_eq!(toolbar_focus_from(ID_FILTER, false), ToolbarFocus::Elsewhere);
-        assert_eq!(toolbar_focus_from(ID_CMD_FIRST, false), ToolbarFocus::Elsewhere, "dialog reused a command id");
-        assert_eq!(toolbar_focus_from(ID_CMD_OVERFLOW, false), ToolbarFocus::Elsewhere);
-        assert_eq!(toolbar_focus_from(ID_CMD_FIRST - 1, true), ToolbarFocus::Elsewhere);
-        assert_eq!(toolbar_focus_from(ID_CMD_EDIT + 1, true), ToolbarFocus::Elsewhere);
-        assert!(!restore_list_after_toolbar(ToolbarFocus::Elsewhere));
+        assert_eq!(toolbar_focus_from(ID_EDIT, true), FocusSeat::Elsewhere);
+        assert_eq!(toolbar_focus_from(ID_FILTER, false), FocusSeat::Elsewhere);
+        assert_eq!(toolbar_focus_from(ID_CMD_FIRST, false), FocusSeat::Elsewhere, "dialog reused a command id");
+        assert_eq!(toolbar_focus_from(ID_CMD_OVERFLOW, false), FocusSeat::Elsewhere);
+        assert_eq!(toolbar_focus_from(ID_CMD_FIRST - 1, true), FocusSeat::Elsewhere);
+        assert_eq!(toolbar_focus_from(ID_CMD_EDIT + 1, true), FocusSeat::Elsewhere);
+        assert!(!restore_list_after_toolbar(FocusSeat::Elsewhere));
         assert!(!restore_list_after_toolbar(toolbar_focus_from(ID_EDIT, true)));
         assert!(!restore_list_after_toolbar(toolbar_focus_from(ID_CMD_FIRST, false)));
+    }
+
+    #[test]
+    fn frame_tooltip_and_lost_focus_return_to_the_list() {
+        // More's menu and a closed dialog return the keyboard to the frame, not the button.
+        // The tracking tip is a popup owned by that frame. Null focus is the same miss.
+        assert_eq!(seat_from_chain(&[frame()]), FocusSeat::Frame);
+        assert!(restore_list_after_toolbar(FocusSeat::Frame));
+        let tip = FocusHop { id: 0, parent_is_main: true, is_main: false, is_tooltip: true };
+        assert_eq!(seat_from_chain(&[tip, frame()]), FocusSeat::Tooltip);
+        assert!(restore_list_after_toolbar(FocusSeat::Tooltip));
+        assert_eq!(seat_from_chain(&[]), FocusSeat::Lost);
+        assert!(restore_list_after_toolbar(FocusSeat::Lost));
+        // A child of More is not itself a command id. The walk reaches More, then stops
+        // before the frame so the frame does not hide the button.
+        let child = hop(0, false);
+        let more = hop(ID_CMD_OVERFLOW, true);
+        assert_eq!(seat_from_chain(&[child, more, frame()]), FocusSeat::Toolbar);
+        assert!(restore_list_after_toolbar(seat_from_chain(&[more, frame()])));
+    }
+
+    #[test]
+    fn dialog_editor_and_rename_keep_focus() {
+        // Owned editor: not a command id, parent is the frame. The walk must stop
+        // at the frame instead of treating that as "focus is the frame".
+        let editor = hop(0, true);
+        assert_eq!(seat_from_chain(&[editor, frame()]), FocusSeat::Elsewhere);
+        assert!(!restore_list_after_toolbar(seat_from_chain(&[editor, frame()])));
+        // Address edit, then its pane, then the frame.
+        let addr = hop(ID_EDIT, false);
+        let pane = hop(0, true);
+        assert_eq!(seat_from_chain(&[addr, pane, frame()]), FocusSeat::Elsewhere);
+        // Inline rename sits under the shell view, not under a command button.
+        let rename = hop(0, false);
+        let view = hop(0, false);
+        assert_eq!(seat_from_chain(&[rename, view, pane, frame()]), FocusSeat::Elsewhere);
+        // A dialog that reused a command id, then its own frame, then our owner.
+        let reused = hop(ID_CMD_FIRST, false);
+        let dialog = hop(0, true);
+        assert_eq!(seat_from_chain(&[reused, dialog, frame()]), FocusSeat::Elsewhere);
+        assert!(!restore_list_after_toolbar(seat_from_chain(&[reused, dialog, frame()])));
     }
 
     #[test]
