@@ -242,6 +242,59 @@ pub(crate) fn command_tip_side(vertical_tabs: bool) -> crate::TipSide {
     }
 }
 
+/// Why the tracking tooltip is being reconsidered. Both bars share one bubble.
+/// The right-hand icon strip uses the shared subclassed tooltip, not this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TipCause {
+    /// Pointer moved onto a command button.
+    Hover,
+    /// Pointer left the command buttons.
+    Leave,
+    /// Mouse-down, or the instant before a command runs.
+    Press,
+    /// `WM_ACTIVATE` inactive or `WM_ACTIVATEAPP` false.
+    Inactive,
+    /// Focus left for a window other than the tooltip itself.
+    KillFocus,
+    /// The frame is minimizing.
+    Minimize,
+    /// The buttons were placed again.
+    Relayout,
+}
+
+/// What to tell the tooltip window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TipOrder {
+    Hide,
+    Show,
+}
+
+/// A tracking tip does not get `WM_MOUSELEAVE` after the foreground window changes,
+/// so the bubble stays up until the pointer comes back. Hide on press, inactivity,
+/// focus loss, minimize, and whenever the buttons are placed again. A hover shows
+/// only while the frame is in front, not iconic, and not holding a button press.
+/// The next move after a relayout shows it again if the pointer is still there.
+pub(crate) fn tip_order(cause: TipCause, active: bool, minimized: bool, over_button: bool, held: bool) -> TipOrder {
+    let may_show = active && !minimized && !held && over_button;
+    match cause {
+        TipCause::Hover if may_show => TipOrder::Show,
+        TipCause::Hover | TipCause::Relayout | TipCause::Leave | TipCause::Press | TipCause::Inactive | TipCause::KillFocus | TipCause::Minimize => TipOrder::Hide,
+    }
+}
+
+/// Focus moved onto the tooltip window. Leave the bubble up in that case: hiding
+/// would dismiss the tip the moment it took the keyboard. Every other destination
+/// drops it.
+pub(crate) fn tip_hides_on_focus(to_tooltip: bool) -> bool {
+    !to_tooltip
+}
+
+/// `TME_LEAVE` fires once. Arm it again while the pointer is on a command button
+/// and the frame is active, so the next leave still hides the bubble.
+pub(crate) fn tip_rearm_leave(over_button: bool, active: bool, minimized: bool) -> bool {
+    over_button && active && !minimized
+}
+
 struct State {
     doc: Doc,
     clip_pasteable: bool,
@@ -453,7 +506,8 @@ pub(crate) fn enabled(action: Action, input: &EnableInput) -> bool {
     }
 }
 
-/// Accent paint for a toggle. `show_hidden` is the shell "show all objects" flag.
+/// Whether the command icon is drawn in the accent. The button fill stays the
+/// resting ground. `show_hidden` is the shell "show all objects" flag.
 pub(crate) fn command_toggled(action: Action, show_hidden: bool) -> bool {
     match action {
         Action::ShowHidden => show_hidden,
@@ -1334,6 +1388,8 @@ fn logical_enabled_changed(id: i32, on: bool) -> bool {
 
 thread_local! {
     static TIP_BUSY: Cell<bool> = const { Cell::new(false) };
+    /// A dismiss arrived while a tip message was already on the stack.
+    static TIP_SUPPRESS: Cell<bool> = const { Cell::new(false) };
 }
 
 struct TipGuard;
@@ -1437,10 +1493,10 @@ unsafe fn command_button_at_cursor(main: HWND) -> Option<HWND> {
 }
 
 unsafe fn retip_under_cursor(main: HWND) {
-    if let Some(btn) = command_button_at_cursor(main) {
-        show_tip_for(btn);
-    } else {
-        apply_tip(main, None);
+    let over = command_button_at_cursor(main);
+    match want_tip(main, TipCause::Relayout, over.is_some()) {
+        TipOrder::Show => show_tip_for(over.unwrap_or_default()),
+        TipOrder::Hide => dismiss_tip(main),
     }
 }
 
@@ -1449,44 +1505,129 @@ unsafe fn show_tip_for(btn: HWND) {
         return;
     }
     let main = GetParent(btn).unwrap_or_default();
+    if want_tip(main, TipCause::Hover, true) != TipOrder::Show {
+        dismiss_tip(main);
+        return;
+    }
+    // One-shot. Arm on the show as well as the move, including a disabled slot
+    // whose move was delivered to the main window.
+    arm_leave(btn);
     let id = GetDlgCtrlID(btn);
     let Some((run, _)) = placed_slot(id) else {
-        apply_tip(main, None);
+        dismiss_tip(main);
         return;
     };
     let mut rc = RECT::default();
     if GetWindowRect(btn, &mut rc).is_err() || rc.right <= rc.left || rc.bottom <= rc.top {
-        apply_tip(main, None);
+        dismiss_tip(main);
         return;
     }
     apply_tip(main, Some(LiveTip { control: id, text: run_tip(&run), left: rc.left, top: rc.top, right: rc.right, bottom: rc.bottom }));
 }
 
+fn tip_window_flags(main: HWND) -> (bool, bool, bool) {
+    let cap = unsafe { GetCapture() };
+    let held = !cap.0.is_null() && is_command_control(unsafe { GetDlgCtrlID(cap) });
+    let active = !main.0.is_null() && unsafe { GetActiveWindow() } == main;
+    let minimized = !main.0.is_null() && unsafe { IsIconic(main) }.as_bool();
+    (active, minimized, held)
+}
+
+fn want_tip(main: HWND, cause: TipCause, over_button: bool) -> TipOrder {
+    let (active, minimized, held) = tip_window_flags(main);
+    tip_order(cause, active, minimized, over_button, held)
+}
+
+/// Hide when [`tip_order`] says this cause drops the bubble. Press, leave,
+/// deactivation, and minimize all do. A hover does not come through here.
+pub(crate) unsafe fn dismiss_for(main: HWND, cause: TipCause) {
+    let over = command_button_at_cursor(main).is_some();
+    if want_tip(main, cause, over) == TipOrder::Hide {
+        dismiss_tip(main);
+    }
+}
+
+/// `TTM_TRACKACTIVATE` false and `TTM_POP`, and forget which button was hovered.
+/// Safe to call again. A dismiss that lands inside a tip message is applied
+/// before that message shows the bubble.
+pub(crate) unsafe fn dismiss_tip(main: HWND) {
+    if main.0.is_null() {
+        return;
+    }
+    if TIP_BUSY.with(|c| c.replace(true)) {
+        TIP_SUPPRESS.with(|c| c.set(true));
+        state().live_tip = None;
+        return;
+    }
+    let _guard = TipGuard;
+    deactivate_tip(main);
+}
+
+unsafe fn deactivate_tip(main: HWND) {
+    let tip = HWND(state().tip as *mut std::ffi::c_void);
+    state().live_tip = None;
+    if !tip.0.is_null() && IsWindow(Some(tip)).as_bool() {
+        let label = HSTRING::new();
+        let ti = track_info(main, &label);
+        let lp = LPARAM(&ti as *const _ as isize);
+        SendMessageW(tip, TTM_TRACKACTIVATE, Some(WPARAM(0)), Some(lp));
+        SendMessageW(tip, TTM_POP, None, None);
+    }
+    // A dismiss that arrived from inside the pop has been honoured. The next hover may show.
+    TIP_SUPPRESS.with(|c| c.set(false));
+}
+
+/// Arm `TME_LEAVE` on the command button under the pointer when the frame is
+/// in front. Coming back from a terminal does not deliver the leave that was
+/// lost while Maguro was inactive.
+pub(crate) unsafe fn arm_tip_leave(main: HWND) {
+    let over = command_button_at_cursor(main);
+    let (active, minimized, _) = tip_window_flags(main);
+    if tip_rearm_leave(over.is_some(), active, minimized) {
+        arm_leave(over.unwrap_or_default());
+    }
+}
+
+/// Hide unless focus moved onto the tooltip window itself.
+pub(crate) unsafe fn note_focus_left(main: HWND, next: HWND) {
+    if main.0.is_null() {
+        return;
+    }
+    let tip = HWND(state().tip as *mut std::ffi::c_void);
+    let to_tip = !tip.0.is_null() && next == tip;
+    if tip_hides_on_focus(to_tip) {
+        dismiss_for(main, TipCause::KillFocus);
+    }
+}
+
 unsafe fn apply_tip(main: HWND, next: Option<LiveTip>) {
-    if main.0.is_null() || TIP_BUSY.with(|c| c.replace(true)) {
+    if main.0.is_null() {
+        return;
+    }
+    if TIP_BUSY.with(|c| c.replace(true)) {
+        if next.is_none() {
+            TIP_SUPPRESS.with(|c| c.set(true));
+        }
         return;
     }
     let _guard = TipGuard;
     // Drop runs while TIP_BUSY is still set, so a focus fix cannot re-enter the tip.
     let prior = GetFocus();
     let _back = TipFocus { main, prior };
+    if next.is_some() && TIP_SUPPRESS.with(|c| c.get()) {
+        deactivate_tip(main);
+        return;
+    }
     let live = state().live_tip.clone();
     match tip_step(live.as_ref(), next.as_ref()) {
-        TipStep::Idle => return,
-        TipStep::Hide => {
-            let tip = HWND(state().tip as *mut std::ffi::c_void);
-            state().live_tip = None;
-            if tip.0.is_null() {
-                return;
-            }
-            let label = HSTRING::new();
-            let ti = track_info(main, &label);
-            let lp = LPARAM(&ti as *const _ as isize);
-            SendMessageW(tip, TTM_TRACKACTIVATE, Some(WPARAM(0)), Some(lp));
-            SendMessageW(tip, TTM_POP, None, None);
-        }
+        TipStep::Idle => {}
+        TipStep::Hide => deactivate_tip(main),
         TipStep::Show => {
             let Some(next) = next else { return };
+            if TIP_SUPPRESS.with(|c| c.get()) {
+                deactivate_tip(main);
+                return;
+            }
             let tip = ensure_tip(main);
             if tip.0.is_null() {
                 return;
@@ -1512,7 +1653,12 @@ unsafe fn apply_tip(main: HWND, next: Option<LiveTip>) {
             let work = crate::tip_work_area(item);
             let (x, y) = crate::tip_place(item, tw, th, command_tip_side(vertical), work);
             SendMessageW(tip, TTM_TRACKPOSITION, None, Some(pack_xy(x, y)));
+            // Opening a terminal deactivates this frame from inside the activate call.
             SendMessageW(tip, TTM_TRACKACTIVATE, Some(WPARAM(1)), Some(lp));
+            if TIP_SUPPRESS.with(|c| c.get()) {
+                deactivate_tip(main);
+                return;
+            }
             state().live_tip = Some(next);
         }
     }
@@ -1531,22 +1677,34 @@ unsafe fn cmd_btn_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usi
     match msg {
         WM_MOUSEMOVE => {
             arm_leave(h);
-            show_tip_for(h);
+            // A press hides the bubble first. Moves while the button has capture
+            // used to show it again, and the command then never got a leave.
+            if GetCapture() != h {
+                show_tip_for(h);
+            }
         }
         WM_MOUSELEAVE => {
             let main = GetParent(h).unwrap_or_default();
             // A disabled neighbour does not receive this move. Hit-test includes it.
             if let Some(btn) = command_button_at_cursor(main) {
                 if btn != h {
+                    arm_leave(btn);
                     show_tip_for(btn);
                 }
             } else {
-                apply_tip(main, None);
+                dismiss_for(main, TipCause::Leave);
             }
         }
-        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDBLCLK | WM_MBUTTONDBLCLK => {
+            // Before the button takes capture and before the command runs. A move
+            // during the press must not put the bubble back: opening a terminal
+            // never delivers the leave.
             let main = GetParent(h).unwrap_or_default();
-            apply_tip(main, None);
+            dismiss_for(main, TipCause::Press);
+        }
+        WM_KILLFOCUS => {
+            let main = GetParent(h).unwrap_or_default();
+            note_focus_left(main, HWND(wp.0 as *mut std::ffi::c_void));
         }
         WM_NCDESTROY => {
             _ = RemoveWindowSubclass(h, Some(cmd_btn_proc), CMD_BTN_SUB);
@@ -1572,10 +1730,11 @@ unsafe fn cmd_main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: us
     if msg == WM_MOUSEMOVE {
         if let Some(btn) = command_button_at_cursor(h) {
             if !IsWindowEnabled(btn).as_bool() {
+                arm_leave(btn);
                 show_tip_for(btn);
             }
         } else if state().live_tip.is_some() {
-            apply_tip(h, None);
+            dismiss_for(h, TipCause::Leave);
         }
     }
     DefSubclassProc(h, msg, wp, lp)
@@ -1768,6 +1927,10 @@ pub(crate) unsafe fn command(owner: HWND, id: usize) -> bool {
 }
 
 unsafe fn run(owner: HWND, fired: Run, doc: &Doc, lay: &BarLay, from: i32) {
+    // Mouse-down already hid the bubble. Hide again here so a move during the
+    // click, and a command chosen from More, cannot leave it up. The terminal
+    // then takes the foreground and no leave arrives.
+    dismiss_for(owner, TipCause::Press);
     let pane = app(|a| a.s.active);
     match fired {
         Run::Folder(path) => open_saved_folder(pane, &path),
@@ -2507,6 +2670,34 @@ mod tests {
         assert_eq!(tip_step(Some(&tip(1, "Delete", 0)), Some(&tip(2, "Rename", 28))), TipStep::Show);
         assert_eq!(command_tip_side(true), crate::TipSide::Below);
         assert_eq!(command_tip_side(false), crate::TipSide::Right);
+    }
+
+    #[test]
+    fn tracking_tip_hides_when_the_click_or_the_foreground_leaves_the_button() {
+        let order = |cause, active, minimized, over, held| tip_order(cause, active, minimized, over, held);
+        assert_eq!(order(TipCause::Hover, true, false, true, false), TipOrder::Show);
+        // Still geometrically over the icon, but the terminal is now in front.
+        assert_eq!(order(TipCause::Hover, false, false, true, false), TipOrder::Hide);
+        assert_eq!(order(TipCause::Hover, true, true, true, false), TipOrder::Hide);
+        // Mouse-down has capture. A move during the click must not show the bubble.
+        assert_eq!(order(TipCause::Hover, true, false, true, true), TipOrder::Hide);
+        assert_eq!(order(TipCause::Hover, true, false, false, false), TipOrder::Hide);
+        assert_eq!(order(TipCause::Leave, true, false, false, false), TipOrder::Hide);
+        assert_eq!(order(TipCause::Press, true, false, true, true), TipOrder::Hide);
+        assert_eq!(order(TipCause::Inactive, false, false, true, false), TipOrder::Hide);
+        assert_eq!(order(TipCause::KillFocus, true, false, true, false), TipOrder::Hide);
+        assert_eq!(order(TipCause::Minimize, true, true, true, false), TipOrder::Hide);
+        // The bar moved. Hide even if the pointer is still on the button; the next
+        // move shows it at the new place. An inactive frame stays hidden.
+        assert_eq!(order(TipCause::Relayout, true, false, true, false), TipOrder::Hide);
+        assert_eq!(order(TipCause::Relayout, false, false, true, false), TipOrder::Hide);
+        assert_eq!(order(TipCause::Relayout, true, false, false, false), TipOrder::Hide);
+        assert!(tip_hides_on_focus(false));
+        assert!(!tip_hides_on_focus(true), "the bubble must not dismiss itself by taking focus");
+        assert!(tip_rearm_leave(true, true, false));
+        assert!(!tip_rearm_leave(false, true, false));
+        assert!(!tip_rearm_leave(true, false, false));
+        assert!(!tip_rearm_leave(true, true, true));
     }
 
     #[test]

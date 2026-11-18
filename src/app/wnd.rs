@@ -155,6 +155,9 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             // While the user drags the window edge, lay the panes out once at the end (same cost reason as splitters).
             WM_SIZE => {
                 let kind = wp.0 as u32;
+                if kind == SIZE_MINIMIZED {
+                    crate::toolbar::dismiss_for(h, crate::toolbar::TipCause::Minimize);
+                }
                 let sizing = app(|a| {
                     if kind != SIZE_MINIMIZED {
                         a.was_max = kind == SIZE_MAXIMIZED;
@@ -211,7 +214,9 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if wp.0 != 0 {
                     _ = PostMessageW(Some(h), WM_DRIVES, WPARAM(0), LPARAM(0));
                     resume_status_timer(h);
+                    crate::toolbar::arm_tip_leave(h);
                 } else {
+                    crate::toolbar::dismiss_for(h, crate::toolbar::TipCause::Inactive);
                     pause_status_timer(h);
                 }
             }
@@ -590,6 +595,12 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 // Back in front: refresh Explorer pins and favourite files if either group is open.
                 // Debounced in request_pins. One read fills both lists.
                 let (state, min) = ((wp.0 & 0xffff) as u32, (wp.0 >> 16) & 0xffff != 0);
+                // A tracking tip survives deactivation: the button never sees WM_MOUSELEAVE.
+                if state == WA_INACTIVE || min {
+                    crate::toolbar::dismiss_for(h, if min { crate::toolbar::TipCause::Minimize } else { crate::toolbar::TipCause::Inactive });
+                } else {
+                    crate::toolbar::arm_tip_leave(h);
+                }
                 if state != WA_INACTIVE {
                     app(|a| a.last_front = a.cur);
                     request_pins(false);
@@ -614,8 +625,13 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_SYSCOMMAND => {
                 if (wp.0 as u32) & 0xfff0 == SC_MINIMIZE {
+                    crate::toolbar::dismiss_for(h, crate::toolbar::TipCause::Minimize);
                     keep_focus(h);
                 }
+                return DefWindowProcW(h, msg, wp, lp);
+            }
+            WM_KILLFOCUS => {
+                crate::toolbar::note_focus_left(h, HWND(wp.0 as *mut std::ffi::c_void));
                 return DefWindowProcW(h, msg, wp, lp);
             }
             WM_TIMER if wp.0 == TIMER_FOCUS => {
