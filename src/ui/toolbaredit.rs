@@ -16,7 +16,6 @@ use crate::imports::*;
 use crate::toolbar::{Action, Doc};
 use crate::ui::tokens::px;
 
-const CLASS: &str = "MaguroToolbarEdit";
 const HIT_RESET: i32 = 1;
 const HIT_DONE: i32 = 2;
 const HIT_AUTO: i32 = 3;
@@ -30,6 +29,8 @@ const TIMER_EDGE: usize = 1;
 /// Client minimum, in DIP. `WM_GETMINMAXINFO` turns this into an outer size.
 const EDIT_MIN_W: i32 = 420;
 const EDIT_MIN_H: i32 = 360;
+/// Posted after the editor is on screen. Checking a saved path here must not run inside `ShowWindow`.
+const WM_TARGET_CHECK: u32 = WM_APP + 58;
 
 static LIVE: AtomicIsize = AtomicIsize::new(0);
 
@@ -87,6 +88,35 @@ fn visible_well(doc: &Doc) -> Vec<Well> {
             Well::Action(action) => !doc.has_action(*action),
         })
         .collect()
+}
+
+/// One bar entry as the editor paints it. Built from the saved document, including targets.
+struct EditorRow {
+    label: String,
+    tip: String,
+    icon: Option<crate::ui::LineIcon>,
+    path: Option<String>,
+    missing: bool,
+}
+
+fn editor_rows(doc: &Doc) -> Vec<EditorRow> {
+    (0..doc.item_count())
+        .map(|i| EditorRow {
+            label: doc.label_at(i),
+            tip: doc.item_tip(i),
+            icon: doc.glyph_at(i),
+            path: doc.target_path(i).map(str::to_string),
+            missing: doc.target_missing(i),
+        })
+        .collect()
+}
+
+fn overlaps(a: RECT, b: RECT) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+}
+
+fn contains_rect(outer: RECT, inner: RECT) -> bool {
+    inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right && inner.bottom <= outer.bottom
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,8 +212,68 @@ fn edge_delta(origin: i32, span: i32, pos: i32, zone: i32, step: i32) -> i32 {
     }
 }
 
+/// Client size at which the bar, the change-target row, every palette card, the icon
+/// settings, and the footer all sit fully inside the window and do not overlap.
+///
+/// Width is the footer row (restore, full-size icon segments, preview, done). Height is
+/// the smallest size `edit_layout` accepts for the whole catalog, with a target selected
+/// so the change row and the icon settings are both present.
 fn min_client(dpi: i32) -> (i32, i32) {
-    (px(dpi, EDIT_MIN_W), px(dpi, EDIT_MIN_H))
+    let w = footer_min_width(dpi).max(px(dpi, EDIT_MIN_W));
+    let n = catalog().len();
+    let mut lo = px(dpi, EDIT_MIN_H);
+    let mut hi = lo + palette_height_for(n, w, dpi) + px(dpi, 160);
+    if !client_fits(w, hi, dpi, n) {
+        return (w, hi);
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if client_fits(w, mid, dpi, n) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    (w, lo)
+}
+
+fn footer_min_width(dpi: i32) -> i32 {
+    let pad = px(dpi, 12);
+    let gap = px(dpi, 6);
+    let icons = px(dpi, 72) * 2 + px(dpi, 8) + px(dpi, BTN_H_FOOTER);
+    pad * 2 + px(dpi, 128) + px(dpi, 88) + gap * 2 + icons + px(dpi, 4)
+}
+
+fn palette_height_for(n: usize, client_w: i32, dpi: i32) -> i32 {
+    let inner = (client_w - px(dpi, 12) * 2).max(0);
+    well_content_height(n, well_cols(inner, dpi), dpi)
+}
+
+/// The tallest editor: a selected target (change row + icon settings) and every palette card.
+fn client_fits(w: i32, h: i32, dpi: i32, n: usize) -> bool {
+    let lay = edit_layout(w, h, dpi, true, true);
+    let client = RECT { left: 0, top: 0, right: w, bottom: h };
+    let bands = [lay.bar, lay.hint, lay.change, lay.well, lay.icons, lay.reset, lay.done];
+    if bands.iter().any(|r| !contains_rect(client, *r) || r.right <= r.left || r.bottom <= r.top) {
+        return false;
+    }
+    for (i, a) in bands.iter().enumerate() {
+        for b in bands.iter().skip(i + 1) {
+            if overlaps(*a, *b) {
+                return false;
+            }
+        }
+    }
+    let (auto, manual, preview) = icon_controls(lay.icons, dpi);
+    if auto.right - auto.left < px(dpi, 72) || manual.right - manual.left < px(dpi, 72) || preview.right <= preview.left || !contains_rect(lay.icons, auto) || !contains_rect(lay.icons, manual) || !contains_rect(lay.icons, preview) {
+        return false;
+    }
+    let (body, content) = well_body(lay.well, n, dpi);
+    let view = (lay.well.bottom - lay.well.top).max(0);
+    if content > view {
+        return false;
+    }
+    well_slots(body, n, dpi, 0).iter().all(|cell| contains_rect(lay.well, *cell) && contains_rect(client, *cell) && !overlaps(*cell, lay.reset) && !overlaps(*cell, lay.done) && !overlaps(*cell, lay.icons))
 }
 
 fn open_client(saved: Option<(i32, i32)>, dpi: i32) -> (i32, i32) {
@@ -426,6 +516,8 @@ struct View {
     last: (i32, i32),
     thumb: Option<ThumbDrag>,
     tip: Tip,
+    /// Parallel to `doc` items. Filled after the window is shown, so opening does not stat.
+    missing: Vec<bool>,
 }
 
 fn view(h: HWND) -> Option<*mut View> {
@@ -451,16 +543,35 @@ pub(crate) unsafe fn open(owner: HWND) {
     let (client_w, client_h) = open_client(remembered_size(), dpi);
     let (w, h) = outer_size(client_w, client_h, dpi);
     let (x, y) = center_on(owner, w, h);
-    let Ok(hwnd) = CreateWindowExW(WS_EX_DLGMODALFRAME, &HSTRING::from(CLASS), &HSTRING::from(crate::tr(crate::Key::ToolbarEdit)), edit_style(), x, y, w, h, Some(owner), None, None, None) else {
+    let Ok(hwnd) = CreateWindowExW(WS_EX_DLGMODALFRAME, w!("MaguroToolbarEdit"), &HSTRING::from(crate::tr(crate::Key::ToolbarEdit)), edit_style(), x, y, w, h, Some(owner), None, None, None) else {
         return;
     };
-    let dlg = Box::new(View { doc: Doc::current(), sel: None, hot: 0, down: 0, grab: None, drag: false, origin: (0, 0), insert: None, bar_scroll: 0, well_scroll: 0, last: (0, 0), thumb: None, tip: tip_new() });
+    let dlg = Box::new(View {
+        doc: Doc::current(),
+        sel: None,
+        hot: 0,
+        down: 0,
+        grab: None,
+        drag: false,
+        origin: (0, 0),
+        insert: None,
+        bar_scroll: 0,
+        well_scroll: 0,
+        last: (0, 0),
+        thumb: None,
+        tip: tip_new(),
+        missing: Vec::new(),
+    });
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(dlg) as isize);
     style_popup_chrome(hwnd);
     crate::note_side(hwnd);
     LIVE.store(hwnd.0 as isize, Ordering::Relaxed);
     let _ = ShowWindow(hwnd, SW_SHOW);
+    let _ = SetFocus(Some(hwnd));
     let _ = SetForegroundWindow(hwnd);
+    // Presence is resolved after the window is visible. Doing it inside ShowWindow's paint
+    // stalls on a disconnected drive and the editor never appears.
+    let _ = PostMessageW(Some(hwnd), WM_TARGET_CHECK, WPARAM(0), LPARAM(0));
 }
 
 fn dpi_of(owner: HWND) -> i32 {
@@ -501,8 +612,14 @@ fn ensure_class() {
         let Ok(m) = GetModuleHandleW(None) else {
             return;
         };
-        let name: Vec<u16> = CLASS.encode_utf16().chain(std::iter::once(0)).collect();
-        let _ = RegisterClassW(&WNDCLASSW { style: CS_HREDRAW | CS_VREDRAW, lpfnWndProc: Some(wnd_proc), hInstance: m.into(), hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(), lpszClassName: PCWSTR(name.as_ptr()), ..Default::default() });
+        let _ = RegisterClassW(&WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(wnd_proc),
+            hInstance: m.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            lpszClassName: w!("MaguroToolbarEdit"),
+            ..Default::default()
+        });
     });
 }
 
@@ -566,6 +683,10 @@ unsafe fn wnd_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         }
         WM_CAPTURECHANGED => {
             end_capture(h);
+            LRESULT(0)
+        }
+        WM_TARGET_CHECK => {
+            refresh_missing(h);
             LRESULT(0)
         }
         WM_KEYDOWN => {
@@ -881,6 +1002,7 @@ unsafe fn on_up(h: HWND, pt: (i32, i32)) {
                             (*v).sel = None;
                         }
                     }
+                    post_target_check(h);
                 }
             }
         }
@@ -951,6 +1073,7 @@ unsafe fn place_open(h: HWND, at: usize, folder: bool) {
     }
     (*v).sel = Some(at.min((*v).doc.item_count() - 1));
     reveal_sel(h);
+    post_target_check(h);
 }
 
 unsafe fn retarget(h: HWND) {
@@ -966,7 +1089,9 @@ unsafe fn retarget(h: HWND) {
         return;
     };
     let Some(v) = view(h) else { return };
-    let _ = (*v).doc.set_target_path(i, &path);
+    if (*v).doc.set_target_path(i, &path) {
+        post_target_check(h);
+    }
 }
 
 unsafe fn reveal_sel(h: HWND) {
@@ -987,6 +1112,7 @@ unsafe fn restore(h: HWND) {
         (*v).sel = None;
         (*v).bar_scroll = 0;
         (*v).well_scroll = 0;
+        post_target_check(h);
         let _ = InvalidateRect(Some(h), None, false);
     }
 }
@@ -1033,10 +1159,15 @@ unsafe fn hit_now(h: HWND, pt: (i32, i32)) -> i32 {
 }
 
 unsafe fn paint(h: HWND) {
+    if view(h).is_none() {
+        // Validate the update region. Returning from WM_PAINT without BeginPaint paints forever.
+        crate::buffered(h, |dc, rc| paint_window(dc, rc));
+        return;
+    }
     let g = refresh_geom(h);
     let dpi = g.dpi;
-    let (hot, down, doc, insert, sel) = match view(h) {
-        Some(v) => ((*v).hot, (*v).down, (*v).doc.clone(), (*v).insert, (*v).sel),
+    let (hot, down, doc, insert, sel, missing) = match view(h) {
+        Some(v) => ((*v).hot, (*v).down, (*v).doc.clone(), (*v).insert, (*v).sel, (*v).missing.clone()),
         None => return,
     };
     crate::buffered(h, |dc, rc| {
@@ -1058,7 +1189,7 @@ unsafe fn paint(h: HWND) {
                 let mid = (r.left + r.right) / 2;
                 fill(dc, RECT { left: mid, top: r.top + 4, right: mid + 1, bottom: r.bottom - 4 }, crate::ui_tokens().line);
             } else if let Some(kind) = doc.glyph_at(i) {
-                let fg = if doc.target_missing(i) { crate::blend(crate::ui_tokens().bg, crate::ui_tokens().sub, 0.45) } else { crate::ui_tokens().text };
+                let fg = if missing.get(i).copied().unwrap_or(false) { crate::blend(crate::ui_tokens().bg, crate::ui_tokens().sub, 0.45) } else { crate::ui_tokens().text };
                 draw_line_icon(dc, *r, kind, fg, dpi);
             }
         }
@@ -1083,7 +1214,7 @@ unsafe fn paint(h: HWND) {
             paint_button(dc, lay.change, ButtonKind::Secondary, visual_from_pointer(HIT_CHANGE, Some(hot).filter(|&h| h != 0), Some(down).filter(|&d| d != 0)), crate::tr(crate::Key::ToolbarChangeTarget), body, dpi, ground, FocusRing::Outside);
         }
         if lay.icons.bottom > lay.icons.top {
-            paint_icon_choice(dc, lay.icons, &doc, sel, hot, down, dpi);
+            paint_icon_choice(dc, lay.icons, &doc, sel, hot, down, dpi, sel.and_then(|i| missing.get(i).copied()).unwrap_or(false));
         }
         let shown = visible_well(&doc);
         let saved = SaveDC(dc);
@@ -1092,11 +1223,14 @@ unsafe fn paint(h: HWND) {
         }
         let small = meta_font();
         for (i, item) in shown.iter().enumerate() {
-            let Some(cell) = g.wells.get(i) else { continue };
+            let Some(cell) = g.wells.get(i).copied() else { continue };
+            if overlaps(cell, lay.reset) || overlaps(cell, lay.done) || (lay.icons.bottom > lay.icons.top && overlaps(cell, lay.icons)) {
+                continue;
+            }
             let id = WELL_BASE + i as i32;
-            paint_card(dc, *cell, dpi);
+            paint_card(dc, cell, dpi);
             if hot == id {
-                fill(dc, *cell, crate::ui_tokens().card);
+                fill(dc, cell, crate::ui_tokens().card);
             }
             let icon = RECT { left: cell.left + (cell.right - cell.left - px(dpi, 30)) / 2, top: cell.top + px(dpi, 2), right: 0, bottom: 0 };
             let icon = RECT { right: icon.left + px(dpi, 30), bottom: icon.top + px(dpi, 24), ..icon };
@@ -1120,6 +1254,22 @@ unsafe fn paint(h: HWND) {
         paint_button(dc, lay.reset, ButtonKind::Secondary, visual_from_pointer(HIT_RESET, Some(hot).filter(|&h| h != 0), Some(down).filter(|&d| d != 0)), crate::tr(crate::Key::ToolbarRestore), body, dpi, ground, FocusRing::Outside);
         paint_button(dc, lay.done, ButtonKind::Primary, visual_from_pointer(HIT_DONE, Some(hot).filter(|&h| h != 0), Some(down).filter(|&d| d != 0)), crate::tr(crate::Key::ToolbarDone), body, dpi, ground, FocusRing::Outside);
     });
+}
+
+unsafe fn refresh_missing(h: HWND) {
+    let Some(v) = view(h) else { return };
+    let rows = editor_rows(&(*v).doc);
+    (*v).missing = rows.iter().map(|row| row.missing).collect();
+    let _ = InvalidateRect(Some(h), None, false);
+}
+
+fn post_target_check(h: HWND) {
+    if let Some(v) = view(h) {
+        unsafe { (*v).missing.clear() };
+    }
+    unsafe {
+        let _ = PostMessageW(Some(h), WM_TARGET_CHECK, WPARAM(0), LPARAM(0));
+    }
 }
 
 unsafe fn paint_scroll(dc: HDC, thumb: &Thumb) {
@@ -1463,7 +1613,7 @@ unsafe fn pack_leave(h: HWND) {
     tip_hide(&mut (*p).tip, h);
 }
 
-unsafe fn paint_icon_choice(dc: HDC, band: RECT, doc: &Doc, sel: Option<usize>, hot: i32, down: i32, dpi: i32) {
+unsafe fn paint_icon_choice(dc: HDC, band: RECT, doc: &Doc, sel: Option<usize>, hot: i32, down: i32, dpi: i32, missing: bool) {
     let Some(i) = sel else { return };
     let (auto, manual, preview) = icon_controls(band, dpi);
     let manual_on = doc.manual_icon(i);
@@ -1483,7 +1633,7 @@ unsafe fn paint_icon_choice(dc: HDC, band: RECT, doc: &Doc, sel: Option<usize>, 
     if let Some(kind) = doc.glyph_at(i) {
         let inset = px(dpi, 4);
         let slot = RECT { left: preview.left + inset, top: preview.top + inset, right: preview.right - inset, bottom: preview.bottom - inset };
-        let fg = if doc.target_missing(i) { crate::blend(crate::ui_tokens().bg, crate::ui_tokens().sub, 0.45) } else { crate::ui_tokens().text };
+        let fg = if missing { crate::blend(crate::ui_tokens().bg, crate::ui_tokens().sub, 0.45) } else { crate::ui_tokens().text };
         draw_line_icon(dc, slot, kind, fg, dpi);
     }
 }
@@ -1714,16 +1864,105 @@ mod tests {
     }
 
     #[test]
-    fn the_editor_minimum_is_420_by_360_dip() {
-        assert_eq!(min_client(96), (420, 360));
-        assert_eq!(min_client(144), (630, 540));
+    fn the_editor_minimum_fits_every_palette_card_and_the_footer() {
         assert!(edit_style().0 & WS_THICKFRAME.0 != 0);
         assert!(edit_style().0 & WS_MAXIMIZEBOX.0 != 0);
-        let (w, h) = unsafe { outer_size(420, 360, 96) };
-        assert!(w >= 420, "{w}");
-        assert!(h >= 360, "{h}");
-        assert_eq!(open_client(None, 96), (560, 520));
-        assert_eq!(open_client(Some((100, 100)), 96), (420, 360));
-        assert_eq!(open_client(Some((800, 640)), 96), (800, 640));
+        let (w, h) = min_client(96);
+        assert_eq!((w, h), (436, 618), "the minimum rose above 420x360");
+        assert!(!client_fits(w, h - 1, 96, catalog().len()), "one pixel shorter clips a palette card");
+        assert_eq!(min_client(144), (w * 3 / 2, h * 3 / 2), "the minimum scales with DPI");
+        let (outer_w, outer_h) = unsafe { outer_size(w, h, 96) };
+        assert!(outer_w >= w && outer_h >= h);
+        assert_eq!(open_client(None, 96), (560.max(w), 520.max(h)));
+        assert_eq!(open_client(Some((100, 100)), 96), (w, h));
+        assert_eq!(open_client(Some((w + 80, h + 40)), 96), (w + 80, h + 40));
+
+        let doc = targets_only();
+        assert_no_overlap(&doc, w, h, 96);
+        assert_no_overlap(&Doc::default_layout(), w, h, 96);
+        let old = geom_of(&Doc::default_layout(), None, 0, 0, 420, 360, 96);
+        let folder = visible_well(&Doc::default_layout()).iter().position(|item| matches!(item, Well::OpenFolder)).unwrap();
+        assert!(overlaps(old.wells[folder], old.lay.reset) || !contains_rect(old.lay.well, old.wells[folder]), "420x360 still covers the open-folder card");
+    }
+
+    #[test]
+    fn editor_rows_keep_a_folder_target_and_a_missing_file() {
+        let dir = std::env::temp_dir().join(format!("maguro-edit-rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let folder = dir.join("box");
+        std::fs::create_dir_all(&folder).unwrap();
+        let folder_s = folder.to_str().unwrap().to_string();
+        let missing = dir.join("gone.txt");
+        let missing_s = missing.to_str().unwrap().to_string();
+        let json = format!(
+            "{{\"version\":1,\"items\":[{{\"type\":\"folder\",\"path\":{},\"icon\":{{\"mode\":\"auto\"}}}},{{\"type\":\"file\",\"path\":{},\"icon\":{{\"mode\":\"auto\"}}}}]}}",
+            serde_json::to_string(&folder_s).unwrap(),
+            serde_json::to_string(&missing_s).unwrap()
+        );
+        let doc = crate::toolbar::parse(json.as_bytes()).expect("config");
+        let rows = editor_rows(&doc);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].icon, Some(crate::ui::LineIcon::OpenFolder));
+        assert_eq!(rows[0].path.as_deref(), Some(folder_s.as_str()));
+        assert!(!rows[0].missing, "the folder is on disk");
+        assert!(rows[0].tip.contains(&folder_s));
+        assert_eq!(rows[1].icon, Some(crate::ui::LineIcon::PinFile));
+        assert_eq!(rows[1].label, "gone.txt");
+        assert_eq!(rows[1].path.as_deref(), Some(missing_s.as_str()));
+        assert!(rows[1].missing, "the file target is not on disk");
+        assert!(rows[1].tip.contains(&missing_s));
+        let shown = visible_well(&doc);
+        assert!(shown.iter().any(|item| matches!(item, Well::OpenFolder)));
+        assert!(shown.iter().any(|item| matches!(item, Well::OpenFile)));
+        let (w, h) = min_client(96);
+        assert_no_overlap(&doc, w, h, 96);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn targets_only() -> Doc {
+        let mut doc = crate::toolbar::parse(br#"{"version":1,"items":[]}"#).unwrap();
+        doc.insert_folder(0, r"D:\Work");
+        doc.insert_file(1, r"D:\missing\a.txt");
+        doc
+    }
+
+    fn assert_no_overlap(doc: &Doc, w: i32, h: i32, dpi: i32) {
+        let sel = (0..doc.item_count()).find(|&i| doc.is_folder_target(i) || doc.is_file_target(i));
+        let g = geom_of(doc, sel, 0, 0, w, h, dpi);
+        let lay = &g.lay;
+        let client = RECT { left: 0, top: 0, right: w, bottom: h };
+        let mut bands = vec![("bar", lay.bar), ("hint", lay.hint), ("well", lay.well), ("reset", lay.reset), ("done", lay.done)];
+        if sel.is_some() {
+            bands.push(("change", lay.change));
+            bands.push(("icons", lay.icons));
+        }
+        for (name, r) in &bands {
+            assert!(r.right > r.left && r.bottom > r.top, "{name} is empty at {w}x{h}");
+            assert!(contains_rect(client, *r), "{name} leaves the client {r:?}");
+        }
+        for (i, (an, a)) in bands.iter().enumerate() {
+            for (bn, b) in bands.iter().skip(i + 1) {
+                assert!(!overlaps(*a, *b), "{an} overlaps {bn}");
+            }
+        }
+        assert_eq!(g.well_max, 0, "the palette scrolls at the minimum");
+        let shown = visible_well(doc);
+        assert_eq!(g.wells.len(), shown.len());
+        for (i, cell) in g.wells.iter().enumerate() {
+            assert!(contains_rect(lay.well, *cell), "palette card {i} is clipped by the well");
+            assert!(contains_rect(client, *cell), "palette card {i} leaves the client");
+            assert!(!overlaps(*cell, lay.reset) && !overlaps(*cell, lay.done), "palette card {i} meets the footer");
+            if sel.is_some() {
+                assert!(!overlaps(*cell, lay.icons), "palette card {i} meets the icon settings");
+            }
+        }
+        if sel.is_some() {
+            let (auto, manual, preview) = icon_controls(lay.icons, dpi);
+            assert!(contains_rect(lay.icons, auto) && contains_rect(lay.icons, manual) && contains_rect(lay.icons, preview));
+            assert!(auto.right - auto.left >= px(dpi, 72) && manual.right - manual.left >= px(dpi, 72));
+        }
+        assert!(shown.iter().any(|item| matches!(item, Well::OpenFolder)));
+        assert!(shown.iter().any(|item| matches!(item, Well::OpenFile)));
     }
 }

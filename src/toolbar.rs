@@ -697,9 +697,63 @@ fn choice_icon(icon: &IconChoice, auto: LineIcon) -> LineIcon {
 }
 
 /// A preset the bar can open. Empty and missing paths are gray and beep instead of running.
+///
+/// `GetFileAttributes` on a disconnected mapping, an empty removable volume, or a UNC
+/// share stalls the UI thread or raises the system critical-error box. The editor used
+/// to do that while it was being shown, so the window never appeared. An unmounted
+/// letter is missing with no filesystem call. A UNC path or a cached remote drive is
+/// left enabled: probing it would bind the share.
 pub(crate) fn target_present(path: &str) -> bool {
     let path = path.trim();
-    !path.is_empty() && Path::new(path).exists()
+    if path.is_empty() || path.contains('\0') {
+        return false;
+    }
+    if path.starts_with(r"\\") || path.starts_with("//") {
+        return true;
+    }
+    if let Some(letter) = drive_letter(path) {
+        if !drive_mounted(letter) {
+            return false;
+        }
+        match cached_drive_type(letter) {
+            Some(1) => return false, // DRIVE_NO_ROOT_DIR
+            Some(4) => return true,  // DRIVE_REMOTE
+            _ => {}
+        }
+    }
+    exists_quiet(path)
+}
+
+fn cached_drive_type(letter: u8) -> Option<u32> {
+    crate::app_try(|a| a.drives.iter().find(|d| d.0 == letter).map(|d| d.1)).flatten()
+}
+
+fn drive_letter(path: &str) -> Option<u8> {
+    match path.as_bytes() {
+        [c, b':', ..] if c.is_ascii_alphabetic() => Some(c.to_ascii_uppercase()),
+        _ => None,
+    }
+}
+
+fn drive_mounted(letter: u8) -> bool {
+    if !(b'A'..=b'Z').contains(&letter) {
+        return false;
+    }
+    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+    if mask == 0 {
+        return true;
+    }
+    mask >> (letter - b'A') & 1 != 0
+}
+
+fn exists_quiet(path: &str) -> bool {
+    use windows::Win32::System::Diagnostics::Debug::{SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX};
+    unsafe {
+        let prev = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+        let ok = Path::new(path).try_exists().unwrap_or(false);
+        let _ = SetErrorMode(prev);
+        ok
+    }
 }
 
 /// Name, then the full path. One line when the name is already the whole path.
@@ -2377,6 +2431,27 @@ mod tests {
         doc.insert_folder(0, folder.join("gone").to_str().unwrap());
         assert!(doc.target_missing(0));
         assert!(!doc.target_missing(1));
+        assert!(target_present(r"\\server\share\folder"));
+        assert!(target_present("//server/share/file.txt"));
+        let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+        if mask != 0 {
+            if let Some(letter) = (b'A'..=b'Z').find(|c| mask >> (c - b'A') & 1 == 0) {
+                let path = format!("{}:\\no-such-maguro", letter as char);
+                assert!(!target_present(&path), "{path}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn change_still_opens_the_editor_when_the_bar_holds_targets() {
+        let mut doc = Doc::default_layout();
+        doc.insert_folder(0, r"D:\Work");
+        doc.insert_file(1, r"D:\Work\missing.txt");
+        let lay = placed(true, 1400, &doc.pieces());
+        assert!(lay.edit.live(), "Change stays on the bar");
+        let (run, icon) = slot_face(ID_CMD_EDIT, &doc, &lay).expect("Change");
+        assert_eq!(run, Run::Command(Action::EditToolbar));
+        assert_eq!(icon, LineIcon::Edit);
     }
 }
