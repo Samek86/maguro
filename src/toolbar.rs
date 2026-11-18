@@ -7,6 +7,8 @@
 //! Horizontal window tabs draw the same buttons down a narrow left column (30px
 //! at 100%), where the vertical tab strip would sit. Buttons are icon-only.
 //! The pinned Change button opens the customize window.
+//! A folder or file item opens that preset path. The old pick-at-click Open command
+//! is dropped when `toolbar.json` is read.
 
 use std::path::Path;
 
@@ -15,9 +17,7 @@ use serde_json::{Map, Value};
 use std::sync::OnceLock;
 
 use windows::Win32::System::DataExchange::{AddClipboardFormatListener, IsClipboardFormatAvailable, RemoveClipboardFormatListener};
-use windows::Win32::UI::Controls::{
-    TTF_ABSOLUTE, TTF_TRACK, TTM_GETBUBBLESIZE, TTM_POP, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION,
-};
+use windows::Win32::UI::Controls::{TTF_ABSOLUTE, TTF_TRACK, TTM_GETBUBBLESIZE, TTM_POP, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION};
 
 use crate::app::*;
 use crate::imports::*;
@@ -56,6 +56,7 @@ pub(crate) enum Action {
     PreviewPane,
     SplitRight,
     SplitBelow,
+    /// Retired. Old files name `file.open`; load drops that item. Preset targets replaced it.
     Open,
     PaneColor,
     ClosePane,
@@ -90,8 +91,29 @@ pub(crate) struct Doc {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Piece {
-    Command { action: Action, icon: IconChoice },
+    Command {
+        action: Action,
+        icon: IconChoice,
+    },
     Separator,
+    /// Open this folder in the active pane.
+    Folder {
+        path: String,
+        icon: IconChoice,
+    },
+    /// Open this file with the shell.
+    File {
+        path: String,
+        icon: IconChoice,
+    },
+}
+
+/// What one toolbar button runs. A target is a preset path, not a command id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Run {
+    Command(Action),
+    Folder(String),
+    File(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,15 +153,7 @@ pub(crate) struct BarLay {
 
 impl BarLay {
     fn hidden_bar() -> Self {
-        Self {
-            shown: false,
-            commands: Vec::new(),
-            command_at: Vec::new(),
-            separators: Vec::new(),
-            overflow: None,
-            edit: Px::empty(),
-            hidden: Vec::new(),
-        }
+        Self { shown: false, commands: Vec::new(), command_at: Vec::new(), separators: Vec::new(), overflow: None, edit: Px::empty(), hidden: Vec::new() }
     }
 }
 
@@ -171,15 +185,7 @@ pub(crate) struct Origin {
 
 impl Origin {
     fn lay_in(self) -> LayIn {
-        LayIn {
-            vertical_tabs: self.vertical_tabs,
-            tab_w: self.tab_w,
-            top: self.top,
-            bottom: self.bottom,
-            left: self.left,
-            dpi: self.dpi,
-            max_buttons: CMD_CAPACITY as usize,
-        }
+        LayIn { vertical_tabs: self.vertical_tabs, tab_w: self.tab_w, top: self.top, bottom: self.bottom, left: self.left, dpi: self.dpi, max_buttons: CMD_CAPACITY as usize }
     }
 }
 
@@ -229,7 +235,11 @@ pub(crate) fn tip_step(live: Option<&LiveTip>, next: Option<&LiveTip>) -> TipSte
 
 /// Horizontal bar (vertical tabs): below the icon. Left column: to the right of it.
 pub(crate) fn command_tip_side(vertical_tabs: bool) -> crate::TipSide {
-    if vertical_tabs { crate::TipSide::Below } else { crate::TipSide::Right }
+    if vertical_tabs {
+        crate::TipSide::Below
+    } else {
+        crate::TipSide::Right
+    }
 }
 
 struct State {
@@ -237,8 +247,8 @@ struct State {
     clip_pasteable: bool,
     /// Last logical enabled flag for each command id. The HWND stays enabled.
     enabled: Vec<(i32, bool)>,
-    /// Last action painted in each slot, so a re-layout that swaps commands repaints.
-    face: Vec<(i32, Option<Action>)>,
+    /// Last button painted in each slot, so a re-layout that swaps commands or targets repaints.
+    face: Vec<(i32, Option<(Run, LineIcon)>)>,
     tip: isize,
     tip_added: bool,
     live_tip: Option<LiveTip>,
@@ -246,18 +256,7 @@ struct State {
 
 fn state() -> std::sync::MutexGuard<'static, State> {
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
-    STATE
-        .get_or_init(|| Mutex::new(State {
-            doc: Doc::default_layout(),
-            clip_pasteable: false,
-            enabled: Vec::new(),
-            face: Vec::new(),
-            tip: 0,
-            tip_added: false,
-            live_tip: None,
-        }))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    STATE.get_or_init(|| Mutex::new(State { doc: Doc::default_layout(), clip_pasteable: false, enabled: Vec::new(), face: Vec::new(), tip: 0, tip_added: false, live_tip: None })).lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub(crate) fn command_id(action: Action) -> Option<&'static str> {
@@ -464,16 +463,7 @@ pub(crate) fn command_toggled(action: Action, show_hidden: bool) -> bool {
 
 impl Doc {
     pub(crate) fn default_layout() -> Self {
-        const ACTIONS: [Action; 8] = [
-            Action::NewFolder,
-            Action::NewFile,
-            Action::DeleteSelection,
-            Action::Paste,
-            Action::RenameInPlace,
-            Action::ViewMode,
-            Action::Properties,
-            Action::Mark,
-        ];
+        const ACTIONS: [Action; 8] = [Action::NewFolder, Action::NewFile, Action::DeleteSelection, Action::Paste, Action::RenameInPlace, Action::ViewMode, Action::Properties, Action::Mark];
         Self {
             items: ACTIONS
                 .into_iter()
@@ -487,18 +477,27 @@ impl Doc {
     }
 
     pub(crate) fn command_ids(&self) -> Vec<&str> {
-        self.items.iter().filter_map(|it| match it {
-            Item::Command { id, .. } => Some(id.as_str()),
-            _ => None,
-        }).collect()
+        self.items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Command { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     pub(crate) fn pieces(&self) -> Vec<Piece> {
-        self.items.iter().filter_map(|it| match it {
-            Item::Command { action: Some(action), icon, .. } => Some(Piece::Command { action: *action, icon: icon.clone() }),
-            Item::Separator => Some(Piece::Separator),
-            _ => None,
-        }).collect()
+        self.items
+            .iter()
+            .filter_map(|it| match it {
+                // `file.open` is retired. A file that still names it never becomes a button.
+                Item::Command { action: Some(action), icon, .. } if *action != Action::Open => Some(Piece::Command { action: *action, icon: icon.clone() }),
+                Item::Separator => Some(Piece::Separator),
+                Item::Folder { path, icon } => Some(Piece::Folder { path: path.clone(), icon: icon.clone() }),
+                Item::File { path, icon } => Some(Piece::File { path: path.clone(), icon: icon.clone() }),
+                _ => None,
+            })
+            .collect()
     }
 
     pub(crate) fn to_json(&self) -> String {
@@ -552,13 +551,16 @@ impl Doc {
             Item::Command { action: Some(action), icon, .. } => Some(drawn_icon(*action, icon)),
             Item::Command { .. } => Some(LineIcon::NewFile),
             Item::Folder { icon, .. } => Some(choice_icon(icon, LineIcon::OpenFolder)),
-            Item::File { icon, .. } => Some(choice_icon(icon, LineIcon::NewFile)),
+            Item::File { icon, .. } => Some(choice_icon(icon, LineIcon::PinFile)),
             Item::Program { icon, .. } => Some(choice_icon(icon, LineIcon::OpenIn)),
             Item::Raw(_) => Some(LineIcon::NewFile),
         }
     }
 
     pub(crate) fn insert_action(&mut self, at: usize, action: Action) {
+        if action == Action::Open {
+            return;
+        }
         let Some(id) = command_id(action) else { return };
         let at = at.min(self.items.len());
         self.items.insert(at, Item::Command { id: id.to_string(), action: Some(action), icon: IconChoice::Auto });
@@ -618,6 +620,67 @@ impl Doc {
         };
         *slot = icon;
     }
+
+    pub(crate) fn insert_folder(&mut self, at: usize, path: &str) {
+        self.insert_target(at, true, path);
+    }
+
+    pub(crate) fn insert_file(&mut self, at: usize, path: &str) {
+        self.insert_target(at, false, path);
+    }
+
+    fn insert_target(&mut self, at: usize, folder: bool, path: &str) {
+        let path = path.trim();
+        if path.is_empty() {
+            return;
+        }
+        let at = at.min(self.items.len());
+        let icon = IconChoice::Auto;
+        let item = if folder { Item::Folder { path: path.to_string(), icon } } else { Item::File { path: path.to_string(), icon } };
+        self.items.insert(at, item);
+    }
+
+    pub(crate) fn is_folder_target(&self, i: usize) -> bool {
+        matches!(self.items.get(i), Some(Item::Folder { .. }))
+    }
+
+    pub(crate) fn is_file_target(&self, i: usize) -> bool {
+        matches!(self.items.get(i), Some(Item::File { .. }))
+    }
+
+    pub(crate) fn target_path(&self, i: usize) -> Option<&str> {
+        match self.items.get(i) {
+            Some(Item::Folder { path, .. } | Item::File { path, .. }) => Some(path.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Replace the path of a folder or file item. A command is left alone.
+    pub(crate) fn set_target_path(&mut self, i: usize, path: &str) -> bool {
+        let path = path.trim();
+        if path.is_empty() {
+            return false;
+        }
+        match self.items.get_mut(i) {
+            Some(Item::Folder { path: slot, .. } | Item::File { path: slot, .. }) => {
+                *slot = path.to_string();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn target_missing(&self, i: usize) -> bool {
+        self.target_path(i).is_some_and(|path| !target_present(path))
+    }
+
+    /// Bar and palette tooltip. A target adds the full path under the name.
+    pub(crate) fn item_tip(&self, i: usize) -> String {
+        match self.items.get(i) {
+            Some(Item::Folder { path, .. } | Item::File { path, .. }) => target_tip(&file_tail(path), path),
+            _ => self.label_at(i),
+        }
+    }
 }
 
 fn file_tail(path: &str) -> String {
@@ -633,6 +696,64 @@ fn choice_icon(icon: &IconChoice, auto: LineIcon) -> LineIcon {
     auto
 }
 
+/// A preset the bar can open. Empty and missing paths are gray and beep instead of running.
+pub(crate) fn target_present(path: &str) -> bool {
+    let path = path.trim();
+    !path.is_empty() && Path::new(path).exists()
+}
+
+/// Name, then the full path. One line when the name is already the whole path.
+pub(crate) fn target_tip(name: &str, path: &str) -> String {
+    if path.is_empty() || name == path {
+        name.to_string()
+    } else {
+        format!("{name}\r\n{path}")
+    }
+}
+
+fn is_slot(p: &Piece) -> bool {
+    matches!(p, Piece::Command { .. } | Piece::Folder { .. } | Piece::File { .. })
+}
+
+fn run_of(piece: &Piece) -> Option<Run> {
+    match piece {
+        Piece::Command { action, .. } => Some(Run::Command(*action)),
+        Piece::Folder { path, .. } => Some(Run::Folder(path.clone())),
+        Piece::File { path, .. } => Some(Run::File(path.clone())),
+        Piece::Separator => None,
+    }
+}
+
+fn piece_icon(piece: &Piece) -> Option<LineIcon> {
+    match piece {
+        Piece::Command { action, icon } => Some(drawn_icon(*action, icon)),
+        Piece::Folder { icon, .. } => Some(choice_icon(icon, LineIcon::OpenFolder)),
+        Piece::File { icon, .. } => Some(choice_icon(icon, LineIcon::PinFile)),
+        Piece::Separator => None,
+    }
+}
+
+fn run_label(run: &Run) -> String {
+    match run {
+        Run::Command(action) => crate::tr(label_key(*action)).to_string(),
+        Run::Folder(path) | Run::File(path) => file_tail(path),
+    }
+}
+
+fn run_tip(run: &Run) -> String {
+    match run {
+        Run::Command(action) => tooltip(*action),
+        Run::Folder(path) | Run::File(path) => target_tip(&file_tail(path), path),
+    }
+}
+
+fn run_enabled(run: &Run, input: &EnableInput) -> bool {
+    match run {
+        Run::Command(action) => enabled(*action, input),
+        Run::Folder(path) | Run::File(path) => target_present(path),
+    }
+}
+
 impl Item {
     fn to_json(&self) -> Value {
         let icon = |icon: &IconChoice| icon_json(icon);
@@ -641,13 +762,7 @@ impl Item {
             Item::Separator => json_obj(&[("type", Value::from("separator"))]),
             Item::Folder { path, icon: choice } => json_obj(&[("type", Value::from("folder")), ("path", Value::from(path.clone())), ("icon", icon(choice))]),
             Item::File { path, icon: choice } => json_obj(&[("type", Value::from("file")), ("path", Value::from(path.clone())), ("icon", icon(choice))]),
-            Item::Program { exe, args, dir, icon: choice } => json_obj(&[
-                ("type", Value::from("program")),
-                ("exe", Value::from(exe.clone())),
-                ("args", Value::from(args.clone())),
-                ("dir", Value::from(dir.clone())),
-                ("icon", icon(choice)),
-            ]),
+            Item::Program { exe, args, dir, icon: choice } => json_obj(&[("type", Value::from("program")), ("exe", Value::from(exe.clone())), ("args", Value::from(args.clone())), ("dir", Value::from(dir.clone())), ("icon", icon(choice))]),
             Item::Raw(v) => v.clone(),
         }
     }
@@ -679,7 +794,9 @@ fn icon_json(icon: &IconChoice) -> Value {
 }
 
 fn parse_icon(v: Option<&Value>) -> IconChoice {
-    let Some(obj) = v.and_then(|v| v.as_object()) else { return IconChoice::Auto };
+    let Some(obj) = v.and_then(|v| v.as_object()) else {
+        return IconChoice::Auto;
+    };
     let mode = obj.get("mode").and_then(|m| m.as_str()).unwrap_or("auto");
     if mode != "manual" {
         return IconChoice::Auto;
@@ -689,7 +806,9 @@ fn parse_icon(v: Option<&Value>) -> IconChoice {
 }
 
 fn parse_item(v: &Value) -> Item {
-    let Some(obj) = v.as_object() else { return Item::Raw(v.clone()) };
+    let Some(obj) = v.as_object() else {
+        return Item::Raw(v.clone());
+    };
     let kind = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let text = |key: &str| obj.get(key).and_then(|s| s.as_str()).unwrap_or("").to_string();
     let icon = parse_icon(obj.get("icon"));
@@ -715,7 +834,16 @@ pub(crate) fn parse(bytes: &[u8]) -> std::result::Result<Doc, ()> {
     let mut extra = obj.clone();
     extra.remove("version");
     extra.remove("items");
-    Ok(Doc { items: items.iter().map(parse_item).collect(), extra })
+    Ok(Doc { items: items.iter().map(parse_item).filter_map(keep_loaded).collect(), extra })
+}
+
+/// `file.open` was the pick-at-click command. Drop it so an old file still loads.
+fn keep_loaded(item: Item) -> Option<Item> {
+    match item {
+        Item::Command { action: Some(Action::Open), .. } => None,
+        Item::Command { ref id, .. } if id == "file.open" => None,
+        other => Some(other),
+    }
 }
 
 pub(crate) fn read_file(path: &Path) -> Read {
@@ -784,10 +912,7 @@ fn layout_row(pieces: &[Piece], input: &LayIn) -> BarLay {
     }
     let top = input.top;
     let edit = Px { left: input.tab_w - btn_w, top, right: input.tab_w, bottom: top + btn_h };
-    let piece_w = |p: &Piece| match p {
-        Piece::Command { .. } => btn_w,
-        Piece::Separator => sep_w,
-    };
+    let piece_w = |p: &Piece| if is_slot(p) { btn_w } else { sep_w };
     let take = |room: i32| -> usize {
         let mut n = 0;
         let mut buttons = 0usize;
@@ -797,7 +922,7 @@ fn layout_row(pieces: &[Piece], input: &LayIn) -> BarLay {
             if used + add > room {
                 break;
             }
-            if matches!(p, Piece::Command { .. }) {
+            if is_slot(p) {
                 if buttons >= input.max_buttons {
                     break;
                 }
@@ -833,24 +958,15 @@ fn layout_row(pieces: &[Piece], input: &LayIn) -> BarLay {
     for (i, p) in pieces.iter().enumerate().take(n) {
         let w = piece_w(p);
         let r = Px { left: x, top, right: x + w, bottom: top + btn_h };
-        match p {
-            Piece::Command { .. } => {
-                commands.push(r);
-                command_at.push(i);
-            }
-            Piece::Separator => separators.push(r),
+        if is_slot(p) {
+            commands.push(r);
+            command_at.push(i);
+        } else {
+            separators.push(r);
         }
         x += w + gap;
     }
-    BarLay {
-        shown: true,
-        commands,
-        command_at,
-        separators,
-        overflow,
-        edit,
-        hidden: (n..pieces.len()).collect(),
-    }
+    BarLay { shown: true, commands, command_at, separators, overflow, edit, hidden: (n..pieces.len()).collect() }
 }
 
 /// Buttons down the left column. Change sits at the bottom. Overflow sits just above it.
@@ -872,10 +988,7 @@ fn layout_column(pieces: &[Piece], input: &LayIn) -> BarLay {
         return BarLay::hidden_bar();
     }
     let edit = Px { left: x, top: edit_top, right: x + btn_w, bottom: edit_bottom };
-    let piece_h = |p: &Piece| match p {
-        Piece::Command { .. } => btn_h,
-        Piece::Separator => sep_h,
-    };
+    let piece_h = |p: &Piece| if is_slot(p) { btn_h } else { sep_h };
     let take = |room: i32| -> usize {
         let mut n = 0;
         let mut buttons = 0usize;
@@ -885,7 +998,7 @@ fn layout_column(pieces: &[Piece], input: &LayIn) -> BarLay {
             if used + add > room {
                 break;
             }
-            if matches!(p, Piece::Command { .. }) {
+            if is_slot(p) {
                 if buttons >= input.max_buttons {
                     break;
                 }
@@ -921,24 +1034,15 @@ fn layout_column(pieces: &[Piece], input: &LayIn) -> BarLay {
     for (i, p) in pieces.iter().enumerate().take(n) {
         let h = piece_h(p);
         let r = Px { left: x, top: y, right: x + btn_w, bottom: y + h };
-        match p {
-            Piece::Command { .. } => {
-                commands.push(r);
-                command_at.push(i);
-            }
-            Piece::Separator => separators.push(r),
+        if is_slot(p) {
+            commands.push(r);
+            command_at.push(i);
+        } else {
+            separators.push(r);
         }
         y += h + gap;
     }
-    BarLay {
-        shown: true,
-        commands,
-        command_at,
-        separators,
-        overflow,
-        edit,
-        hidden: (n..pieces.len()).collect(),
-    }
+    BarLay { shown: true, commands, command_at, separators, overflow, edit, hidden: (n..pieces.len()).collect() }
 }
 
 fn live_doc() -> Doc {
@@ -958,14 +1062,7 @@ pub(crate) fn bar_origin(a: &crate::App) -> Origin {
     let btn_top = (s(32) - crate::tool_icon_px(a.dpi).1) / 2;
     let drives = crate::drive_slots(a.s.drive_buttons, a.drives.len());
     let icons = crate::icon_slots(g.w, btn_top, a.dpi, drives, a.s.bar);
-    Origin {
-        vertical_tabs: a.s.vertical_tabs,
-        tab_w: icons.tab_w,
-        top: if a.s.vertical_tabs { btn_top } else { g.top },
-        bottom: g.bot,
-        left: crate::vtab_left(g.side, g.gap),
-        dpi: a.dpi,
-    }
+    Origin { vertical_tabs: a.s.vertical_tabs, tab_w: icons.tab_w, top: if a.s.vertical_tabs { btn_top } else { g.top }, bottom: g.bot, left: crate::vtab_left(g.side, g.gap), dpi: a.dpi }
 }
 
 pub(crate) struct SlotMove {
@@ -996,33 +1093,30 @@ fn command_slot(id: i32) -> Option<usize> {
     (ID_CMD_FIRST..ID_CMD_OVERFLOW).contains(&id).then_some((id - ID_CMD_FIRST) as usize)
 }
 
-fn placed_action(id: i32) -> Option<(Action, LineIcon)> {
-    if !is_command_control(id) {
-        return None;
-    }
-    let origin = app(|a| {
-        if a.main.0.is_null() {
-            None
-        } else {
-            Some(bar_origin(a))
-        }
-    })?;
-    let (doc, lay) = layout_now(&origin);
+fn slot_face(id: i32, doc: &Doc, lay: &BarLay) -> Option<(Run, LineIcon)> {
     if !lay.shown {
         return None;
     }
-    if id == ID_CMD_EDIT {
-        return lay.edit.live().then_some((Action::EditToolbar, LineIcon::Edit));
+    if id == ID_CMD_EDIT && lay.edit.live() {
+        return Some((Run::Command(Action::EditToolbar), LineIcon::Edit));
     }
-    if id == ID_CMD_OVERFLOW {
-        return lay.overflow.is_some().then_some((Action::Overflow, LineIcon::Chevrons));
+    if id == ID_CMD_OVERFLOW && lay.overflow.is_some() {
+        return Some((Run::Command(Action::Overflow), LineIcon::Chevrons));
     }
     let slot = command_slot(id)?;
     let at = *lay.command_at.get(slot)?;
-    match doc.pieces().get(at)? {
-        Piece::Command { action, icon } => Some((*action, drawn_icon(*action, icon))),
-        Piece::Separator => None,
+    let pieces = doc.pieces();
+    let piece = pieces.get(at)?;
+    Some((run_of(piece)?, piece_icon(piece)?))
+}
+
+fn placed_slot(id: i32) -> Option<(Run, LineIcon)> {
+    if !is_command_control(id) {
+        return None;
     }
+    let origin = app(|a| if a.main.0.is_null() { None } else { Some(bar_origin(a)) })?;
+    let (doc, lay) = layout_now(&origin);
+    slot_face(id, &doc, &lay)
 }
 
 /// Icon plus the toggle and enabled flags the button paints. The window itself stays enabled.
@@ -1033,37 +1127,22 @@ pub(crate) struct CommandVisual {
 }
 
 pub(crate) unsafe fn command_visual(id: i32) -> Option<CommandVisual> {
-    let (action, icon) = placed_action(id)?;
+    let (run, icon) = placed_slot(id)?;
     let input = enable_input();
-    let show_hidden = action == Action::ShowHidden && crate::hidden();
-    Some(CommandVisual {
-        icon,
-        enabled: enabled(action, &input),
-        on: command_toggled(action, show_hidden),
-    })
+    let on = match &run {
+        Run::Command(action) => command_toggled(*action, *action == Action::ShowHidden && crate::hidden()),
+        Run::Folder(_) | Run::File(_) => false,
+    };
+    Some(CommandVisual { icon, enabled: run_enabled(&run, &input), on })
 }
 
-fn action_for(id: i32, doc: &Doc, lay: &BarLay) -> Option<Action> {
-    if id == ID_CMD_EDIT && lay.edit.live() {
-        return Some(Action::EditToolbar);
-    }
-    if id == ID_CMD_OVERFLOW && lay.overflow.is_some() {
-        return Some(Action::Overflow);
-    }
-    let slot = command_slot(id)?;
-    let at = *lay.command_at.get(slot)?;
-    match doc.pieces().get(at)? {
-        Piece::Command { action, .. } => Some(*action),
-        Piece::Separator => None,
-    }
+fn action_for(id: i32, doc: &Doc, lay: &BarLay) -> Option<Run> {
+    slot_face(id, doc, lay).map(|(run, _)| run)
 }
 
-fn hidden_actions(doc: &Doc, lay: &BarLay) -> Vec<Action> {
+fn hidden_runs(doc: &Doc, lay: &BarLay) -> Vec<Run> {
     let pieces = doc.pieces();
-    lay.hidden.iter().filter_map(|i| match pieces.get(*i) {
-        Some(Piece::Command { action, .. }) => Some(*action),
-        _ => None,
-    }).collect()
+    lay.hidden.iter().filter_map(|i| pieces.get(*i).and_then(run_of)).collect()
 }
 
 const CMD_BTN_SUB: usize = 41;
@@ -1098,13 +1177,15 @@ pub(crate) unsafe fn refresh_tips() {
     let origin = app(|a| bar_origin(a));
     let (doc, lay) = layout_now(&origin);
     for id in ID_CMD_FIRST..=ID_CMD_EDIT {
-        let Ok(b) = GetDlgItem(Some(main), id) else { continue };
-        let action = action_for(id, &doc, &lay);
-        if face_changed(id, action) {
+        let Ok(b) = GetDlgItem(Some(main), id) else {
+            continue;
+        };
+        let face = slot_face(id, &doc, &lay);
+        if face_changed(id, face.clone()) {
             _ = InvalidateRect(Some(b), None, false);
         }
-        let Some(action) = action else { continue };
-        let name = crate::tr(label_key(action));
+        let Some((run, _)) = face else { continue };
+        let name = run_label(&run);
         if crate::text_of(b) != name {
             _ = SetWindowTextW(b, &HSTRING::from(name));
         }
@@ -1113,7 +1194,7 @@ pub(crate) unsafe fn refresh_tips() {
     retip_under_cursor(main);
 }
 
-fn face_changed(id: i32, action: Option<Action>) -> bool {
+fn face_changed(id: i32, action: Option<(Run, LineIcon)>) -> bool {
     let mut st = state();
     if let Some(slot) = st.face.iter_mut().find(|(k, _)| *k == id) {
         if slot.1 == action {
@@ -1148,9 +1229,7 @@ fn enable_input() -> EnableInput {
         (i, path)
     });
     let recent = crate::pane::recent::locked(pane);
-    let sel = unsafe {
-        crate::view_of::<IFolderView2>(pane).and_then(|fv| fv.ItemCount(SVGIO_SELECTION).ok()).unwrap_or(0) as u32
-    };
+    let sel = unsafe { crate::view_of::<IFolderView2>(pane).and_then(|fv| fv.ItemCount(SVGIO_SELECTION).ok()).unwrap_or(0) as u32 };
     let clip = state().clip_pasteable;
     EnableInput { selection: sel, folder_can_receive: folder_can_receive(&path, recent), clipboard_pasteable: clip }
 }
@@ -1166,14 +1245,20 @@ pub(crate) unsafe fn sync_enabled() {
     let pieces = doc.pieces();
     for i in 0..CMD_CAPACITY {
         let id = ID_CMD_FIRST + i;
-        let Ok(b) = GetDlgItem(Some(main), id) else { continue };
-        let Some(at) = lay.command_at.get(i as usize).copied() else { continue };
-        let Some(Piece::Command { action, .. }) = pieces.get(at) else { continue };
+        let Ok(b) = GetDlgItem(Some(main), id) else {
+            continue;
+        };
+        let Some(at) = lay.command_at.get(i as usize).copied() else {
+            continue;
+        };
+        let Some(run) = pieces.get(at).and_then(run_of) else {
+            continue;
+        };
         // The window stays enabled. A disabled HWND never sees the mouse, so its tooltip cannot show.
         if !IsWindowEnabled(b).as_bool() {
             _ = EnableWindow(b, true);
         }
-        if logical_enabled_changed(id, enabled(*action, &input)) {
+        if logical_enabled_changed(id, run_enabled(&run, &input)) {
             _ = InvalidateRect(Some(b), None, false);
         }
     }
@@ -1205,14 +1290,7 @@ impl Drop for TipGuard {
 }
 
 fn track_info(owner: HWND, label: &HSTRING) -> TTTOOLINFOW {
-    TTTOOLINFOW {
-        cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
-        uFlags: TTF_TRACK | TTF_ABSOLUTE,
-        hwnd: owner,
-        uId: TIP_TOOL,
-        lpszText: PWSTR(label.as_ptr() as *mut u16),
-        ..Default::default()
-    }
+    TTTOOLINFOW { cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32, uFlags: TTF_TRACK | TTF_ABSOLUTE, hwnd: owner, uId: TIP_TOOL, lpszText: PWSTR(label.as_ptr() as *mut u16), ..Default::default() }
 }
 
 fn pack_xy(x: i32, y: i32) -> LPARAM {
@@ -1282,7 +1360,7 @@ unsafe fn show_tip_for(btn: HWND) {
     }
     let main = GetParent(btn).unwrap_or_default();
     let id = GetDlgCtrlID(btn);
-    let Some((action, _)) = placed_action(id) else {
+    let Some((run, _)) = placed_slot(id) else {
         apply_tip(main, None);
         return;
     };
@@ -1291,14 +1369,7 @@ unsafe fn show_tip_for(btn: HWND) {
         apply_tip(main, None);
         return;
     }
-    apply_tip(main, Some(LiveTip {
-        control: id,
-        text: tooltip(action),
-        left: rc.left,
-        top: rc.top,
-        right: rc.right,
-        bottom: rc.bottom,
-    }));
+    apply_tip(main, Some(LiveTip { control: id, text: run_tip(&run), left: rc.left, top: rc.top, right: rc.right, bottom: rc.bottom }));
 }
 
 unsafe fn apply_tip(main: HWND, next: Option<LiveTip>) {
@@ -1355,12 +1426,7 @@ unsafe fn apply_tip(main: HWND, next: Option<LiveTip>) {
 }
 
 unsafe fn arm_leave(h: HWND) {
-    let mut t = TRACKMOUSEEVENT {
-        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-        dwFlags: TME_LEAVE,
-        hwndTrack: h,
-        dwHoverTime: 0,
-    };
+    let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: h, dwHoverTime: 0 };
     _ = TrackMouseEvent(&mut t);
 }
 
@@ -1433,9 +1499,7 @@ unsafe fn probe_clipboard() -> Option<bool> {
             count = DragQueryFileW(HDROP(h.0), u32::MAX, None);
         }
     }
-    let pic = IsClipboardFormatAvailable(CF_DIB.0 as u32).is_ok()
-        || IsClipboardFormatAvailable(CF_DIBV5.0 as u32).is_ok()
-        || IsClipboardFormatAvailable(RegisterClipboardFormatW(w!("PNG"))).is_ok();
+    let pic = IsClipboardFormatAvailable(CF_DIB.0 as u32).is_ok() || IsClipboardFormatAvailable(CF_DIBV5.0 as u32).is_ok() || IsClipboardFormatAvailable(RegisterClipboardFormatW(w!("PNG"))).is_ok();
     _ = CloseClipboard();
     Some(clipboard_pasteable(hdrop && count > 0, pic))
 }
@@ -1504,14 +1568,16 @@ pub(crate) unsafe fn command(owner: HWND, id: usize) -> bool {
     }
     let origin = app(|a| bar_origin(a));
     let (doc, lay) = layout_now(&origin);
-    let Some(action) = action_for(id, &doc, &lay) else { return true };
+    let Some(fired) = action_for(id, &doc, &lay) else {
+        return true;
+    };
     if !lay.shown {
         return true;
     }
     // More opens its menu inside `run` and then runs the chosen command there,
     // so this single check covers the overflow path. The vertical column uses
     // the same buttons and the same `command` entry.
-    run(owner, action, &doc, &lay, id);
+    run(owner, fired, &doc, &lay, id);
     // The button took focus on the click. Give it back to the active pane's
     // list when it is still on the toolbar. A window or field the action
     // opened (toolbar editor, properties, rename, address bar) keeps focus.
@@ -1521,12 +1587,20 @@ pub(crate) unsafe fn command(owner: HWND, id: usize) -> bool {
     true
 }
 
-unsafe fn run(owner: HWND, action: Action, doc: &Doc, lay: &BarLay, from: i32) {
+unsafe fn run(owner: HWND, fired: Run, doc: &Doc, lay: &BarLay, from: i32) {
+    let pane = app(|a| a.s.active);
+    match fired {
+        Run::Folder(path) => open_saved_folder(pane, &path),
+        Run::File(path) => open_saved_file(owner, &path),
+        Run::Command(action) => run_command(owner, action, doc, lay, from, pane),
+    }
+}
+
+unsafe fn run_command(owner: HWND, action: Action, doc: &Doc, lay: &BarLay, from: i32, pane: usize) {
     let input = enable_input();
     if !enabled(action, &input) {
         return;
     }
-    let pane = app(|a| a.s.active);
     match action {
         Action::NewFolder => crate::new_folder(pane),
         Action::NewFile => crate::new_file(pane),
@@ -1554,7 +1628,8 @@ unsafe fn run(owner: HWND, action: Action, doc: &Doc, lay: &BarLay, from: i32) {
         Action::PreviewPane => crate::toggle_preview(),
         Action::SplitRight => crate::header_split(pane, false),
         Action::SplitBelow => crate::header_split(pane, true),
-        Action::Open => open_folder_or_file(owner, pane, from),
+        // Preset folder and file buttons replaced the pick-at-click command.
+        Action::Open => {}
         Action::PaneColor => crate::popup_pane_tint(owner, pane, button_point(from)),
         Action::TabColor => popup_tab_color(owner, from),
         Action::ClosePane => crate::header_close(pane),
@@ -1578,26 +1653,20 @@ unsafe fn button_point(id: i32) -> POINT {
     }
 }
 
-unsafe fn open_folder_or_file(owner: HWND, pane: usize, from: i32) {
-    let Ok(menu) = CreatePopupMenu() else { return };
-    let _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from(crate::tr(crate::Key::Folder)));
-    let _ = AppendMenuW(menu, MF_STRING, 2, &HSTRING::from(crate::tr(crate::Key::File)));
-    let pt = button_point(from);
-    let pick = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, None, owner, None).0 as usize;
-    _ = DestroyMenu(menu);
-    match pick {
-        1 => {
-            if let Some(path) = crate::pick_folder(owner) {
-                let _ = crate::navigate(pane, &path);
-            }
-        }
-        2 => {
-            if let Some(path) = crate::pick_files(owner).into_iter().next() {
-                let _ = ShellExecuteW(Some(owner), w!("open"), &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
-            }
-        }
-        _ => {}
+unsafe fn open_saved_folder(pane: usize, path: &str) {
+    if !target_present(path) {
+        let _ = MessageBeep(MB_OK);
+        return;
     }
+    let _ = crate::navigate(pane, path);
+}
+
+unsafe fn open_saved_file(owner: HWND, path: &str) {
+    if !target_present(path) {
+        let _ = MessageBeep(MB_OK);
+        return;
+    }
+    let _ = ShellExecuteW(Some(owner), w!("open"), &HSTRING::from(path), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
 }
 
 unsafe fn popup_tab_color(owner: HWND, from: i32) {
@@ -1638,14 +1707,10 @@ unsafe fn open_terminal_admin(owner: HWND, pane: usize) {
 
 /// Separator lines for the current bar. Empty when the bar is hidden or has no separators.
 pub(crate) fn separator_rects() -> Vec<RECT> {
-    let origin = app(|a| {
-        if a.main.0.is_null() {
-            None
-        } else {
-            Some(bar_origin(a))
-        }
-    });
-    let Some(origin) = origin else { return Vec::new() };
+    let origin = app(|a| if a.main.0.is_null() { None } else { Some(bar_origin(a)) });
+    let Some(origin) = origin else {
+        return Vec::new();
+    };
     let (_, lay) = layout_now(&origin);
     if !lay.shown {
         return Vec::new();
@@ -1654,21 +1719,21 @@ pub(crate) fn separator_rects() -> Vec<RECT> {
 }
 
 unsafe fn popup_overflow(owner: HWND, doc: &Doc, lay: &BarLay) {
-    let actions = hidden_actions(doc, lay);
-    if actions.is_empty() {
+    let rows = hidden_runs(doc, lay);
+    if rows.is_empty() {
         return;
     }
     let Ok(menu) = CreatePopupMenu() else { return };
     let input = enable_input();
-    for (i, action) in actions.iter().enumerate() {
-        let flags = if enabled(*action, &input) { MF_STRING } else { MF_STRING | MF_GRAYED };
-        _ = AppendMenuW(menu, flags, i + 1, &HSTRING::from(crate::tr(label_key(*action))));
+    for (i, fired) in rows.iter().enumerate() {
+        let flags = if run_enabled(fired, &input) { MF_STRING } else { MF_STRING | MF_GRAYED };
+        _ = AppendMenuW(menu, flags, i + 1, &HSTRING::from(run_label(fired)));
     }
     let at = button_point(ID_CMD_OVERFLOW);
     let pick = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, at.x, at.y, None, owner, None).0 as usize;
     _ = DestroyMenu(menu);
-    if let Some(action) = actions.get(pick.wrapping_sub(1)) {
-        run(owner, *action, doc, lay, ID_CMD_OVERFLOW);
+    if let Some(fired) = rows.get(pick.wrapping_sub(1)) {
+        run(owner, fired.clone(), doc, lay, ID_CMD_OVERFLOW);
     }
 }
 
@@ -1677,28 +1742,12 @@ mod tests {
     use super::*;
 
     fn placed(vertical: bool, tab_w: i32, pieces: &[Piece]) -> BarLay {
-        layout(pieces, &LayIn {
-            vertical_tabs: vertical,
-            tab_w,
-            top: 4,
-            bottom: 0,
-            left: 0,
-            dpi: 96,
-            max_buttons: CMD_CAPACITY as usize,
-        })
+        layout(pieces, &LayIn { vertical_tabs: vertical, tab_w, top: 4, bottom: 0, left: 0, dpi: 96, max_buttons: CMD_CAPACITY as usize })
     }
 
     /// `height` is the column, starting under a 32px tab row, at the window's left edge.
     fn column(height: i32, left: i32, pieces: &[Piece]) -> BarLay {
-        layout(pieces, &LayIn {
-            vertical_tabs: false,
-            tab_w: 0,
-            top: 32,
-            bottom: 32 + height,
-            left,
-            dpi: 96,
-            max_buttons: CMD_CAPACITY as usize,
-        })
+        layout(pieces, &LayIn { vertical_tabs: false, tab_w: 0, top: 32, bottom: 32 + height, left, dpi: 96, max_buttons: CMD_CAPACITY as usize })
     }
 
     fn defaults() -> Vec<Piece> {
@@ -1768,6 +1817,23 @@ mod tests {
         let pieces = doc.pieces();
         assert!(pieces.iter().any(|p| matches!(p, Piece::Separator)));
         assert_eq!(pieces.iter().filter(|p| matches!(p, Piece::Command { .. })).count(), 4);
+        assert_eq!(pieces.len(), 7, "folder and file targets stay; program and unknown items do not");
+        match &pieces[5] {
+            Piece::Folder { path, icon } => {
+                assert_eq!(path, "D:\\Work");
+                assert_eq!(icon, &IconChoice::Auto);
+                assert_eq!(piece_icon(&pieces[5]), Some(LineIcon::OpenFolder));
+            }
+            other => panic!("folder {other:?}"),
+        }
+        match &pieces[6] {
+            Piece::File { path, icon } => {
+                assert_eq!(path, "D:\\Work\\a.txt");
+                assert_eq!(icon, &IconChoice::Auto);
+                assert_eq!(piece_icon(&pieces[6]), Some(LineIcon::PinFile));
+            }
+            other => panic!("file {other:?}"),
+        }
         match &pieces[1] {
             Piece::Command { action, icon } => {
                 assert_eq!(*action, Action::Paste);
@@ -1802,10 +1868,7 @@ mod tests {
     #[test]
     fn default_commands_map_to_actions_and_rename_is_f2_not_batch() {
         let doc = Doc::default_layout();
-        assert_eq!(
-            doc.command_ids(),
-            ["file.dir", "file.new", "file.delete", "file.paste", "edit.rename", "view.mode", "file.properties", "file.mark"]
-        );
+        assert_eq!(doc.command_ids(), ["file.dir", "file.new", "file.delete", "file.paste", "edit.rename", "view.mode", "file.properties", "file.mark"]);
         assert_eq!(action_of("edit.rename"), Some(Action::RenameInPlace));
         assert!(action_of("file.rename").is_none(), "file.rename is batch rename and is not a toolbar command");
         assert_eq!(key_id(Action::RenameInPlace), None);
@@ -1961,11 +2024,7 @@ mod tests {
 
     #[test]
     fn column_separator_is_a_horizontal_line() {
-        let pieces = vec![
-            Piece::Command { action: Action::NewFolder, icon: IconChoice::Auto },
-            Piece::Separator,
-            Piece::Command { action: Action::Paste, icon: IconChoice::Auto },
-        ];
+        let pieces = vec![Piece::Command { action: Action::NewFolder, icon: IconChoice::Auto }, Piece::Separator, Piece::Command { action: Action::Paste, icon: IconChoice::Auto }];
         let lay = column(400, 0, &pieces);
         assert_eq!(lay.separators.len(), 1);
         let sep = lay.separators[0];
@@ -1983,11 +2042,7 @@ mod tests {
         assert!(edit_only.commands.is_empty());
         assert!(edit_only.edit.live());
         assert!(edit_only.overflow.is_none());
-        let pieces = vec![
-            Piece::Command { action: Action::NewFolder, icon: IconChoice::Auto },
-            Piece::Separator,
-            Piece::Command { action: Action::Paste, icon: IconChoice::Auto },
-        ];
+        let pieces = vec![Piece::Command { action: Action::NewFolder, icon: IconChoice::Auto }, Piece::Separator, Piece::Command { action: Action::Paste, icon: IconChoice::Auto }];
         let lay = placed(true, 900, &pieces);
         assert_eq!(lay.commands.len(), 2);
         assert_eq!(lay.separators.len(), 1);
@@ -2159,10 +2214,14 @@ mod tests {
             {"type":"command","id":"file.terminal","icon":{"mode":"auto"}}
         ]}"#;
         let doc = parse(raw.as_bytes()).unwrap();
-        let actions: Vec<_> = doc.pieces().iter().filter_map(|p| match p {
-            Piece::Command { action, .. } => Some(*action),
-            Piece::Separator => None,
-        }).collect();
+        let actions: Vec<_> = doc
+            .pieces()
+            .iter()
+            .filter_map(|p| match p {
+                Piece::Command { action, .. } => Some(*action),
+                Piece::Separator | Piece::Folder { .. } | Piece::File { .. } => None,
+            })
+            .collect();
         assert_eq!(actions, [Action::PaneColor, Action::ClosePane, Action::Terminal]);
         let back = parse(doc.to_json().as_bytes()).unwrap();
         assert_eq!(back.command_ids(), ["pane.color", "pane.close", "file.terminal"]);
@@ -2219,5 +2278,105 @@ mod tests {
         assert_eq!(tip_step(Some(&tip(1, "Delete", 0)), Some(&tip(2, "Rename", 28))), TipStep::Show);
         assert_eq!(command_tip_side(true), crate::TipSide::Below);
         assert_eq!(command_tip_side(false), crate::TipSide::Right);
+    }
+
+    #[test]
+    fn open_command_is_dropped_and_preset_targets_round_trip() {
+        let raw = r#"{
+            "version": 1,
+            "note": "keep",
+            "items": [
+                {"type": "command", "id": "file.open", "icon": {"mode": "auto"}},
+                {"type": "command", "id": "file.dir", "icon": {"mode": "auto"}},
+                {"type": "folder", "path": "D:\\Work", "icon": {"mode": "manual", "pack": "open_folder"}},
+                {"type": "file", "path": "D:\\Work\\a.txt", "icon": {"mode": "auto"}},
+                {"type": "separator"},
+                {"type": "command", "id": "file.open", "icon": {"mode": "manual", "pack": "del"}}
+            ]
+        }"#;
+        let doc = parse(raw.as_bytes()).unwrap();
+        assert!(!doc.has_action(Action::Open));
+        assert!(!doc.to_json().contains("file.open"), "{}", doc.to_json());
+        assert_eq!(doc.extra.get("note").and_then(|v| v.as_str()), Some("keep"));
+        let pieces = doc.pieces();
+        assert!(matches!(&pieces[0], Piece::Command { action: Action::NewFolder, .. }));
+        assert!(matches!(&pieces[1], Piece::Folder { path, .. } if path == "D:\\Work"));
+        assert!(matches!(&pieces[2], Piece::File { path, .. } if path == "D:\\Work\\a.txt"));
+        assert!(matches!(pieces[3], Piece::Separator));
+        assert_eq!(piece_icon(&pieces[1]), Some(LineIcon::OpenFolder));
+        assert_eq!(piece_icon(&pieces[2]), Some(LineIcon::PinFile));
+        let back = parse(doc.to_json().as_bytes()).unwrap();
+        assert_eq!(back, doc);
+        assert_eq!(doc.label_at(1), "Work");
+        assert_eq!(doc.label_at(2), "a.txt");
+        assert_eq!(doc.item_tip(1), "Work\r\nD:\\Work");
+        assert_eq!(doc.item_tip(2), "a.txt\r\nD:\\Work\\a.txt");
+        assert_eq!(target_tip("a.txt", r"D:\Work\a.txt"), "a.txt\r\nD:\\Work\\a.txt");
+        assert_eq!(target_tip("notes", "notes"), "notes");
+    }
+
+    #[test]
+    fn preset_targets_take_button_slots_and_keep_their_menu_names() {
+        let mut doc = Doc::default_layout();
+        let n = doc.item_count();
+        doc.insert_action(0, Action::Open);
+        assert_eq!(doc.item_count(), n);
+        assert!(!doc.has_action(Action::Open));
+        doc.insert_folder(0, "  ");
+        doc.insert_file(0, "");
+        assert_eq!(doc.item_count(), n);
+        doc.insert_folder(0, r"D:\Archive");
+        doc.insert_file(1, r"D:\Archive\note.txt");
+        assert!(doc.is_folder_target(0));
+        assert!(doc.is_file_target(1));
+        assert_eq!(doc.glyph_at(0), Some(LineIcon::OpenFolder));
+        assert_eq!(doc.glyph_at(1), Some(LineIcon::PinFile));
+        doc.set_pack(1, Some("del"));
+        assert_eq!(doc.glyph_at(1), Some(LineIcon::Del));
+        assert!(doc.set_target_path(0, r"E:\Other"));
+        assert_eq!(doc.target_path(0), Some(r"E:\Other"));
+        assert!(!doc.set_target_path(2, r"E:\Nope"));
+        assert!(doc.target_path(2).is_none());
+        assert!(doc.pieces().iter().all(|p| !matches!(p, Piece::Command { action: Action::Open, .. })));
+
+        let mut pieces = vec![Piece::Folder { path: r"D:\Archive".into(), icon: IconChoice::Auto }];
+        pieces.extend(many(23));
+        let lay = placed(true, 720, &pieces);
+        assert_eq!(lay.commands.len(), 20);
+        assert_eq!(lay.command_at[0], 0);
+        assert!(!lay.hidden.contains(&0));
+        assert!(lay.hidden.iter().any(|&i| matches!(&pieces[i], Piece::Command { .. })));
+        let narrow = placed(true, 280, &pieces);
+        assert_eq!(narrow.command_at.first().copied(), Some(0), "the folder stays in the visible row");
+        assert!(narrow.hidden.iter().any(|&i| i > 0));
+        let tail = Piece::File { path: r"C:\Users\Public\a.txt".into(), icon: IconChoice::Auto };
+        let mut crowded = many(24);
+        crowded.push(tail);
+        let folded = placed(true, 400, &crowded);
+        let last = crowded.len() - 1;
+        assert!(folded.hidden.contains(&last));
+        assert_eq!(run_label(&run_of(&crowded[last]).unwrap()), "a.txt");
+        assert_eq!(run_tip(&run_of(&crowded[last]).unwrap()), "a.txt\r\nC:\\Users\\Public\\a.txt");
+    }
+
+    #[test]
+    fn a_missing_target_is_not_present_and_a_real_path_is() {
+        assert!(!target_present(""));
+        assert!(!target_present("   "));
+        assert!(!target_present(r"D:\no\such\maguro\toolbar-target"));
+        let dir = scratch("target");
+        let folder = dir.join("box");
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(target_present(folder.to_str().unwrap()));
+        assert!(target_present(file.to_str().unwrap()));
+        assert!(!target_present(folder.join("missing").to_str().unwrap()));
+        let mut doc = Doc::default_layout();
+        doc.insert_file(0, file.to_str().unwrap());
+        doc.insert_folder(0, folder.join("gone").to_str().unwrap());
+        assert!(doc.target_missing(0));
+        assert!(!doc.target_missing(1));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

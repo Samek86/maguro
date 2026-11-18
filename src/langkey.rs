@@ -269,7 +269,8 @@ pub(crate) enum Key {
     InvertN,
     InvertSelection,
     ItWillGoRecycleBin,
-    #[allow(dead_code)] // Retired settings card. The index stays so the string table does not shift.
+    #[allow(dead_code)]
+    // Retired settings card. The index stays so the string table does not shift.
     ItemCountAndFreeSpaceOnDrive,
     ItemsN,
     Json,
@@ -568,7 +569,8 @@ pub(crate) enum Key {
     ShowInFolder,
     ShowLeftPanel,
     ShowPreviewPane,
-    #[allow(dead_code)] // Retired settings card. The index stays so the string table does not shift.
+    #[allow(dead_code)]
+    // Retired settings card. The index stays so the string table does not shift.
     ShowStatusBar,
     ShowToolbar,
     SingleInstance,
@@ -963,11 +965,14 @@ pub(crate) enum Key {
     ToolbarCopyPath,
     ToolbarTabColor,
     ToolbarTerminalAdmin,
+    ToolbarOpenFolder,
+    ToolbarOpenFile,
+    ToolbarChangeTarget,
 }
 
-pub(crate) const KEY_COUNT: usize = 958;
+pub(crate) const KEY_COUNT: usize = 961;
 
-const _: () = assert!((Key::ToolbarTerminalAdmin as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::ToolbarChangeTarget as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1928,6 +1933,9 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Copy path",
     "Tab colour",
     "Open Terminal (Administrator)",
+    "Open folder…",
+    "Open file…",
+    "Change target",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2761,7 +2769,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "fav_move_up",
     "fav_move_down",
     "recycle_bin_folder",
-
     "show_favourites_panel",
     "show_folder_tree_panel",
     "show_favourites_panel_desc",
@@ -2890,4 +2897,7 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "toolbar_copy_path",
     "toolbar_tab_color",
     "toolbar_terminal_admin",
+    "toolbar_open_folder",
+    "toolbar_open_file",
+    "toolbar_change_target",
 ];
