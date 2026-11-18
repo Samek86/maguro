@@ -2099,6 +2099,50 @@ pub(crate) unsafe fn open_in_menu(h: HWND, src: usize) {
     }
 }
 
+/// Menu id 1 is no tint. 2..=7 are the six colour labels, same order as the header submenu.
+pub(crate) fn tint_pick(pick: usize) -> Option<u8> {
+    if (1..=7).contains(&pick) {
+        Some((pick - 1) as u8)
+    } else {
+        None
+    }
+}
+
+unsafe fn fill_tint_menu(menu: HMENU, cur: u8) {
+    for k in 0..=6u8 {
+        let flags = if k == cur { MF_STRING | MF_CHECKED } else { MF_STRING };
+        let name = if k == 0 { tr(crate::Key::None) } else { tint_name(k) };
+        _ = AppendMenuW(menu, flags, k as usize + 1, &HSTRING::from(name));
+    }
+}
+
+/// Write a pane tint and repaint the header. Same save path as the header menu.
+pub(crate) unsafe fn apply_pane_tint(pane: usize, tint: u8) {
+    if pane >= MAXP {
+        return;
+    }
+    app(|a| {
+        set_pane_tint(&mut a.s, pane, tint);
+    });
+    if let Some(h) = pane_hwnd(pane) {
+        repaint_header(h);
+    }
+    check_dirty();
+    note_save();
+}
+
+/// None, then the six pane colour labels. Applies the choice to `pane`.
+pub(crate) unsafe fn popup_pane_tint(owner: HWND, pane: usize, at: POINT) {
+    let cur = app(|a| a.s.tints.get(pane).copied().unwrap_or(0));
+    let Ok(menu) = CreatePopupMenu() else { return };
+    fill_tint_menu(menu, cur);
+    let pick = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, at.x, at.y, None, owner, None).0 as usize;
+    _ = DestroyMenu(menu);
+    if let Some(tint) = tint_pick(pick) {
+        apply_pane_tint(pane, tint);
+    }
+}
+
 /// Right-click on a pane header: view, colour, then split / tab / path / close.
 const VIEW_CMD: usize = 210;
 const SAVE_VIEW_CMD: usize = 218;
@@ -2142,11 +2186,7 @@ pub(crate) unsafe fn tint_menu(h: HWND, i: usize, at: POINT) {
     let save_flags = if checked.is_some() { MF_STRING } else { MF_STRING | MF_GRAYED };
     _ = AppendMenuW(view, save_flags, SAVE_VIEW_CMD, &HSTRING::from(tr(crate::Key::SaveAsDefaultView)));
     _ = AppendMenuW(menu, MF_POPUP, view.0 as usize, &HSTRING::from(tr(crate::Key::View)));
-    for k in 0..=6u8 {
-        let flags = if k == cur { MF_STRING | MF_CHECKED } else { MF_STRING };
-        let name = if k == 0 { tr(crate::Key::None) } else { tint_name(k) };
-        _ = AppendMenuW(colors, flags, k as usize + 1, &HSTRING::from(name));
-    }
+    fill_tint_menu(colors, cur);
     _ = AppendMenuW(menu, MF_POPUP, colors.0 as usize, &HSTRING::from(tr(crate::Key::PaneColour)));
     _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let item = |id: usize, text: &str, on: bool| {
@@ -2177,13 +2217,10 @@ pub(crate) unsafe fn tint_menu(h: HWND, i: usize, at: POINT) {
         save_pane_default_view(i);
         return;
     }
-    if pick > 0 && pick <= 7 && i < MAXP {
-        app(|a| {
-            set_pane_tint(&mut a.s, i, pick as u8 - 1);
-        });
-        repaint_header(h);
-        check_dirty();
-        note_save();
+    if let Some(tint) = tint_pick(pick) {
+        if i < MAXP {
+            apply_pane_tint(i, tint);
+        }
         return;
     }
     match pick {

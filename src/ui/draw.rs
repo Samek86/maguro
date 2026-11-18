@@ -549,12 +549,26 @@ pub(crate) unsafe fn draw_button(d: &DRAWITEMSTRUCT) {
     let parent = GetParent(d.hwndItem).unwrap_or_default();
     let on_main = parent == main;
     let (dc, rc, id) = (d.hDC, d.rcItem, d.CtlID as i32);
-    let disabled = d.itemState.0 & ODS_DISABLED.0 != 0;
+    // Command buttons stay enabled so a gray command still receives the mouse (its tooltip).
+    // The logical flag is what paints gray and what ignores the click.
+    let cmd = if on_main && crate::toolbar::is_command_control(id) {
+        crate::toolbar::command_visual(id)
+    } else {
+        None
+    };
+    let disabled = d.itemState.0 & ODS_DISABLED.0 != 0 || cmd.as_ref().is_some_and(|c| !c.enabled);
     let pressed = !disabled && d.itemState.0 & ODS_SELECTED.0 != 0;
     let hot = !disabled && hover == d.hwndItem;
     let (bg, ink) = if on_main { (pal().bg, pal().text) } else { header_colors(parent) };
     let tinted = bg != pal().bg && bg != pal().card;
-    fill(dc, rc, bg);
+    let toggled = cmd.as_ref().is_some_and(|c| c.on && !disabled);
+    let accent = toggled.then(|| app(|a| a.s.accent_now()));
+    // On-state keeps the accent wash under hover and press, so the toggle does not disappear.
+    let ground = match accent {
+        Some(accent) => group_tint(accent, bg, DARK_ON.load(Ordering::Relaxed)),
+        None => bg,
+    };
+    fill(dc, rc, ground);
     if pressed || hot {
         let t = match (tinted, pressed) {
             (true, true) => 0.3,
@@ -562,10 +576,12 @@ pub(crate) unsafe fn draw_button(d: &DRAWITEMSTRUCT) {
             (false, true) => 0.13,
             (false, false) => 0.07,
         };
-        fill(dc, rc, blend(bg, ink, t));
+        fill(dc, rc, blend(ground, ink, t));
     }
     // Disabled sits below the resting sub colour. Hover and press use the full ink, same as the glyphs.
-    let fg = if disabled {
+    let fg = if let Some(accent) = accent {
+        accent
+    } else if disabled {
         blend(bg, pal().sub, 0.45)
     } else if tinted || hot || pressed {
         ink
@@ -622,8 +638,8 @@ pub(crate) unsafe fn draw_button(d: &DRAWITEMSTRUCT) {
     }
     // Command toolbar: icon only. The accessible name stays on the button window.
     if crate::toolbar::is_command_control(id) {
-        if let Some(kind) = crate::toolbar::icon_for_control(id) {
-            draw_line_icon(dc, rc, kind, fg, dpi);
+        if let Some(face) = &cmd {
+            draw_line_icon(dc, rc, face.icon, fg, dpi);
         }
         return;
     }

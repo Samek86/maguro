@@ -961,11 +961,13 @@ pub(crate) enum Key {
     ToolbarIconDefault,
     ToolbarIconSet,
     ToolbarCopyPath,
+    ToolbarTabColor,
+    ToolbarTerminalAdmin,
 }
 
-pub(crate) const KEY_COUNT: usize = 956;
+pub(crate) const KEY_COUNT: usize = 958;
 
-const _: () = assert!((Key::ToolbarCopyPath as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::ToolbarTerminalAdmin as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1924,6 +1926,8 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Default",
     "Choose",
     "Copy path",
+    "Tab colour",
+    "Open Terminal (Administrator)",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2884,4 +2888,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "toolbar_icon_default",
     "toolbar_icon_set",
     "toolbar_copy_path",
+    "toolbar_tab_color",
+    "toolbar_terminal_admin",
 ];

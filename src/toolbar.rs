@@ -15,6 +15,9 @@ use serde_json::{Map, Value};
 use std::sync::OnceLock;
 
 use windows::Win32::System::DataExchange::{AddClipboardFormatListener, IsClipboardFormatAvailable, RemoveClipboardFormatListener};
+use windows::Win32::UI::Controls::{
+    TTF_ABSOLUTE, TTF_TRACK, TTM_GETBUBBLESIZE, TTM_POP, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION,
+};
 
 use crate::app::*;
 use crate::imports::*;
@@ -23,8 +26,8 @@ use crate::ui::LineIcon;
 pub(crate) const FILE_NAME: &str = "toolbar.json";
 const VERSION: u32 = 1;
 
-/// How many command buttons can sit on the strip before the rest go into ».
-pub(crate) const CMD_SLOTS: i32 = 16;
+/// Button-window ceiling. Layout still stops at the pixels that are free; this only
+/// bounds how many HWNDs [`create_buttons`] makes. See [`crate::CMD_CAPACITY`].
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -57,6 +60,10 @@ pub(crate) enum Action {
     PaneColor,
     ClosePane,
     Terminal,
+    /// Window-tab colour. Distinct from [`Action::PaneColor`], which tints the pane header.
+    TabColor,
+    /// Open a terminal in the active folder with the runas verb.
+    TerminalAdmin,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,7 +178,7 @@ impl Origin {
             bottom: self.bottom,
             left: self.left,
             dpi: self.dpi,
-            max_buttons: CMD_SLOTS as usize,
+            max_buttons: CMD_CAPACITY as usize,
         }
     }
 }
@@ -189,15 +196,66 @@ pub(crate) enum Read {
     Corrupt,
 }
 
+/// What the dedicated toolbar tooltip is showing. Anchor is the button, in screen pixels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LiveTip {
+    pub control: i32,
+    pub text: String,
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+/// Whether a hover or a re-layout should talk to the tooltip window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TipStep {
+    Idle,
+    Show,
+    Hide,
+}
+
+/// Same control, text, and anchor: send nothing. A slot that changed command, a button
+/// that moved, or the pointer leaving the bar is a real update.
+pub(crate) fn tip_step(live: Option<&LiveTip>, next: Option<&LiveTip>) -> TipStep {
+    match (live, next) {
+        (None, None) => TipStep::Idle,
+        (Some(_), None) => TipStep::Hide,
+        (None, Some(_)) => TipStep::Show,
+        (Some(have), Some(want)) if have == want => TipStep::Idle,
+        (Some(_), Some(_)) => TipStep::Show,
+    }
+}
+
+/// Horizontal bar (vertical tabs): below the icon. Left column: to the right of it.
+pub(crate) fn command_tip_side(vertical_tabs: bool) -> crate::TipSide {
+    if vertical_tabs { crate::TipSide::Below } else { crate::TipSide::Right }
+}
+
 struct State {
     doc: Doc,
     clip_pasteable: bool,
+    /// Last logical enabled flag for each command id. The HWND stays enabled.
+    enabled: Vec<(i32, bool)>,
+    /// Last action painted in each slot, so a re-layout that swaps commands repaints.
+    face: Vec<(i32, Option<Action>)>,
+    tip: isize,
+    tip_added: bool,
+    live_tip: Option<LiveTip>,
 }
 
 fn state() -> std::sync::MutexGuard<'static, State> {
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
     STATE
-        .get_or_init(|| Mutex::new(State { doc: Doc::default_layout(), clip_pasteable: false }))
+        .get_or_init(|| Mutex::new(State {
+            doc: Doc::default_layout(),
+            clip_pasteable: false,
+            enabled: Vec::new(),
+            face: Vec::new(),
+            tip: 0,
+            tip_added: false,
+            live_tip: None,
+        }))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
@@ -229,6 +287,8 @@ pub(crate) fn command_id(action: Action) -> Option<&'static str> {
         Action::PaneColor => "pane.color",
         Action::ClosePane => "pane.close",
         Action::Terminal => "file.terminal",
+        Action::TabColor => "tab.color",
+        Action::TerminalAdmin => "file.terminal.admin",
     })
 }
 
@@ -258,6 +318,8 @@ pub(crate) fn action_of(id: &str) -> Option<Action> {
         "pane.color" => Action::PaneColor,
         "pane.close" => Action::ClosePane,
         "file.terminal" => Action::Terminal,
+        "tab.color" => Action::TabColor,
+        "file.terminal.admin" => Action::TerminalAdmin,
         _ => return None,
     })
 }
@@ -320,6 +382,8 @@ pub(crate) fn label_key(action: Action) -> crate::Key {
         Action::PaneColor => crate::Key::ToolbarPaneColor,
         Action::ClosePane => crate::Key::ClosePane,
         Action::Terminal => crate::Key::ToolbarTerminal,
+        Action::TabColor => crate::Key::ToolbarTabColor,
+        Action::TerminalAdmin => crate::Key::ToolbarTerminalAdmin,
     }
 }
 
@@ -364,9 +428,11 @@ pub(crate) fn drawn_icon(action: Action, icon: &IconChoice) -> LineIcon {
         Action::SplitRight => LineIcon::Fwd,
         Action::SplitBelow => LineIcon::Down,
         Action::Open => LineIcon::OpenFolder,
-        Action::PaneColor => LineIcon::Tag,
-        Action::ClosePane => LineIcon::Del,
+        Action::PaneColor => LineIcon::PaneColor,
+        Action::ClosePane => LineIcon::PaneClose,
         Action::Terminal => LineIcon::Terminal,
+        Action::TabColor => LineIcon::TabColor,
+        Action::TerminalAdmin => LineIcon::TerminalAdmin,
     }
 }
 
@@ -384,7 +450,15 @@ pub(crate) fn enabled(action: Action, input: &EnableInput) -> bool {
         Action::NewFolder | Action::NewFile => input.folder_can_receive,
         Action::DeleteSelection | Action::RenameInPlace | Action::Properties | Action::Mark | Action::BatchRename | Action::InvertSelection | Action::QuickLook => input.selection > 0,
         Action::Paste => input.folder_can_receive && input.clipboard_pasteable,
-        Action::ViewMode | Action::Overflow | Action::EditToolbar | Action::NewTab | Action::CloseTab | Action::DuplicateTab | Action::ShowHidden | Action::Zoom | Action::PreviewPane | Action::SplitRight | Action::SplitBelow | Action::Open | Action::PaneColor | Action::ClosePane | Action::Terminal | Action::CopyPath => true,
+        Action::ViewMode | Action::Overflow | Action::EditToolbar | Action::NewTab | Action::CloseTab | Action::DuplicateTab | Action::ShowHidden | Action::Zoom | Action::PreviewPane | Action::SplitRight | Action::SplitBelow | Action::Open | Action::PaneColor | Action::TabColor | Action::ClosePane | Action::Terminal | Action::TerminalAdmin | Action::CopyPath => true,
+    }
+}
+
+/// Accent paint for a toggle. `show_hidden` is the shell "show all objects" flag.
+pub(crate) fn command_toggled(action: Action, show_hidden: bool) -> bool {
+    match action {
+        Action::ShowHidden => show_hidden,
+        _ => false,
     }
 }
 
@@ -902,8 +976,8 @@ pub(crate) struct SlotMove {
 
 pub(crate) fn moves(o: &Origin) -> Vec<SlotMove> {
     let (_, lay) = layout_now(o);
-    let mut out = Vec::with_capacity(CMD_SLOTS as usize + 2);
-    for i in 0..CMD_SLOTS {
+    let mut out = Vec::with_capacity(CMD_CAPACITY as usize + 2);
+    for i in 0..CMD_CAPACITY {
         let rect = lay.commands.get(i as usize).copied().unwrap_or_else(Px::empty);
         out.push(SlotMove { id: ID_CMD_FIRST + i, rect: rect.to_rect(), show: lay.shown && rect.live() });
     }
@@ -915,10 +989,14 @@ pub(crate) fn moves(o: &Origin) -> Vec<SlotMove> {
 }
 
 pub(crate) fn is_command_control(id: i32) -> bool {
-    (ID_CMD_FIRST..ID_CMD_FIRST + CMD_SLOTS).contains(&id) || id == ID_CMD_OVERFLOW || id == ID_CMD_EDIT
+    (ID_CMD_FIRST..=ID_CMD_EDIT).contains(&id)
 }
 
-pub(crate) fn icon_for_control(id: i32) -> Option<LineIcon> {
+fn command_slot(id: i32) -> Option<usize> {
+    (ID_CMD_FIRST..ID_CMD_OVERFLOW).contains(&id).then_some((id - ID_CMD_FIRST) as usize)
+}
+
+fn placed_action(id: i32) -> Option<(Action, LineIcon)> {
     if !is_command_control(id) {
         return None;
     }
@@ -934,17 +1012,35 @@ pub(crate) fn icon_for_control(id: i32) -> Option<LineIcon> {
         return None;
     }
     if id == ID_CMD_EDIT {
-        return lay.edit.live().then_some(LineIcon::Edit);
+        return lay.edit.live().then_some((Action::EditToolbar, LineIcon::Edit));
     }
     if id == ID_CMD_OVERFLOW {
-        return lay.overflow.is_some().then_some(LineIcon::Chevrons);
+        return lay.overflow.is_some().then_some((Action::Overflow, LineIcon::Chevrons));
     }
-    let slot = (id - ID_CMD_FIRST) as usize;
+    let slot = command_slot(id)?;
     let at = *lay.command_at.get(slot)?;
     match doc.pieces().get(at)? {
-        Piece::Command { action, icon } => Some(drawn_icon(*action, icon)),
+        Piece::Command { action, icon } => Some((*action, drawn_icon(*action, icon))),
         Piece::Separator => None,
     }
+}
+
+/// Icon plus the toggle and enabled flags the button paints. The window itself stays enabled.
+pub(crate) struct CommandVisual {
+    pub icon: LineIcon,
+    pub enabled: bool,
+    pub on: bool,
+}
+
+pub(crate) unsafe fn command_visual(id: i32) -> Option<CommandVisual> {
+    let (action, icon) = placed_action(id)?;
+    let input = enable_input();
+    let show_hidden = action == Action::ShowHidden && crate::hidden();
+    Some(CommandVisual {
+        icon,
+        enabled: enabled(action, &input),
+        on: command_toggled(action, show_hidden),
+    })
 }
 
 fn action_for(id: i32, doc: &Doc, lay: &BarLay) -> Option<Action> {
@@ -954,10 +1050,8 @@ fn action_for(id: i32, doc: &Doc, lay: &BarLay) -> Option<Action> {
     if id == ID_CMD_OVERFLOW && lay.overflow.is_some() {
         return Some(Action::Overflow);
     }
-    if !(ID_CMD_FIRST..ID_CMD_FIRST + CMD_SLOTS).contains(&id) {
-        return None;
-    }
-    let at = *lay.command_at.get((id - ID_CMD_FIRST) as usize)?;
+    let slot = command_slot(id)?;
+    let at = *lay.command_at.get(slot)?;
     match doc.pieces().get(at)? {
         Piece::Command { action, .. } => Some(*action),
         Piece::Separator => None,
@@ -972,15 +1066,20 @@ fn hidden_actions(doc: &Doc, lay: &BarLay) -> Vec<Action> {
     }).collect()
 }
 
+const CMD_BTN_SUB: usize = 41;
+const CMD_MAIN_SUB: usize = 42;
+const TIP_TOOL: usize = 1;
+
 pub(crate) unsafe fn create_buttons(main: HWND) {
-    for id in ID_CMD_FIRST..ID_CMD_FIRST + CMD_SLOTS {
+    for id in ID_CMD_FIRST..=ID_CMD_EDIT {
         let b = crate::child(main, w!("BUTTON"), w!(""), BS_OWNERDRAW as u32, WINDOW_EX_STYLE(0), id, HFONT::default());
         _ = ShowWindow(b, SW_HIDE);
+        if !b.0.is_null() {
+            _ = SetWindowSubclass(b, Some(cmd_btn_proc), CMD_BTN_SUB, 0);
+        }
     }
-    for id in [ID_CMD_OVERFLOW, ID_CMD_EDIT] {
-        let b = crate::child(main, w!("BUTTON"), w!(""), BS_OWNERDRAW as u32, WINDOW_EX_STYLE(0), id, HFONT::default());
-        _ = ShowWindow(b, SW_HIDE);
-    }
+    _ = SetWindowSubclass(main, Some(cmd_main_proc), CMD_MAIN_SUB, 0);
+    let _ = ensure_tip(main);
     refresh_tips();
 }
 
@@ -991,32 +1090,55 @@ pub(crate) unsafe fn refresh_tips() {
     if main.0.is_null() {
         return;
     }
+    let _ = ensure_tip(main);
+    let tip = HWND(state().tip as *mut std::ffi::c_void);
+    if !tip.0.is_null() {
+        crate::set_tip_font(tip);
+    }
     let origin = app(|a| bar_origin(a));
     let (doc, lay) = layout_now(&origin);
-    let pieces = doc.pieces();
-    for i in 0..CMD_SLOTS {
-        let id = ID_CMD_FIRST + i;
+    for id in ID_CMD_FIRST..=ID_CMD_EDIT {
         let Ok(b) = GetDlgItem(Some(main), id) else { continue };
-        let Some(at) = lay.command_at.get(i as usize).copied() else { continue };
-        let Some(Piece::Command { action, .. }) = pieces.get(at) else { continue };
-        set_button_tip(b, *action);
+        let action = action_for(id, &doc, &lay);
+        if face_changed(id, action) {
+            _ = InvalidateRect(Some(b), None, false);
+        }
+        let Some(action) = action else { continue };
+        let name = crate::tr(label_key(action));
+        if crate::text_of(b) != name {
+            _ = SetWindowTextW(b, &HSTRING::from(name));
+        }
     }
-    if let Ok(b) = GetDlgItem(Some(main), ID_CMD_OVERFLOW) {
-        set_button_tip(b, Action::Overflow);
-    }
-    if let Ok(b) = GetDlgItem(Some(main), ID_CMD_EDIT) {
-        set_button_tip(b, Action::EditToolbar);
+    // A resize can move the button under the pointer, or give that slot a new command.
+    retip_under_cursor(main);
+}
+
+fn face_changed(id: i32, action: Option<Action>) -> bool {
+    let mut st = state();
+    if let Some(slot) = st.face.iter_mut().find(|(k, _)| *k == id) {
+        if slot.1 == action {
+            return false;
+        }
+        slot.1 = action;
+        true
+    } else {
+        st.face.push((id, action));
+        true
     }
 }
 
-unsafe fn set_button_tip(btn: HWND, action: Action) {
-    let name = crate::tr(label_key(action));
-    if crate::text_of(btn) != name {
-        _ = SetWindowTextW(btn, &HSTRING::from(name));
+/// Repaint every command button. `toggle_hidden` calls this so the accent follows
+/// the menu and the shortcut, not only the toolbar click.
+pub(crate) unsafe fn invalidate_commands() {
+    let main = app(|a| a.main);
+    if main.0.is_null() {
+        return;
     }
-    let tip = tooltip(action);
-    crate::tip_text(btn, &tip, TTM_ADDTOOLW);
-    crate::tip_text(btn, &tip, TTM_UPDATETIPTEXTW);
+    for id in ID_CMD_FIRST..=ID_CMD_EDIT {
+        if let Ok(b) = GetDlgItem(Some(main), id) {
+            _ = InvalidateRect(Some(b), None, false);
+        }
+    }
 }
 
 fn enable_input() -> EnableInput {
@@ -1042,21 +1164,255 @@ pub(crate) unsafe fn sync_enabled() {
     let (doc, lay) = layout_now(&origin);
     let input = enable_input();
     let pieces = doc.pieces();
-    for i in 0..CMD_SLOTS {
+    for i in 0..CMD_CAPACITY {
         let id = ID_CMD_FIRST + i;
         let Ok(b) = GetDlgItem(Some(main), id) else { continue };
         let Some(at) = lay.command_at.get(i as usize).copied() else { continue };
         let Some(Piece::Command { action, .. }) = pieces.get(at) else { continue };
-        set_enabled(b, enabled(*action, &input));
+        // The window stays enabled. A disabled HWND never sees the mouse, so its tooltip cannot show.
+        if !IsWindowEnabled(b).as_bool() {
+            _ = EnableWindow(b, true);
+        }
+        if logical_enabled_changed(id, enabled(*action, &input)) {
+            _ = InvalidateRect(Some(b), None, false);
+        }
     }
 }
 
-unsafe fn set_enabled(btn: HWND, on: bool) {
-    if IsWindowEnabled(btn).as_bool() == on {
+fn logical_enabled_changed(id: i32, on: bool) -> bool {
+    let mut st = state();
+    if let Some(slot) = st.enabled.iter_mut().find(|(k, _)| *k == id) {
+        if slot.1 == on {
+            return false;
+        }
+        slot.1 = on;
+        true
+    } else {
+        st.enabled.push((id, on));
+        true
+    }
+}
+
+thread_local! {
+    static TIP_BUSY: Cell<bool> = const { Cell::new(false) };
+}
+
+struct TipGuard;
+impl Drop for TipGuard {
+    fn drop(&mut self) {
+        TIP_BUSY.with(|c| c.set(false));
+    }
+}
+
+fn track_info(owner: HWND, label: &HSTRING) -> TTTOOLINFOW {
+    TTTOOLINFOW {
+        cbSize: std::mem::size_of::<TTTOOLINFOW>() as u32,
+        uFlags: TTF_TRACK | TTF_ABSOLUTE,
+        hwnd: owner,
+        uId: TIP_TOOL,
+        lpszText: PWSTR(label.as_ptr() as *mut u16),
+        ..Default::default()
+    }
+}
+
+fn pack_xy(x: i32, y: i32) -> LPARAM {
+    LPARAM((x as u16 as usize as isize) | ((y as u16 as usize as isize) << 16))
+}
+
+/// Toolbar tips use their own tooltip window. The shared one also runs tracking tips
+/// for tabs and the address bar, and a TTF_SUBCLASS tool on that window stops showing
+/// once a tracking tip has been activated. Disabled buttons never see the mouse, so
+/// this tip is placed from the button subclass and from the main window.
+unsafe fn ensure_tip(owner: HWND) -> HWND {
+    let existing = state().tip;
+    if existing != 0 {
+        let tip = HWND(existing as *mut std::ffi::c_void);
+        if IsWindow(Some(tip)).as_bool() {
+            return tip;
+        }
+    }
+    // TTS_ALWAYSTIP | TTS_NOPREFIX | TTS_NOANIMATE | TTS_NOFADE.
+    let style = WS_POPUP | WINDOW_STYLE(0x01 | 0x02 | 0x10 | 0x20);
+    let Ok(tip) = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, None, style, 0, 0, 0, 0, Some(owner), None, None, None) else {
+        return HWND::default();
+    };
+    crate::set_tip_font(tip);
+    let mut st = state();
+    st.tip = tip.0 as isize;
+    st.tip_added = false;
+    st.live_tip = None;
+    tip
+}
+
+unsafe fn command_button_at_cursor(main: HWND) -> Option<HWND> {
+    if main.0.is_null() {
+        return None;
+    }
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() {
+        return None;
+    }
+    let mut client = pt;
+    if !ScreenToClient(main, &mut client).as_bool() {
+        return None;
+    }
+    // Skip hidden slots. Do not skip disabled ones: a gray command must still hit.
+    let child = ChildWindowFromPointEx(main, client, CWP_SKIPINVISIBLE);
+    if child.0.is_null() || child == main {
+        return None;
+    }
+    let id = GetDlgCtrlID(child);
+    if !is_command_control(id) || !IsWindowVisible(child).as_bool() {
+        return None;
+    }
+    Some(child)
+}
+
+unsafe fn retip_under_cursor(main: HWND) {
+    if let Some(btn) = command_button_at_cursor(main) {
+        show_tip_for(btn);
+    } else {
+        apply_tip(main, None);
+    }
+}
+
+unsafe fn show_tip_for(btn: HWND) {
+    if btn.0.is_null() || !IsWindowVisible(btn).as_bool() {
         return;
     }
-    _ = EnableWindow(btn, on);
-    _ = InvalidateRect(Some(btn), None, false);
+    let main = GetParent(btn).unwrap_or_default();
+    let id = GetDlgCtrlID(btn);
+    let Some((action, _)) = placed_action(id) else {
+        apply_tip(main, None);
+        return;
+    };
+    let mut rc = RECT::default();
+    if GetWindowRect(btn, &mut rc).is_err() || rc.right <= rc.left || rc.bottom <= rc.top {
+        apply_tip(main, None);
+        return;
+    }
+    apply_tip(main, Some(LiveTip {
+        control: id,
+        text: tooltip(action),
+        left: rc.left,
+        top: rc.top,
+        right: rc.right,
+        bottom: rc.bottom,
+    }));
+}
+
+unsafe fn apply_tip(main: HWND, next: Option<LiveTip>) {
+    if main.0.is_null() || TIP_BUSY.with(|c| c.replace(true)) {
+        return;
+    }
+    let _guard = TipGuard;
+    let live = state().live_tip.clone();
+    match tip_step(live.as_ref(), next.as_ref()) {
+        TipStep::Idle => return,
+        TipStep::Hide => {
+            let tip = HWND(state().tip as *mut std::ffi::c_void);
+            state().live_tip = None;
+            if tip.0.is_null() {
+                return;
+            }
+            let label = HSTRING::new();
+            let ti = track_info(main, &label);
+            let lp = LPARAM(&ti as *const _ as isize);
+            SendMessageW(tip, TTM_TRACKACTIVATE, Some(WPARAM(0)), Some(lp));
+            SendMessageW(tip, TTM_POP, None, None);
+        }
+        TipStep::Show => {
+            let Some(next) = next else { return };
+            let tip = ensure_tip(main);
+            if tip.0.is_null() {
+                return;
+            }
+            let vertical = app(|a| a.s.vertical_tabs);
+            let label = HSTRING::from(next.text.as_str());
+            let ti = track_info(main, &label);
+            let lp = LPARAM(&ti as *const _ as isize);
+            if !state().tip_added {
+                SendMessageW(tip, TTM_ADDTOOLW, None, Some(lp));
+                state().tip_added = true;
+            }
+            SendMessageW(tip, TTM_SETMAXTIPWIDTH, Some(WPARAM(0)), Some(LPARAM(720)));
+            SendMessageW(tip, TTM_UPDATETIPTEXTW, None, Some(lp));
+            let size = SendMessageW(tip, TTM_GETBUBBLESIZE, None, Some(lp));
+            let (tw, th) = if size.0 != 0 {
+                ((size.0 & 0xffff) as i32, ((size.0 >> 16) & 0xffff) as i32)
+            } else {
+                let chars = next.text.chars().count().max(8) as i32;
+                (chars * 8 + 16, 26)
+            };
+            let item = RECT { left: next.left, top: next.top, right: next.right, bottom: next.bottom };
+            let work = crate::tip_work_area(item);
+            let (x, y) = crate::tip_place(item, tw, th, command_tip_side(vertical), work);
+            SendMessageW(tip, TTM_TRACKPOSITION, None, Some(pack_xy(x, y)));
+            SendMessageW(tip, TTM_TRACKACTIVATE, Some(WPARAM(1)), Some(lp));
+            state().live_tip = Some(next);
+        }
+    }
+}
+
+unsafe fn arm_leave(h: HWND) {
+    let mut t = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: h,
+        dwHoverTime: 0,
+    };
+    _ = TrackMouseEvent(&mut t);
+}
+
+unsafe extern "system" fn cmd_btn_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, id: usize, data: usize) -> LRESULT {
+    crate::crash::catch_wnd(std::panic::AssertUnwindSafe(|| unsafe { cmd_btn_proc_inner(h, msg, wp, lp, id, data) }))
+}
+
+unsafe fn cmd_btn_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    match msg {
+        WM_MOUSEMOVE => {
+            arm_leave(h);
+            show_tip_for(h);
+        }
+        WM_MOUSELEAVE => {
+            let main = GetParent(h).unwrap_or_default();
+            // A disabled neighbour does not receive this move. Hit-test includes it.
+            if let Some(btn) = command_button_at_cursor(main) {
+                if btn != h {
+                    show_tip_for(btn);
+                }
+            } else {
+                apply_tip(main, None);
+            }
+        }
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+            let main = GetParent(h).unwrap_or_default();
+            apply_tip(main, None);
+        }
+        WM_NCDESTROY => {
+            _ = RemoveWindowSubclass(h, Some(cmd_btn_proc), CMD_BTN_SUB);
+        }
+        _ => {}
+    }
+    DefSubclassProc(h, msg, wp, lp)
+}
+
+/// Mouse moves over a disabled command button are delivered to the main window.
+unsafe extern "system" fn cmd_main_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, id: usize, data: usize) -> LRESULT {
+    crate::crash::catch_wnd(std::panic::AssertUnwindSafe(|| unsafe { cmd_main_proc_inner(h, msg, wp, lp, id, data) }))
+}
+
+unsafe fn cmd_main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    if msg == WM_MOUSEMOVE {
+        if let Some(btn) = command_button_at_cursor(h) {
+            if !IsWindowEnabled(btn).as_bool() {
+                show_tip_for(btn);
+            }
+        } else if state().live_tip.is_some() {
+            apply_tip(h, None);
+        }
+    }
+    DefSubclassProc(h, msg, wp, lp)
 }
 
 pub(crate) unsafe fn note_clipboard() {
@@ -1199,9 +1555,11 @@ unsafe fn run(owner: HWND, action: Action, doc: &Doc, lay: &BarLay, from: i32) {
         Action::SplitRight => crate::header_split(pane, false),
         Action::SplitBelow => crate::header_split(pane, true),
         Action::Open => open_folder_or_file(owner, pane, from),
-        Action::PaneColor => popup_pane_color(owner, from),
+        Action::PaneColor => crate::popup_pane_tint(owner, pane, button_point(from)),
+        Action::TabColor => popup_tab_color(owner, from),
         Action::ClosePane => crate::header_close(pane),
         Action::Terminal => open_terminal(owner, pane),
+        Action::TerminalAdmin => open_terminal_admin(owner, pane),
     }
 }
 
@@ -1242,7 +1600,7 @@ unsafe fn open_folder_or_file(owner: HWND, pane: usize, from: i32) {
     }
 }
 
-unsafe fn popup_pane_color(owner: HWND, from: i32) {
+unsafe fn popup_tab_color(owner: HWND, from: i32) {
     let Ok(menu) = CreatePopupMenu() else { return };
     let _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from(crate::tr(crate::Key::None)));
     for (k, &(_, label)) in crate::TAB_COLORS.iter().enumerate() {
@@ -1266,6 +1624,16 @@ unsafe fn open_terminal(owner: HWND, pane: usize) {
         return;
     };
     crate::open_here(owner, &dir);
+}
+
+unsafe fn open_terminal_admin(owner: HWND, pane: usize) {
+    let shown = crate::pane_parsing_name(pane);
+    let Some(dir) = crate::terminal_dir(&shown) else {
+        let _ = MessageBeep(MB_ICONWARNING);
+        return;
+    };
+    // UAC cancel stays quiet. `launch` already treats ERROR_CANCELLED that way.
+    crate::launch_admin_terminal(owner, &dir);
 }
 
 /// Separator lines for the current bar. Empty when the bar is hidden or has no separators.
@@ -1316,7 +1684,7 @@ mod tests {
             bottom: 0,
             left: 0,
             dpi: 96,
-            max_buttons: CMD_SLOTS as usize,
+            max_buttons: CMD_CAPACITY as usize,
         })
     }
 
@@ -1329,7 +1697,7 @@ mod tests {
             bottom: 32 + height,
             left,
             dpi: 96,
-            max_buttons: CMD_SLOTS as usize,
+            max_buttons: CMD_CAPACITY as usize,
         })
     }
 
@@ -1635,7 +2003,7 @@ mod tests {
         // The left column and the top strip share these ids, so both bars use one rule.
         // A child of More is decided when the walk reaches More itself.
         assert_eq!(toolbar_focus_from(ID_CMD_FIRST, true), ToolbarFocus::Toolbar);
-        assert_eq!(toolbar_focus_from(ID_CMD_FIRST + CMD_SLOTS - 1, true), ToolbarFocus::Toolbar);
+        assert_eq!(toolbar_focus_from(ID_CMD_FIRST + CMD_CAPACITY - 1, true), ToolbarFocus::Toolbar);
         assert_eq!(toolbar_focus_from(ID_CMD_OVERFLOW, true), ToolbarFocus::Toolbar);
         assert_eq!(toolbar_focus_from(ID_CMD_EDIT, true), ToolbarFocus::Toolbar);
         assert!(restore_list_after_toolbar(toolbar_focus_from(ID_CMD_OVERFLOW, true)));
@@ -1711,5 +2079,145 @@ mod tests {
         assert!(!body.contains("toolbar"));
         assert_eq!(FILE_NAME, "toolbar.json");
         assert_ne!(FILE_NAME, crate::settings::store::SETTINGS_FILE);
+    }
+
+    fn many(n: usize) -> Vec<Piece> {
+        (0..n).map(|_| Piece::Command { action: Action::CopyPath, icon: IconChoice::Auto }).collect()
+    }
+
+    #[test]
+    fn wide_bar_fits_past_sixteen_and_only_the_tail_overflows() {
+        let pieces = many(24);
+        let wide = placed(true, 1440, &pieces);
+        assert!(wide.commands.len() >= 20, "1440px shows {}", wide.commands.len());
+        assert!(wide.commands.len() > 16, "the old 16-slot cap must not apply");
+        assert!(wide.overflow.is_none());
+        assert!(wide.hidden.is_empty());
+
+        // 720px, with More reserved, holds 20 commands and not 21.
+        let mid = placed(true, 720, &pieces);
+        assert_eq!(mid.commands.len(), 20);
+        assert!(mid.overflow.is_some());
+        assert_eq!(mid.hidden, (20..24).collect::<Vec<_>>());
+        assert_eq!(mid.commands.len() + mid.hidden.len(), pieces.len());
+
+        let narrow = placed(true, 280, &pieces);
+        assert!(narrow.overflow.is_some());
+        assert!(narrow.commands.len() < mid.commands.len());
+        assert!(narrow.commands.len() > 0);
+        assert_eq!(narrow.hidden, (narrow.commands.len()..pieces.len()).collect::<Vec<_>>());
+
+        let huge = many(CMD_CAPACITY as usize + 8);
+        let capped = placed(true, 8000, &huge);
+        assert_eq!(capped.commands.len(), CMD_CAPACITY as usize, "window ceiling, not a 16 cap");
+        assert!(capped.overflow.is_some());
+        assert_eq!(capped.hidden.len(), 8);
+    }
+
+    #[test]
+    fn vertical_column_overflows_by_height_not_by_sixteen() {
+        let pieces = many(24);
+        let tall = column(900, 0, &pieces);
+        assert!(tall.commands.len() >= 20, "tall column shows {}", tall.commands.len());
+        assert!(tall.overflow.is_none(), "900px holds {}", tall.commands.len());
+        assert!(tall.hidden.is_empty());
+
+        let short = column(220, 0, &pieces);
+        assert!(short.overflow.is_some());
+        assert!(short.commands.len() < tall.commands.len());
+        assert!(short.commands.len() > 0);
+        assert_eq!(short.hidden, (short.commands.len()..pieces.len()).collect::<Vec<_>>());
+        assert!(short.commands.iter().all(|r| r.bottom <= short.overflow.unwrap().top));
+    }
+
+    #[test]
+    fn command_ids_sit_between_chrome_and_menus() {
+        assert!(ID_CMD_FIRST > ID_TB_WATCH);
+        assert!(ID_CMD_EDIT < ID_HIDDEN as i32);
+        assert!(ID_CMD_EDIT < crate::ID_DRIVE);
+        assert!(ID_CMD_EDIT < ID_ACCENT as i32);
+        assert_eq!(ID_CMD_OVERFLOW, ID_CMD_FIRST + CMD_CAPACITY);
+        assert_eq!(ID_CMD_EDIT, ID_CMD_OVERFLOW + 1);
+        assert!(CMD_CAPACITY > 16);
+        assert!(is_command_control(ID_CMD_FIRST));
+        assert!(is_command_control(ID_CMD_FIRST + CMD_CAPACITY - 1));
+        assert!(is_command_control(ID_CMD_OVERFLOW));
+        assert!(is_command_control(ID_CMD_EDIT));
+        assert!(!is_command_control(ID_CMD_FIRST - 1));
+        assert!(!is_command_control(ID_CMD_EDIT + 1));
+        assert!(!is_command_control(crate::ID_DRIVE));
+        assert!(!is_command_control(ID_TB_SET));
+        assert!(!is_command_control(ID_HIDDEN as i32));
+        assert_ne!(ID_CMD_FIRST, 250);
+    }
+
+    #[test]
+    fn saved_pane_color_stays_pane_color_and_tab_color_is_new() {
+        let raw = r#"{"version":1,"items":[
+            {"type":"command","id":"pane.color","icon":{"mode":"auto"}},
+            {"type":"command","id":"pane.close","icon":{"mode":"auto"}},
+            {"type":"command","id":"file.terminal","icon":{"mode":"auto"}}
+        ]}"#;
+        let doc = parse(raw.as_bytes()).unwrap();
+        let actions: Vec<_> = doc.pieces().iter().filter_map(|p| match p {
+            Piece::Command { action, .. } => Some(*action),
+            Piece::Separator => None,
+        }).collect();
+        assert_eq!(actions, [Action::PaneColor, Action::ClosePane, Action::Terminal]);
+        let back = parse(doc.to_json().as_bytes()).unwrap();
+        assert_eq!(back.command_ids(), ["pane.color", "pane.close", "file.terminal"]);
+        assert!(!back.to_json().contains("tab.color"));
+        assert_eq!(action_of("pane.color"), Some(Action::PaneColor));
+        assert_eq!(action_of("tab.color"), Some(Action::TabColor));
+        assert_eq!(action_of("file.terminal.admin"), Some(Action::TerminalAdmin));
+        assert_eq!(command_id(Action::PaneColor), Some("pane.color"));
+        assert_eq!(command_id(Action::TabColor), Some("tab.color"));
+        assert_eq!(command_id(Action::TerminalAdmin), Some("file.terminal.admin"));
+        assert_ne!(command_id(Action::TabColor), command_id(Action::PaneColor));
+        let auto = IconChoice::Auto;
+        assert_eq!(drawn_icon(Action::PaneColor, &auto), LineIcon::PaneColor);
+        assert_eq!(drawn_icon(Action::TabColor, &auto), LineIcon::TabColor);
+        assert_eq!(drawn_icon(Action::ClosePane, &auto), LineIcon::PaneClose);
+        assert_eq!(drawn_icon(Action::TerminalAdmin, &auto), LineIcon::TerminalAdmin);
+        assert_ne!(drawn_icon(Action::ClosePane, &auto), LineIcon::Del);
+        assert_ne!(drawn_icon(Action::ClosePane, &auto), LineIcon::Close);
+        assert_ne!(drawn_icon(Action::PaneColor, &auto), drawn_icon(Action::TabColor, &auto));
+        assert_eq!(label_key(Action::TabColor), crate::Key::ToolbarTabColor);
+        assert_eq!(label_key(Action::TerminalAdmin), crate::Key::ToolbarTerminalAdmin);
+        assert_eq!(label_key(Action::PaneColor), crate::Key::ToolbarPaneColor);
+        assert_eq!(tooltip(Action::TabColor), "Tab colour");
+        assert_eq!(tooltip(Action::TerminalAdmin), "Open Terminal (Administrator)");
+        assert_eq!(crate::tint_pick(1), Some(0));
+        assert_eq!(crate::tint_pick(7), Some(6));
+        assert_eq!(crate::tint_pick(0), None);
+        assert_eq!(crate::tint_pick(8), None);
+    }
+
+    #[test]
+    fn hidden_toggle_is_on_only_while_hidden_files_are_shown() {
+        assert!(command_toggled(Action::ShowHidden, true));
+        assert!(!command_toggled(Action::ShowHidden, false));
+        for action in [Action::DeleteSelection, Action::PreviewPane, Action::Zoom, Action::PaneColor, Action::TabColor, Action::Terminal, Action::TerminalAdmin, Action::ClosePane] {
+            assert!(!command_toggled(action, true), "{action:?}");
+            assert!(!command_toggled(action, false), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn tip_updates_when_the_slot_or_its_place_changes() {
+        let tip = |id, text: &str, y| LiveTip { control: id, text: text.into(), left: 0, top: y, right: 30, bottom: y + 24 };
+        assert_eq!(tip_step(None, None), TipStep::Idle);
+        assert_eq!(tip_step(Some(&tip(1, "Delete", 0)), None), TipStep::Hide);
+        assert_eq!(tip_step(None, Some(&tip(1, "Delete", 0))), TipStep::Show);
+        let same = tip(1, "Delete", 0);
+        assert_eq!(tip_step(Some(&same), Some(&same)), TipStep::Idle);
+        // The slot kept its window and moved to a different command.
+        assert_eq!(tip_step(Some(&tip(1, "Delete", 0)), Some(&tip(1, "Paste", 0))), TipStep::Show);
+        // Resize moved the button under the pointer.
+        assert_eq!(tip_step(Some(&tip(1, "Delete", 0)), Some(&tip(1, "Delete", 40))), TipStep::Show);
+        // Pointer walked onto the next button, including a disabled one.
+        assert_eq!(tip_step(Some(&tip(1, "Delete", 0)), Some(&tip(2, "Rename", 28))), TipStep::Show);
+        assert_eq!(command_tip_side(true), crate::TipSide::Below);
+        assert_eq!(command_tip_side(false), crate::TipSide::Right);
     }
 }

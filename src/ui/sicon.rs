@@ -128,6 +128,14 @@ pub(crate) enum LineIcon {
     Permissions,
     /// Two chevrons, ». Overflow on the command toolbar.
     Chevrons,
+    /// Terminal window with a shield badge. Administrator terminal.
+    TerminalAdmin,
+    /// Browser tab with a colour chip.
+    TabColor,
+    /// Pane frame with a droplet.
+    PaneColor,
+    /// Pane frame with a corner X. Close the pane, not delete.
+    PaneClose,
 }
 
 #[path = "icon_pack.rs"]

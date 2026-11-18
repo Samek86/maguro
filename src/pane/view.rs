@@ -2387,5 +2387,7 @@ pub(crate) unsafe fn toggle_hidden() {
         }
     }
     settings::redraw();
+    // Menu, shortcut, and the toolbar button all land here. Repaint the toggle.
+    crate::toolbar::invalidate_commands();
 }
 
