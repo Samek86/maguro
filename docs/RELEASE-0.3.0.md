@@ -17,5 +17,5 @@ The toolbar work sits on top of the 0.2.25 baseline and also includes the vertic
 
 - The generic Open toolbar item is hidden from the palette once an Open-folder or Open-file target is on the bar.
 - Show hidden files remains the same Explorer-wide switch as before (Ctrl+H).
-- Default bar commands are unchanged for existing settings; open the editor to customize them.
+- The built-in default bar is New folder, New text file, Delete, Paste, Rename, View, Properties, Mark as important, a separator, Show hidden files, Duplicate pane to the right, Duplicate pane below, Close pane, and Open Terminal. A toolbar already saved in settings is left as it is; use **Use Default Set** in the editor to apply the new default.
 

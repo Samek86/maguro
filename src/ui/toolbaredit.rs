@@ -1857,7 +1857,7 @@ mod tests {
 
     #[test]
     fn the_palette_scrolls_when_the_cards_are_taller_than_the_well() {
-        let doc = Doc::default_layout();
+        let doc = crate::toolbar::parse(br#"{"version":1,"items":[]}"#).unwrap();
         let n = visible_well(&doc).len();
         let well = RECT { left: 0, top: 0, right: 400, bottom: 100 };
         let (body, content) = well_body(well, n, 96);
@@ -1939,8 +1939,9 @@ mod tests {
         let doc = targets_only();
         assert_no_overlap(&doc, w, h, 96);
         assert_no_overlap(&Doc::default_layout(), w, h, 96);
-        let old = geom_of(&Doc::default_layout(), None, 0, 0, 420, 360, 96);
-        let folder = visible_well(&Doc::default_layout()).iter().position(|item| matches!(item, Well::OpenFolder)).unwrap();
+        let full = crate::toolbar::parse(br#"{"version":1,"items":[]}"#).unwrap();
+        let old = geom_of(&full, None, 0, 0, 420, 360, 96);
+        let folder = visible_well(&full).iter().position(|item| matches!(item, Well::OpenFolder)).unwrap();
         assert!(overlaps(old.wells[folder], old.lay.reset) || !contains_rect(old.lay.well, old.wells[folder]), "420x360 still covers the open-folder card");
     }
 

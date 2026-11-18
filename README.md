@@ -115,6 +115,8 @@ The main-window tab list can be shown as a vertical strip to the right of the fa
 
 The command toolbar shows icons only — no text labels. When window tabs sit on the top row, the commands are in a vertical column beside the panes. Turn on vertical window tabs and the same commands move to a horizontal bar. The pack has about 99 bundled icons. If the window is too narrow or too short to show every button, the rest move into a **More** overflow menu.
 
+A new install, or **Use Default Set** in the editor, starts with New folder, New text file, Delete, Paste, Rename, View, Properties, and Mark as important, then a separator, Show hidden files, Duplicate pane to the right, Duplicate pane below, Close pane, and Open Terminal. A toolbar you have already saved stays as it is.
+
 <p align="center"><img width="760" alt="Vertical command toolbar" src="docs/images-v10/en/toolbar_vertical.png"></p>
 <p align="center"><img width="760" alt="Horizontal command toolbar" src="docs/images-v10/en/toolbar_horizontal.png"></p>
 

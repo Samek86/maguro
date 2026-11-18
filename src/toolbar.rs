@@ -517,17 +517,16 @@ pub(crate) fn command_toggled(action: Action, show_hidden: bool) -> bool {
 
 impl Doc {
     pub(crate) fn default_layout() -> Self {
-        const ACTIONS: [Action; 8] = [Action::NewFolder, Action::NewFile, Action::DeleteSelection, Action::Paste, Action::RenameInPlace, Action::ViewMode, Action::Properties, Action::Mark];
-        Self {
-            items: ACTIONS
-                .into_iter()
-                .filter_map(|action| {
-                    let id = command_id(action)?.to_string();
-                    Some(Item::Command { action: action_of(&id), id, icon: IconChoice::Auto })
-                })
-                .collect(),
-            extra: Map::new(),
+        const HEAD: [Action; 8] = [Action::NewFolder, Action::NewFile, Action::DeleteSelection, Action::Paste, Action::RenameInPlace, Action::ViewMode, Action::Properties, Action::Mark];
+        const TAIL: [Action; 5] = [Action::ShowHidden, Action::SplitRight, Action::SplitBelow, Action::ClosePane, Action::Terminal];
+        fn cmd(action: Action) -> Option<Item> {
+            let id = command_id(action)?.to_string();
+            Some(Item::Command { action: action_of(&id), id, icon: IconChoice::Auto })
         }
+        let mut items: Vec<Item> = HEAD.into_iter().filter_map(cmd).collect();
+        items.push(Item::Separator);
+        items.extend(TAIL.into_iter().filter_map(cmd));
+        Self { items, extra: Map::new() }
     }
 
     pub(crate) fn command_ids(&self) -> Vec<&str> {
@@ -2111,7 +2110,7 @@ mod tests {
         assert!(matches!(read_file(&path), Read::Missing));
         assert!(!path.exists());
         let doc = or_default(read_file(&path));
-        assert_eq!(doc.command_ids(), ["file.dir", "file.new", "file.delete", "file.paste", "edit.rename", "view.mode", "file.properties", "file.mark"]);
+        assert_eq!(doc.command_ids(), ["file.dir", "file.new", "file.delete", "file.paste", "edit.rename", "view.mode", "file.properties", "file.mark", "view.hidden", "pane.split.right", "pane.split.below", "pane.close", "file.terminal"]);
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2211,7 +2210,7 @@ mod tests {
     #[test]
     fn default_commands_map_to_actions_and_rename_is_f2_not_batch() {
         let doc = Doc::default_layout();
-        assert_eq!(doc.command_ids(), ["file.dir", "file.new", "file.delete", "file.paste", "edit.rename", "view.mode", "file.properties", "file.mark"]);
+        assert_eq!(doc.command_ids(), ["file.dir", "file.new", "file.delete", "file.paste", "edit.rename", "view.mode", "file.properties", "file.mark", "view.hidden", "pane.split.right", "pane.split.below", "pane.close", "file.terminal"]);
         assert_eq!(action_of("edit.rename"), Some(Action::RenameInPlace));
         assert_eq!(action_of("file.rename"), Some(Action::BatchRename), "file.rename is batch rename, available for the toolbar but not in the default layout");
         assert!(!doc.command_ids().iter().any(|id| *id == "file.rename"));
@@ -2240,6 +2239,59 @@ mod tests {
         assert_eq!(crate::tr(crate::Key::ToolbarView), "View");
         assert!(doc.to_json().contains("\"type\": \"command\""));
         assert!(!doc.items.iter().any(|it| matches!(it, Item::Raw(_))));
+        let pieces = doc.pieces();
+        assert_eq!(pieces.len(), 14);
+        assert!(matches!(pieces[8], Piece::Separator));
+        match &pieces[9] {
+            Piece::Command { action, .. } => assert_eq!(*action, Action::ShowHidden),
+            _ => panic!("view.hidden"),
+        }
+        match &pieces[10] {
+            Piece::Command { action, .. } => assert_eq!(*action, Action::SplitRight),
+            _ => panic!("pane.split.right"),
+        }
+        match &pieces[11] {
+            Piece::Command { action, .. } => assert_eq!(*action, Action::SplitBelow),
+            _ => panic!("pane.split.below"),
+        }
+        match &pieces[12] {
+            Piece::Command { action, .. } => assert_eq!(*action, Action::ClosePane),
+            _ => panic!("pane.close"),
+        }
+        match &pieces[13] {
+            Piece::Command { action, .. } => assert_eq!(*action, Action::Terminal),
+            _ => panic!("file.terminal"),
+        }
+    }
+
+    #[test]
+    fn a_saved_toolbar_is_kept_when_the_built_in_default_grows() {
+        let dir = scratch("saved-stays");
+        let path = dir.join(FILE_NAME);
+        let old = r#"{
+  "version": 1,
+  "items": [
+    {"type": "command", "id": "file.dir", "icon": {"mode": "auto"}},
+    {"type": "command", "id": "file.new", "icon": {"mode": "auto"}},
+    {"type": "command", "id": "file.delete", "icon": {"mode": "auto"}},
+    {"type": "command", "id": "file.paste", "icon": {"mode": "auto"}},
+    {"type": "command", "id": "edit.rename", "icon": {"mode": "auto"}},
+    {"type": "command", "id": "view.mode", "icon": {"mode": "auto"}},
+    {"type": "command", "id": "file.properties", "icon": {"mode": "auto"}},
+    {"type": "command", "id": "file.mark", "icon": {"mode": "auto"}}
+  ]
+}
+"#;
+        std::fs::write(&path, old).unwrap();
+        let doc = or_default(read_file(&path));
+        assert_eq!(doc.command_ids(), ["file.dir", "file.new", "file.delete", "file.paste", "edit.rename", "view.mode", "file.properties", "file.mark"]);
+        assert_ne!(doc.command_ids(), Doc::default_layout().command_ids());
+        assert!(!doc.pieces().iter().any(|p| matches!(p, Piece::Separator)));
+        let mut reset = doc.clone();
+        reset.reset_default();
+        assert_eq!(reset.command_ids(), Doc::default_layout().command_ids());
+        assert_eq!(reset.pieces().len(), 14);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2273,8 +2325,8 @@ mod tests {
         let pieces = defaults();
         let lay = placed(true, 900, &pieces);
         assert!(lay.shown);
-        assert!(lay.overflow.is_none(), "900px holds the eight commands");
-        assert_eq!(lay.commands.len(), 8);
+        assert!(lay.overflow.is_none(), "900px holds the default commands");
+        assert_eq!(lay.commands.len(), 13);
         assert!(lay.hidden.is_empty());
         assert_eq!(lay.edit.right, 900);
         assert_eq!(lay.edit.right - lay.edit.left, 30);
@@ -2314,13 +2366,13 @@ mod tests {
         assert_eq!(lay.edit.right, 200);
         assert_eq!(over.right + 2, lay.edit.left);
         assert_eq!(over.right - over.left, 30);
-        assert!(lay.commands.len() < 8);
+        assert!(lay.commands.len() < 13);
         assert!(!lay.hidden.is_empty());
         for r in &lay.commands {
             assert!(r.right + 2 <= over.left);
             assert!(r.right < lay.edit.left);
         }
-        assert_eq!(lay.commands.len() + lay.hidden.len(), 8);
+        assert_eq!(lay.commands.len() + lay.separators.len() + lay.hidden.len(), defaults().len());
     }
 
     #[test]
@@ -2328,7 +2380,8 @@ mod tests {
         let lay = column(700, 0, &defaults());
         assert!(lay.shown);
         assert!(lay.overflow.is_none());
-        assert_eq!(lay.commands.len(), 8);
+        assert_eq!(lay.commands.len(), 13);
+        assert_eq!(lay.separators.len(), 1);
         assert!(lay.hidden.is_empty());
         assert_eq!(lay.edit.left, 0, "30px button fills the 30px column");
         assert_eq!(lay.edit.right - lay.edit.left, 30);
@@ -2356,14 +2409,14 @@ mod tests {
         assert_eq!(over.bottom + 4, lay.edit.top);
         assert_eq!(over.left, lay.edit.left);
         assert_eq!(over.right - over.left, 30);
-        assert!(lay.commands.len() < 8);
+        assert!(lay.commands.len() < 13);
         assert!(!lay.hidden.is_empty());
         for r in &lay.commands {
             assert!(r.bottom + 4 <= over.top);
             assert!(r.bottom < lay.edit.top);
             assert!(r.top >= 32);
         }
-        assert_eq!(lay.commands.len() + lay.hidden.len(), 8);
+        assert_eq!(lay.commands.len() + lay.separators.len() + lay.hidden.len(), defaults().len());
     }
 
     #[test]
