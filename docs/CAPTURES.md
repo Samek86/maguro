@@ -1,8 +1,8 @@
-# 스크린샷 캡처 기록 (docs/images-v8, 일부 docs/images-v9)
+# 스크린샷 캡처 기록 (docs/images-v10)
 
-**대부분 스크린샷은 `docs/images-v8/`에 있다.** v0.2.25에서 다시 찍은 창 탭·세로 탭·우클릭 메뉴 설정·보기 메뉴는 `docs/images-v9/{en,ko,ja}/`에 있다. 같은 경로를 덮어쓰면 GitHub·브라우저 캐시에 옛 그림이 남으므로, `docs/images-v8`과 그 이전 폴더는 새 샷의 대상으로 쓰지 않는다. 다음 재촬영은 `docs/images-v10/` 같은 새 폴더에 넣는다.
+**현재 README와 도움말의 스틸은 `docs/images-v10/`에 있다.** 같은 경로를 덮어쓰면 GitHub·브라우저 캐시에 옛 그림이 남으므로, `docs/images-v8`, `docs/images-v9`와 그 이전 폴더는 새 샷의 대상으로 쓰지 않는다. 다음 재촬영은 `docs/images-v11/`에 넣는다.
 
-README(en/ja/ko)와 도움말(en/ja/ko)은 바뀌지 않은 UI 이미지를 `docs/images-v8/`로, 2026-11-16에 다시 찍은 이미지만 `docs/images-v9/`로 가리킨다. `docs/images-v7/` 이하는 대체됨(superseded)이며 트리에 남긴다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
+README(en/ja/ko)와 도움말(en/ja/ko)의 UI 이미지는 v0.3.0 재촬영부터 `docs/images-v10/`을 가리킨다. `docs/images-v9/`와 `docs/images-v8/` 이하는 대체됨(superseded)이며 트리에 남긴다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
 
 Maguro README / 도움말용 스크린샷. 모든 제품 이미지는 **포터블 빌드만** 사용하고, AppData·레지스트리·grids.ini·설치본 경로를 쓰지 않는다.
 
@@ -258,6 +258,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 시스템 대화상자(IFileOperation 진행, 탐색기 메뉴, 공통 파일 대화상자)는 그대로다. 이름 묻기, 즐겨찾기 관리, 정보, Excel, 확인 창, 그리고 팝업·알림(폴더 감시 토스트, 즐겨찾기 없음, 네트워크 실패, 빠른 복사 진행·이름 충돌, 세션 목록, 단축키, 레이아웃 고르기, 선택 칸, 서버 연결의 저장/취소)은 공유 토큰으로 옮겼다. 설정 창의 토글은 모양과 동작이 이전과 같다.
 
 ## 변경 이력 (관련)
+
+- **2026-11-19 (v0.3.0):** README·도움말(en/ko/ja)이 가리키는 스틸을 전부 `docs/images-v10/{en,ko,ja,common}/`에 다시 찍음. 메인 창은 명령 도구 모음이 보이므로 선별하지 않음. 시드는 `readme2-cfgs-v6`, 포터블 0.3.0, `G:` → `C:\WORK\pgtest\MaguroDemo`. 메인 창은 대체로 1206×813(1px 테두리 유지, 모서리 RGB 25,25,25). 보기 메뉴는 톱니 WM_COMMAND 207로 연 두 팝업만 흰 캔버스에 붙임(en 693×437, ko 575×437, ja 738×437). 새 샷: `toolbar_vertical.png`, `toolbar_horizontal.png`, `toolbar_editor.png`(562×650), `toolbar_toggle.png`(끔·켬 아이콘 열 합성, 켬은 강조색 아이콘만). `docs/images-v8/`과 `docs/images-v9/`는 그대로 둠. 데모 GIF/MP4(`docs/demo-*.gif`)는 이 패스에서 다시 찍지 않음. 다음 재촬영은 `docs/images-v11/`.
 
 - **2026-11-16 (v0.2.25 follow-up):** `docs/images-v9/{en,ko,ja}/tabs.png`와 `vertical_tabs.png`만 다시 찍음. 같은 시드·같은 창(1206×813, 1px 테두리 유지). G: 폴더 트리를 스크롤해 첫 보이는 자식이 Archive가 되게 함. `_qa-chunk1`, `_qa-s22`, `_qa-s23-chunk2`, `_qa-s25`, `_review`는 화면 밖. Photos 2026은 선택된 채로 보임. 바이트: en tabs 225835, en vertical 230660, ko tabs 225918, ko vertical 231820, ja tabs 228887, ja vertical 234051. G:의 폴더는 바꾸지 않음.
 
