@@ -263,11 +263,11 @@ body.lb-open { overflow: hidden; }
 <main class="main">
   <header class="hero">
     <h1>Maguro ヘルプ</h1>
-    <p class="tag">バージョン 0.2.25 · Windows · このサイトはライトテーマで表示されます</p>
+    <p class="tag">バージョン 0.3.0 · Windows · このサイトはライトテーマで表示されます</p>
   </header>
   <div id="no-match">一致する項目がありません。</div>
 
-  <section class="section-block" id="overview" data-search="start intro about maguro.exe version 0.2.25 efww grids fork 概要 起動">
+  <section class="section-block" id="overview" data-search="start intro about maguro.exe version 0.3.0 efww grids fork 概要 起動">
     <h2>概要</h2>
     <p>Maguro は、Windows 向けのマルチペイン ファイル マネージャーです。各ペインの中身はエクスプローラーのビューそのものなので、右クリックメニュー、ドラッグ アンド ドロップ、サムネイル、Windows のコピー ダイアログをエクスプローラーと同じように使えます。</p>
     <p>インストール直後は、ペインがひとつの状態で起動します。ほかのツールを使わずにコピー、移動、比較をしたいときは、ペインを追加してください。4×4 の格子で、最大 16 ペインまで並べられます。</p>
@@ -300,6 +300,17 @@ body.lb-open { overflow: hidden; }
     <p>ステータス バーには、選択中の項目数とドライブの空き容量が表示されます。</p>
     <p>⇄ ボタンを押すと、選択したフォルダー（選択がなければ現在のフォルダー）が別のペインで開きます。このとき、このペインの列、並べ替え、表示の設定も引き継がれます。ファイルを選択している場合は、そのファイルを別のペインへコピーまたは移動します（一度に 10,000 個まで）。ペインがひとつしかない場合は、左右に分割します。何も選択していないとき、またはフォルダーを含まずファイルだけを選択しているときは、現在のフォルダーを複製し、選択したファイルはコピーしません。</p>
     <div class="shot-grid"><figure class="shot"><img src="../../images-v8/ja/address_toolbar.png" alt="アドレス バーとツール バー" loading="lazy"><figcaption>アドレス バーとツールバー</figcaption></figure></div>
+  </section>
+
+  <section class="section-block" id="command-toolbar" data-search="command toolbar editor palette more overflow ツールバー エディター パレット その他 縦列 横バー トグル アクセント 隠し 鉛筆 対象">
+    <h2>コマンドツールバー</h2>
+    <p class="ref-shortcuts">キー一覧は <a href="#shortcuts">ショートカット</a> にあります。</p>
+    <p>コマンドツールバーは、上で説明したタブ行のツール（レイアウト、保存、歯車、ドライブ文字）とは別です。ファイルや表示のコマンドを<strong>アイコンだけ</strong>で並べます。ウィンドウタブが上段にあるときはペインの横の縦列、縦のウィンドウタブをオンにすると同じコマンドが横バーに移ります。同梱アイコンは約 99 個です。ウィンドウが狭くてボタンが収まりきらない分は、<strong>その他</strong> のオーバーフローメニューに入ります。</p>
+    <div class="shot-grid"><figure class="shot"><img src="../../images-v10/ja/toolbar_vertical.png" alt="縦のコマンドツールバー" loading="lazy"><figcaption>縦のコマンド列</figcaption></figure><figure class="shot"><img src="../../images-v10/ja/toolbar_horizontal.png" alt="横のコマンドツールバー" loading="lazy"><figcaption>横のコマンドバー</figcaption></figure></div>
+    <p>縦列の下にある鉛筆ボタン、または横バーの同じボタンからエディターを開きます。バーとパレットのあいだでコマンドをドラッグし、バー上の順番を並べ替えます。特定のフォルダーやファイルを開く対象を追加でき、その対象が一般の「開く」項目の代わりになります。そのとき一般の「開く」はパレットに出ません。エディターはサイズ変更でき、バーとパレットが使えるよう最小サイズが決まっています。パレットカードの長い名前は省略記号で終わり、ツールチップに正式名が出ます。</p>
+    <div class="shot-grid"><figure class="shot"><img src="../../images-v10/ja/toolbar_editor.png" alt="コマンドパレット付きのツールバーエディター" loading="lazy"><figcaption>ツールバーエディター</figcaption></figure></div>
+    <p>隠しファイルの表示のようなトグルは、他のボタンと同じ背景のままです。オンのときはアイコンだけがアクセント色で、ホバーやプレスでも同じです。</p>
+    <div class="shot-grid"><figure class="shot"><img src="../../images-v10/ja/toolbar_toggle.png" alt="隠しファイル表示のオフとオン。オンはアイコンだけアクセント色" loading="lazy"><figcaption>オフとオン</figcaption></figure></div>
   </section>
 
   <section class="section-block" id="layouts" data-search="layout grid splitter maximise pane 4x4 sixteen レイアウト ペイン 格子">
@@ -509,7 +520,7 @@ body.lb-open { overflow: hidden; }
 
   <section class="section-block" id="shortcuts" data-search="shortcut key chord hotkey keyboard defaults ショートカット">
     <h2>ショートカット</h2>
-    <p>以下は既定のショートカットで、すべて設定 → ショートカットで変更できます。アプリ内のショートカット一覧（Ctrl+/）には、変更が再起動なしですぐに反映されます。このページには、0.2.25 に含まれる既定値を載せています。</p>
+    <p>以下は既定のショートカットで、すべて設定 → ショートカットで変更できます。アプリ内のショートカット一覧（Ctrl+/）には、変更が再起動なしですぐに反映されます。このページには、0.3.0 に含まれる既定値を載せています。</p>
     <p>Win+Shift+E と Alt+Z は、Maguro の実行中は常に登録されています。Ctrl+Alt+G は、別のアプリの「開く」や「保存」ダイアログが前面にあるときだけ登録されます。ワークスペースのキーはグローバル ホットキーではありません。ペイン タブのキーは、フォーカスがペインにあるときだけ動作します。</p>
     <table class="shortcuts-table"><thead><tr><th>キー</th><th>操作</th></tr></thead><tbody>
       <tr><td class="cat" colspan="2">タブ</td></tr>

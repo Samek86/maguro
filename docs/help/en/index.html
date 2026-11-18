@@ -263,11 +263,11 @@ body.lb-open { overflow: hidden; }
 <main class="main">
   <header class="hero">
     <h1>Maguro Help</h1>
-    <p class="tag">Version 0.2.25 · Windows · this site uses the light theme</p>
+    <p class="tag">Version 0.3.0 · Windows · this site uses the light theme</p>
   </header>
   <div id="no-match">No matching sections.</div>
 
-  <section class="section-block" id="overview" data-search="start intro about maguro.exe version 0.2.25 efww grids fork">
+  <section class="section-block" id="overview" data-search="start intro about maguro.exe version 0.3.0 efww grids fork">
     <h2>Overview</h2>
     <p>Maguro is a multi-pane file manager for Windows. Every pane is a real Explorer view, so the right-click menu, drag and drop, thumbnails and the Windows copy dialog all work exactly as they do in Explorer.</p>
     <p>A new install starts with a single pane. When you need to copy, move or compare files without opening a second program, add more panes – up to sixteen, in a 4×4 grid.</p>
@@ -300,6 +300,17 @@ body.lb-open { overflow: hidden; }
     <p>The status bar shows how many items are selected and how much free space the drive has.</p>
     <p>The ⇄ button opens the selected folder (or, if nothing is selected, the current one) in another pane, carrying over this pane’s columns, sort order and view. If files are selected, it copies or moves them to the other pane – up to 10,000 at a time. With only one pane open, it splits the window left and right. If nothing is selected, or only files are selected and no folder, it duplicates the current folder and leaves the selected files where they are.</p>
     <div class="shot-grid"><figure class="shot"><img src="../../images-v8/en/address_toolbar.png" alt="Address bar and toolbar" loading="lazy"><figcaption>Address bar and toolbar</figcaption></figure></div>
+  </section>
+
+  <section class="section-block" id="command-toolbar" data-search="command toolbar editor palette more overflow vertical column horizontal bar toggle accent icon hidden pencil change open target">
+    <h2>Command toolbar</h2>
+    <p class="ref-shortcuts">All keys are listed in <a href="#shortcuts">Shortcuts</a>.</p>
+    <p>The command toolbar is separate from the tab-row tools (Layout, Save, the gear, and drive letters) described above. It holds file and view commands as <strong>icons only</strong>. When window tabs are on the top row, the commands sit in a vertical column beside the panes. When vertical window tabs are on, the same commands move to a horizontal bar. The bundled pack has about 99 icons. If the window is too narrow or too short to show every button, the rest go into a <strong>More</strong> overflow menu.</p>
+    <div class="shot-grid"><figure class="shot"><img src="../../images-v10/en/toolbar_vertical.png" alt="Vertical command toolbar" loading="lazy"><figcaption>Vertical command column</figcaption></figure><figure class="shot"><img src="../../images-v10/en/toolbar_horizontal.png" alt="Horizontal command toolbar" loading="lazy"><figcaption>Horizontal command bar</figcaption></figure></div>
+    <p>Open the toolbar editor from the pencil button at the bottom of the vertical column, or the matching control on the horizontal bar. Drag commands between the bar and the palette, and rearrange the ones already on the bar. You can add an Open target for a specific folder or file; those targets replace the generic Open item, which then stays out of the palette. The editor is resizable and has a fixed minimum size so the bar and the palette stay usable. A long name on a palette card ends in an ellipsis; the tooltip shows the full name.</p>
+    <div class="shot-grid"><figure class="shot"><img src="../../images-v10/en/toolbar_editor.png" alt="Toolbar editor with the palette of commands" loading="lazy"><figcaption>Toolbar editor</figcaption></figure></div>
+    <p>A toggle such as Show hidden files keeps the same background as the other buttons. When it is on, only the icon uses the accent colour, including when you hover or press it.</p>
+    <div class="shot-grid"><figure class="shot"><img src="../../images-v10/en/toolbar_toggle.png" alt="Show hidden files off and on; on uses the accent icon only" loading="lazy"><figcaption>Toggle off and on</figcaption></figure></div>
   </section>
 
   <section class="section-block" id="layouts" data-search="layout grid splitter maximise pane 4x4 sixteen">
@@ -509,7 +520,7 @@ body.lb-open { overflow: hidden; }
 
   <section class="section-block" id="shortcuts" data-search="shortcut key chord hotkey keyboard defaults">
     <h2>Shortcuts</h2>
-    <p>These are the default shortcuts. You can change any of them under Settings → Shortcuts, and the in-app list (Ctrl+/) reflects your changes straight away, without a restart. This page shows the defaults that ship with version 0.2.25.</p>
+    <p>These are the default shortcuts. You can change any of them under Settings → Shortcuts, and the in-app list (Ctrl+/) reflects your changes straight away, without a restart. This page shows the defaults that ship with version 0.3.0.</p>
     <p>Win+Shift+E and Alt+Z stay registered for as long as Maguro is running. Ctrl+Alt+G is only registered while another app’s Open or Save dialog is in front. Workspace shortcuts aren’t global, and pane-tab shortcuts only work while focus is in a pane.</p>
     <table class="shortcuts-table"><thead><tr><th>Keys</th><th>Action</th></tr></thead><tbody>
       <tr><td class="cat" colspan="2">Tab</td></tr>

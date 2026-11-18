@@ -3505,7 +3505,7 @@ mod tests {
     #[test]
     fn about_license_names_the_icon_pack() {
         let copy = with_icon_credit(about_copy(
-            "0.2.25",
+            "0.3.0",
             "Fast multi-pane file manager for Windows",
             "MIT License · © 2026 efww, Samek86",
             "Fork of github.com/efww/grids",
