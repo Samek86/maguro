@@ -23,7 +23,7 @@ use crate::imports::*;
 use crate::ui::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::Controls::ILD_NORMAL;
+use windows::Win32::UI::Controls::{IImageList, ILD_NORMAL};
 use windows::Win32::UI::Shell::IPreviewHandler;
 
 const PREVIEW_DELAY_MS: u32 = 200;
@@ -246,6 +246,34 @@ fn total_line(total: Total) -> String {
         Total::Ready { bytes, partial: false } => tf(crate::Key::FolderTotal, &[("size", &crate::human(bytes))]),
         Total::Ready { bytes, partial: true } => tf(crate::Key::FolderTotalPartial, &[("size", &crate::human(bytes))]),
         Total::Skipped => tr(crate::Key::FolderTotalSkipped).to_string(),
+    }
+}
+
+fn shown_folder(slot: &Slot) -> bool {
+    slot.kind == Kind::Shown && slot.folder
+}
+
+fn list_head<'a>(slot: &'a Slot) -> &'a str {
+    match &slot.body {
+        Some(Body::List { head, .. }) => head.as_str(),
+        _ => "",
+    }
+}
+
+/// Facts for the one folder block: attribute fields, the listing summary, and the async total.
+fn folder_block_facts(slot: &Slot) -> FolderFacts {
+    let total = total_line(slot.total);
+    folder_fact_lines(&shown_name(slot), &slot.facts.fields(), list_head(slot), &total)
+}
+
+/// Header height. A shown folder is the single block. A file keeps the attribute band.
+fn slot_head_height(slot: &Slot, width: i32, pane_h: i32, dpi: i32, fh: i32) -> i32 {
+    if shown_folder(slot) {
+        folder_chrome(folder_block_facts(slot).lines.len(), pane_h, dpi, fh).height
+    } else {
+        let name = shown_name(slot);
+        let (_, _, head, ..) = band(&name, &slot.facts, width, pane_h, dpi, fh);
+        head
     }
 }
 
@@ -623,9 +651,7 @@ unsafe fn place_head(h: HWND) {
     let (w, ht) = client_size(h);
     let key = key_of(h);
     if let Some(slot) = slots().get_mut(&key) {
-        let name = shown_name(slot);
-        let (_, _, head, ..) = band(&name, &slot.facts, w, ht, dpi, fh);
-        slot.head_h = head;
+        slot.head_h = slot_head_height(slot, w, ht, dpi, fh);
     }
 }
 
@@ -681,10 +707,11 @@ unsafe fn on_ready(h: HWND, gen: u64) {
                 }
             }
             drop_host(key);
-            place_head(h);
             if folder {
                 arm_total(h, gen);
             }
+            // The total line is part of the folder block, so measure after it is armed.
+            place_head(h);
             give_back(h);
             _ = InvalidateRect(Some(h), None, false);
         }
@@ -1225,44 +1252,48 @@ unsafe fn paint_preview(h: HWND) {
             return;
         };
         let s = |v: i32| v * dpi / 96;
-        let name = shown_name(slot);
-        let (rows, exif, head, line, pad, icon) = band(&name, &slot.facts, rc.right - rc.left, rc.bottom - rc.top, dpi, fh);
-        if head != slot.head_h {
-            slot.head_h = head;
-            sync = slot.kind == Kind::Handler && slot.host != 0;
-        }
         fill(dc, rc, pal().bg);
-        let bar = RECT { left: rc.left, top: rc.top, right: rc.right, bottom: (rc.top + head).min(rc.bottom) };
-        fill(dc, bar, pal().card);
-        if let Some(il) = &ilist {
-            if slot.facts.icon >= 0 {
-                if let Ok(ico) = il.GetIcon(slot.facts.icon, ILD_NORMAL.0) {
-                    let y = bar.top + pad + (line - icon) / 2;
-                    _ = DrawIconEx(dc, bar.left + pad, y, ico, icon, icon, 0, None, DI_NORMAL);
-                    _ = DestroyIcon(ico);
+        // A folder is one block (large icon, name once, each fact once). A file keeps the attribute band.
+        let (mut y, pad) = if shown_folder(slot) {
+            paint_folder_head(dc, rc, slot, font, dpi, fh, ilist.as_ref())
+        } else {
+            let name = shown_name(slot);
+            let (rows, exif, head, line, pad, icon) = band(&name, &slot.facts, rc.right - rc.left, rc.bottom - rc.top, dpi, fh);
+            if head != slot.head_h {
+                slot.head_h = head;
+                sync = slot.kind == Kind::Handler && slot.host != 0;
+            }
+            let bar = RECT { left: rc.left, top: rc.top, right: rc.right, bottom: (rc.top + head).min(rc.bottom) };
+            fill(dc, bar, pal().card);
+            if let Some(il) = &ilist {
+                if slot.facts.icon >= 0 {
+                    if let Ok(ico) = il.GetIcon(slot.facts.icon, ILD_NORMAL.0) {
+                        let y = bar.top + pad + (line - icon) / 2;
+                        _ = DrawIconEx(dc, bar.left + pad, y, ico, icon, icon, 0, None, DI_NORMAL);
+                        _ = DestroyIcon(ico);
+                    }
                 }
             }
-        }
-        let faces = PANE_FACES.with(|c| pview::fonts(&mut c.borrow_mut(), dpi, font));
-        let text_left = bar.left + pad + icon + s(6);
-        for (i, row) in rows.iter().enumerate() {
-            let top = bar.top + pad + i as i32 * line;
-            let r = RECT { left: text_left, top, right: bar.right - pad, bottom: top + line };
-            let face = if i == 0 { faces[1] } else { font };
-            let ink = if i == 0 { pal().text } else { pal().sub };
-            text(dc, r, row, face, ink, DT_LEFT | DT_VCENTER);
-        }
-        if !exif.is_empty() {
-            let top0 = bar.top + pad + rows.len() as i32 * line + s(2);
-            for (i, row) in exif.iter().enumerate() {
-                let top = top0 + i as i32 * line;
+            let faces = PANE_FACES.with(|c| pview::fonts(&mut c.borrow_mut(), dpi, font));
+            let text_left = bar.left + pad + icon + s(6);
+            for (i, row) in rows.iter().enumerate() {
+                let top = bar.top + pad + i as i32 * line;
                 let r = RECT { left: text_left, top, right: bar.right - pad, bottom: top + line };
-                text(dc, r, row, font, accent, DT_LEFT | DT_VCENTER);
+                let face = if i == 0 { faces[1] } else { font };
+                let ink = if i == 0 { pal().text } else { pal().sub };
+                text(dc, r, row, face, ink, DT_LEFT | DT_VCENTER);
             }
-        }
-        fill(dc, RECT { top: bar.bottom.saturating_sub(1), bottom: bar.bottom, ..bar }, pal().line);
-
-        let mut y = bar.bottom;
+            if !exif.is_empty() {
+                let top0 = bar.top + pad + rows.len() as i32 * line + s(2);
+                for (i, row) in exif.iter().enumerate() {
+                    let top = top0 + i as i32 * line;
+                    let r = RECT { left: text_left, top, right: bar.right - pad, bottom: top + line };
+                    text(dc, r, row, font, accent, DT_LEFT | DT_VCENTER);
+                }
+            }
+            fill(dc, RECT { top: bar.bottom.saturating_sub(1), bottom: bar.bottom, ..bar }, pal().line);
+            (bar.bottom, pad)
+        };
         slot.hit.copy = RECT::default();
         slot.hit.edit = RECT::default();
         if slot.kind == Kind::Shown && has_text(slot) {
@@ -1289,14 +1320,11 @@ unsafe fn paint_preview(h: HWND) {
             slot.hit.edit = e;
             y = e.bottom + s(4);
         }
-        if slot.kind == Kind::Shown && slot.folder {
-            y = paint_hero(dc, rc, y, slot, font, faces[1], dpi, fh);
-        }
         let gutter = s(12);
         let body = RECT { left: rc.left + pad, top: y, right: (rc.right - gutter).max(rc.left + pad), bottom: rc.bottom };
         slot.hit.body = body;
         match slot.kind {
-            Kind::Handler => fill(dc, RECT { top: bar.bottom, ..rc }, pal().card),
+            Kind::Handler => fill(dc, RECT { top: y, ..rc }, pal().card),
             Kind::Opening => text(dc, body, tr(crate::Key::OpeningPreview), font, pal().sub, DT_CENTER),
             Kind::Empty | Kind::Idle => text(dc, body, tr(crate::Key::NoPreview), font, pal().sub, DT_CENTER),
             Kind::Shown => {
@@ -1334,32 +1362,61 @@ unsafe fn paint_btn(dc: HDC, r: RECT, label: &str, font: HFONT, hot: bool, accen
     text(dc, r, label, font, pal().text, DT_CENTER | DT_VCENTER);
 }
 
-unsafe fn paint_hero(dc: HDC, rc: RECT, top: i32, slot: &Slot, font: HFONT, bold: HFONT, dpi: i32, fh: i32) -> i32 {
-    let s = |v: i32| v * dpi / 96;
-    let pad = s(8);
-    let side = s(48).max(32);
-    let line = (fh + s(2)).max(s(16));
-    let bottom = (top + side + pad).min(rc.bottom);
-    let band = RECT { left: rc.left, top, right: rc.right, bottom };
-    fill(dc, band, blend(pal().card, pal().bg, 0.35));
-    if let Some(p) = &slot.big {
-        let k = (side as f32 / p.w.max(1) as f32).min(side as f32 / p.h.max(1) as f32).min(1.0);
-        let (w, h) = ((p.w as f32 * k) as i32, (p.h as f32 * k) as i32);
-        let x = rc.left + pad + (side - w) / 2;
-        let y = top + (side - h) / 2;
-        blit_bgra(dc, RECT { left: x, top: y, right: x + w, bottom: y + h }, p.w, p.h, &p.bgra);
+/// One folder block. The large icon, the name, and each fact are drawn once.
+/// The returned bottom is `head_h` below the top, which is where the file list and `body_rect` start.
+/// A missing jumbo icon falls back to the system icon so a UNC folder still has a mark.
+unsafe fn paint_folder_head(dc: HDC, rc: RECT, slot: &mut Slot, font: HFONT, dpi: i32, fh: i32, ilist: Option<&IImageList>) -> (i32, i32) {
+    let facts = folder_block_facts(slot);
+    let pane_h = (rc.bottom - rc.top).max(0);
+    let chrome = folder_chrome(facts.lines.len(), pane_h, dpi, fh);
+    slot.head_h = chrome.height;
+    let pad = chrome.pad;
+    let bottom = (rc.top + chrome.height).min(rc.bottom);
+    if bottom <= rc.top {
+        return (rc.top, pad);
     }
-    let left = rc.left + pad + side + s(8);
-    let name = shown_name(slot);
-    text(dc, RECT { left, top, right: rc.right - pad, bottom: top + line }, &name, bold, pal().text, DT_LEFT | DT_VCENTER);
-    let head = match &slot.body {
-        Some(Body::List { head, .. }) => head.as_str(),
-        _ => "",
-    };
-    text(dc, RECT { left, top: top + line, right: rc.right - pad, bottom: top + line * 2 }, head, font, pal().sub, DT_LEFT | DT_VCENTER);
-    let total = total_line(slot.total);
-    text(dc, RECT { left, top: top + line * 2, right: rc.right - pad, bottom: top + line * 3 }, &total, font, pal().text, DT_LEFT | DT_VCENTER);
-    bottom.max(top + line * 3)
+    let band = RECT { left: rc.left, top: rc.top, right: rc.right, bottom };
+    fill(dc, band, blend(pal().card, pal().bg, 0.35));
+    let s = |v: i32| v * dpi / 96;
+    let icon_top = rc.top + pad;
+    let side = chrome.icon.min((bottom - icon_top).max(0));
+    if side > 0 {
+        if let Some(p) = &slot.big {
+            let k = (side as f32 / p.w.max(1) as f32).min(side as f32 / p.h.max(1) as f32).min(1.0);
+            let (w, h) = ((p.w as f32 * k) as i32, (p.h as f32 * k) as i32);
+            if w > 0 && h > 0 {
+                let x = rc.left + pad + (side - w) / 2;
+                let y = icon_top + (side - h) / 2;
+                blit_bgra(dc, RECT { left: x, top: y, right: x + w, bottom: y + h }, p.w, p.h, &p.bgra);
+            }
+        } else if let Some(il) = ilist {
+            if slot.facts.icon >= 0 {
+                if let Ok(ico) = il.GetIcon(slot.facts.icon, ILD_NORMAL.0) {
+                    _ = DrawIconEx(dc, rc.left + pad, icon_top, ico, side, side, 0, None, DI_NORMAL);
+                    _ = DestroyIcon(ico);
+                }
+            }
+        }
+    }
+    let bold = PANE_FACES.with(|c| pview::fonts(&mut c.borrow_mut(), dpi, font)[1]);
+    let left = rc.left + pad + side + s(8).max(4);
+    let right = rc.right - pad;
+    let mut y = rc.top + pad;
+    if y + chrome.line <= bottom {
+        let name = shown_name(slot);
+        text(dc, RECT { left, top: y, right, bottom: y + chrome.line }, &name, bold, pal().text, DT_LEFT | DT_VCENTER);
+        y += chrome.line;
+    }
+    for (i, line) in facts.lines.iter().enumerate() {
+        if y + chrome.line > bottom {
+            break;
+        }
+        let ink = if facts.total_at == Some(i) { pal().text } else { pal().sub };
+        text(dc, RECT { left, top: y, right, bottom: y + chrome.line }, line, font, ink, DT_LEFT | DT_VCENTER);
+        y += chrome.line;
+    }
+    fill(dc, RECT { top: bottom.saturating_sub(1), bottom, ..band }, pal().line);
+    (bottom, pad)
 }
 
 unsafe fn paint_fit(dc: HDC, area: RECT, p: &Pix) {
@@ -1448,7 +1505,8 @@ fn preview_host_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
 
 #[cfg(test)]
 mod tests {
-    use super::cap_lines;
+    use super::{band, cap_lines, folder_block_facts, folder_chrome, slot_head_height, Kind, Slot, Total};
+    use crate::pane::preview::{Body, TextKind};
 
     #[test]
     fn header_caps_extra_lines() {
@@ -1465,5 +1523,46 @@ mod tests {
         assert_eq!(super::join_child(r"C:\Work\", "notes"), Some(r"C:\Work\notes".into()));
         assert_eq!(super::join_child(r"C:\Work", r"a\b"), None);
         assert_eq!(super::join_child(r"C:\Work", ".."), None);
+    }
+
+    #[test]
+    fn folder_preview_is_one_block_and_a_file_keeps_its_band() {
+        let mut folder = Slot::default();
+        folder.kind = Kind::Shown;
+        folder.folder = true;
+        folder.title = "Photos".into();
+        folder.facts.name = "Photos".into();
+        folder.facts.type_name = "File folder".into();
+        folder.facts.extra = "2 folders, 10 files, 1.2 MB".into();
+        folder.facts.modified = "Modified 2026-11-01".into();
+        folder.facts.created = "Created 2026-01-01".into();
+        folder.body = Some(Body::List { head: "2 folders, 10 files, 1.2 MB".into(), rows: vec![("a.jpg".into(), "1 KB".into())] });
+        folder.total = Total::Pending;
+        let facts = folder_block_facts(&folder);
+        assert_eq!(
+            facts.lines,
+            vec![
+                "File folder".to_string(),
+                "2 folders, 10 files, 1.2 MB".to_string(),
+                "Modified 2026-11-01".to_string(),
+                "Created 2026-01-01".to_string(),
+                "Total …".to_string(),
+            ]
+        );
+        assert_eq!(facts.total_at, Some(4));
+        let height = slot_head_height(&folder, 280, 640, 96, 16);
+        assert_eq!(height, folder_chrome(facts.lines.len(), 640, 96, 16).height);
+
+        let mut file = Slot::default();
+        file.kind = Kind::Shown;
+        file.facts.name = "notes.txt".into();
+        file.facts.type_name = "Text Document".into();
+        file.facts.size = "4 KB".into();
+        file.facts.modified = "Modified 2026-11-01".into();
+        file.body = Some(Body::Text { text: "hi".into(), kind: TextKind::Plain, cut: false });
+        let file_h = slot_head_height(&file, 280, 640, 96, 16);
+        let (_, _, band_h, ..) = band("notes.txt", &file.facts, 280, 640, 96, 16);
+        assert_eq!(file_h, band_h);
+        assert_ne!(file_h, height);
     }
 }

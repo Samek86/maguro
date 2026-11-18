@@ -243,7 +243,10 @@ fn main() -> Result<()> {
             ..Default::default()
         });
         RegisterClassW(&WNDCLASSW {
-            style: CS_DBLCLKS, // header maximises; a double-click on a picture or PDF resets zoom
+            // Double-click maximises the header, or resets zoom on a picture or PDF.
+            // A width or height change redraws the whole client. Fit content is laid out
+            // from the new size in paint; without this the old pixels stay and the new strip is blank.
+            style: CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(peek_proc),
             hInstance: hinst,
             hCursor: arrow,
