@@ -2040,6 +2040,12 @@ fn is_fit(z: f64) -> bool {
     (zoom_or_fit(z) - 1.0).abs() < 1e-9
 }
 
+/// A Quick View resize asks for sharper PDF pages only while zoomed.
+/// Fit already scales the pages to the new stage in paint.
+fn peek_resize_wants_pdf(zoom: f64) -> bool {
+    !is_fit(zoom)
+}
+
 /// `delta` is the wheel delta, positive zooming in. 120 is one notch.
 pub(crate) fn zoom_factor(z: f64, delta: i32) -> f64 {
     let z = zoom_or_fit(z);
@@ -2999,11 +3005,14 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 return LRESULT(0);
             }
             WM_SIZE => {
+                // The preview-handler child follows the stage. Image, text, PDF, and folder
+                // content are painted from the client rect, so the whole window is invalidated:
+                // Windows would otherwise keep the old pixels and leave the new strip blank,
+                // which is what breaks a fitted picture. Erase stays off; paint is buffered,
+                // so the full invalidate does not flash. A sharper PDF is requested only while zoomed.
                 sync_host(h);
-                // Fit layout already follows the stage. Zoomed content changes size with it, so redraw
-                // the whole window; a PDF asks for sharper pages once the resize settles.
-                if !is_fit(view(|v| v.zoom)) {
-                    _ = InvalidateRect(Some(h), None, false);
+                _ = InvalidateRect(Some(h), None, false);
+                if peek_resize_wants_pdf(view(|v| v.zoom)) {
                     schedule_pdf_zoom(h);
                 }
             }
@@ -3790,6 +3799,11 @@ mod tests {
         assert_eq!(zoom_pct(0.0), 100);
         assert_eq!(zoom_label("JPEG   ·   1.2 MB", 150), "JPEG   ·   1.2 MB  150%");
         assert_eq!(zoom_label("", 100), "100%");
+        assert!(!peek_resize_wants_pdf(0.0));
+        assert!(!peek_resize_wants_pdf(1.0));
+        assert!(peek_resize_wants_pdf(1.25));
+        assert!(peek_resize_wants_pdf(ZOOM_MIN));
+        assert!(peek_resize_wants_pdf(ZOOM_MAX));
 
         // Fit never enlarges; a wide picture is width-bound.
         assert_eq!(image_fit_px(100, 50, 400, 400), (100, 50));
