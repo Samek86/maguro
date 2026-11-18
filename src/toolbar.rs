@@ -1092,6 +1092,55 @@ pub(crate) unsafe fn remove_clipboard(main: HWND) {
     _ = RemoveClipboardFormatListener(main);
 }
 
+/// Where the keyboard is when a toolbar action returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolbarFocus {
+    /// A command button, More, Change, or a child of one of those.
+    Toolbar,
+    /// A dialog, the address bar, rename, or some other window.
+    Elsewhere,
+}
+
+/// The file list gets the keyboard back only while the toolbar still has it.
+/// The toolbar editor, Settings, Properties, rename, and the address bar keep
+/// whatever focus they took.
+pub(crate) fn restore_list_after_toolbar(focus: ToolbarFocus) -> bool {
+    matches!(focus, ToolbarFocus::Toolbar)
+}
+
+/// One window on the parent walk. `id` is that window's control id.
+/// `parent_is_main` is true only when its parent is the main frame, so a dialog
+/// that reuses a command id is not the toolbar. A command slot, More, and Change
+/// all count. The top strip and the left column use the same ids.
+pub(crate) fn toolbar_focus_from(id: i32, parent_is_main: bool) -> ToolbarFocus {
+    if parent_is_main && is_command_control(id) {
+        ToolbarFocus::Toolbar
+    } else {
+        ToolbarFocus::Elsewhere
+    }
+}
+
+/// `GetFocus` after the action. Null, or a window that is not a toolbar button
+/// (or a child of one), is [`ToolbarFocus::Elsewhere`].
+unsafe fn toolbar_focus_now(main: HWND) -> ToolbarFocus {
+    let focus = GetFocus();
+    if main.0.is_null() || focus.0.is_null() || !IsWindow(Some(focus)).as_bool() {
+        return ToolbarFocus::Elsewhere;
+    }
+    let mut h = focus;
+    for _ in 0..8 {
+        if h.0.is_null() || h == main {
+            return ToolbarFocus::Elsewhere;
+        }
+        let kind = toolbar_focus_from(GetDlgCtrlID(h), GetParent(h).unwrap_or_default() == main);
+        if kind == ToolbarFocus::Toolbar {
+            return kind;
+        }
+        h = GetParent(h).unwrap_or_default();
+    }
+    ToolbarFocus::Elsewhere
+}
+
 pub(crate) unsafe fn command(owner: HWND, id: usize) -> bool {
     let id = id as i32;
     if !is_command_control(id) {
@@ -1103,7 +1152,16 @@ pub(crate) unsafe fn command(owner: HWND, id: usize) -> bool {
     if !lay.shown {
         return true;
     }
+    // More opens its menu inside `run` and then runs the chosen command there,
+    // so this single check covers the overflow path. The vertical column uses
+    // the same buttons and the same `command` entry.
     run(owner, action, &doc, &lay, id);
+    // The button took focus on the click. Give it back to the active pane's
+    // list when it is still on the toolbar. A window or field the action
+    // opened (toolbar editor, properties, rename, address bar) keeps focus.
+    if restore_list_after_toolbar(toolbar_focus_now(owner)) {
+        crate::focus_view(app(|a| a.s.active));
+    }
     true
 }
 
@@ -1569,6 +1627,30 @@ mod tests {
         assert!(sep.left >= lay.commands[0].right);
         assert!(sep.right <= lay.commands[1].left);
         assert!(sep.right - sep.left < 30);
+    }
+
+    #[test]
+    fn list_focus_returns_only_while_the_toolbar_still_has_it() {
+        // A click leaves focus on the button. More and Change are the same kind of control.
+        // The left column and the top strip share these ids, so both bars use one rule.
+        // A child of More is decided when the walk reaches More itself.
+        assert_eq!(toolbar_focus_from(ID_CMD_FIRST, true), ToolbarFocus::Toolbar);
+        assert_eq!(toolbar_focus_from(ID_CMD_FIRST + CMD_SLOTS - 1, true), ToolbarFocus::Toolbar);
+        assert_eq!(toolbar_focus_from(ID_CMD_OVERFLOW, true), ToolbarFocus::Toolbar);
+        assert_eq!(toolbar_focus_from(ID_CMD_EDIT, true), ToolbarFocus::Toolbar);
+        assert!(restore_list_after_toolbar(toolbar_focus_from(ID_CMD_OVERFLOW, true)));
+
+        // The address bar and the filter are not toolbar buttons. A dialog that
+        // reuses a command id fails the main-frame parent check and keeps focus.
+        assert_eq!(toolbar_focus_from(ID_EDIT, true), ToolbarFocus::Elsewhere);
+        assert_eq!(toolbar_focus_from(ID_FILTER, false), ToolbarFocus::Elsewhere);
+        assert_eq!(toolbar_focus_from(ID_CMD_FIRST, false), ToolbarFocus::Elsewhere, "dialog reused a command id");
+        assert_eq!(toolbar_focus_from(ID_CMD_OVERFLOW, false), ToolbarFocus::Elsewhere);
+        assert_eq!(toolbar_focus_from(ID_CMD_FIRST - 1, true), ToolbarFocus::Elsewhere);
+        assert_eq!(toolbar_focus_from(ID_CMD_EDIT + 1, true), ToolbarFocus::Elsewhere);
+        assert!(!restore_list_after_toolbar(ToolbarFocus::Elsewhere));
+        assert!(!restore_list_after_toolbar(toolbar_focus_from(ID_EDIT, true)));
+        assert!(!restore_list_after_toolbar(toolbar_focus_from(ID_CMD_FIRST, false)));
     }
 
     #[test]
