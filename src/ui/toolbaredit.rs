@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use windows::Win32::UI::Controls::{TTF_ABSOLUTE, TTF_TRACK, TTM_GETBUBBLESIZE, TTM_POP, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION};
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 
-use super::{ask_confirm, body_font, draw_line_icon, fill, in_rect, meta_font, paint_button, paint_card, paint_card_fill, paint_meta, paint_segment_group, paint_window, style_popup_chrome, visual_from_pointer, ButtonKind, Confirm, FocusRing, SegmentCell, BTN_H_FOOTER};
+use super::{ask_confirm, body_font, draw_line_icon, fill, in_rect, meta_font, paint_button, paint_card, paint_card_fill, paint_meta, paint_meta_align, paint_segment_group, paint_window, style_popup_chrome, visual_from_pointer, ButtonKind, Confirm, FocusRing, SegmentCell, BTN_H_FOOTER};
 use crate::imports::*;
 use crate::toolbar::{Action, Doc};
 use crate::ui::tokens::px;
@@ -29,6 +29,14 @@ const TIMER_EDGE: usize = 1;
 /// Client minimum, in DIP. `WM_GETMINMAXINFO` turns this into an outer size.
 const EDIT_MIN_W: i32 = 420;
 const EDIT_MIN_H: i32 = 360;
+/// Icon slot on a palette card, DIP. The slot used to start 2 DIP from the top.
+const WELL_ICON_W: i32 = 30;
+const WELL_ICON_H: i32 = 24;
+const WELL_ICON_TOP: i32 = 12;
+/// One meta line. 16 DIP is the chip that holds the 11px face (its line is about 13px).
+const WELL_LABEL_H: i32 = 16;
+/// Left and right inset. A long name ends in an ellipsis inside the card.
+const WELL_LABEL_PAD_X: i32 = 4;
 /// Posted after the editor is on screen. Checking a saved path here must not run inside `ShowWindow`.
 const WM_TARGET_CHECK: u32 = WM_APP + 58;
 
@@ -393,6 +401,20 @@ fn insert_at(slots: &[RECT], x: i32) -> usize {
 
 fn well_metrics(dpi: i32) -> (i32, i32, i32) {
     (px(dpi, 86), px(dpi, 64), px(dpi, 4))
+}
+
+/// Icon slot and the one-line label under it. The label does not fill the rest of the card.
+/// At 96 DPI the icon starts 12 DIP down and the label ends 12 DIP above the card bottom.
+fn well_card_parts(cell: RECT, dpi: i32) -> (RECT, RECT) {
+    let icon_w = px(dpi, WELL_ICON_W);
+    let icon_h = px(dpi, WELL_ICON_H);
+    let left = cell.left + (cell.right - cell.left - icon_w) / 2;
+    let top = cell.top + px(dpi, WELL_ICON_TOP);
+    let icon = RECT { left, top, right: left + icon_w, bottom: top + icon_h };
+    let pad = px(dpi, WELL_LABEL_PAD_X);
+    let label_top = icon.bottom;
+    let label = RECT { left: cell.left + pad, top: label_top, right: cell.right - pad, bottom: label_top + px(dpi, WELL_LABEL_H) };
+    (icon, label)
 }
 
 fn well_cols(width: i32, dpi: i32) -> i32 {
@@ -1232,16 +1254,15 @@ unsafe fn paint(h: HWND) {
             if hot == id {
                 fill(dc, cell, crate::ui_tokens().card);
             }
-            let icon = RECT { left: cell.left + (cell.right - cell.left - px(dpi, 30)) / 2, top: cell.top + px(dpi, 2), right: 0, bottom: 0 };
-            let icon = RECT { right: icon.left + px(dpi, 30), bottom: icon.top + px(dpi, 24), ..icon };
+            let (icon, label) = well_card_parts(cell, dpi);
             if let Some(kind) = well_icon(*item) {
                 draw_line_icon(dc, icon, kind, crate::ui_tokens().text, dpi);
             } else {
                 let mid = (icon.left + icon.right) / 2;
                 fill(dc, RECT { left: mid, top: icon.top + 4, right: mid + 1, bottom: icon.bottom - 4 }, crate::ui_tokens().line);
             }
-            let label = RECT { left: cell.left, top: icon.bottom, right: cell.right, bottom: cell.bottom };
-            crate::text(dc, label, &well_label(*item), small, crate::ui_tokens().sub, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+            // Single line with an end ellipsis. Word break clipped a long name mid-glyph; the tip has the full name.
+            paint_meta_align(dc, label, &well_label(*item), small, DT_CENTER);
         }
         if saved != 0 {
             let _ = RestoreDC(dc, saved);
@@ -1861,6 +1882,44 @@ mod tests {
         let (text, _) = tip_anchor(&doc, &g, WELL_BASE + folder as i32).expect("palette tip");
         assert_eq!(text, crate::tr(crate::Key::ToolbarOpenFolder));
         assert!(g.lay.change.right > g.lay.change.left, "a selected target offers Change target");
+    }
+
+    #[test]
+    fn a_palette_card_lowers_the_icon_and_keeps_the_label_to_one_line() {
+        assert_eq!(bar_metrics(96), (30, 24, 2), "the bar preview stays an icon slot");
+        let (cw, ch, _) = well_metrics(96);
+        assert_eq!((cw, ch), (86, 64), "the palette card stays 86x64");
+        let cell = RECT { left: 40, top: 80, right: 40 + cw, bottom: 80 + ch };
+        let (icon, label) = well_card_parts(cell, 96);
+        assert_eq!(icon.top - cell.top, px(96, 12));
+        assert_eq!(icon.bottom - icon.top, 24);
+        assert_eq!(icon.right - icon.left, 30);
+        assert_eq!(icon.left, cell.left + (cw - 30) / 2);
+        assert_eq!(label.bottom - label.top, 16, "one meta line, not the rest of the card");
+        assert!(label.bottom - label.top < ch - (icon.bottom - cell.top));
+        assert_eq!(label.left - cell.left, 4);
+        assert_eq!(cell.right - label.right, 4);
+        assert_eq!(label.top, icon.bottom);
+        assert_eq!(cell.bottom - label.bottom, 12);
+        assert!(contains_rect(cell, icon));
+        assert!(contains_rect(cell, label));
+        assert!(!overlaps(icon, label));
+        for dpi in [120, 144, 168, 192] {
+            let (cw, ch, _) = well_metrics(dpi);
+            let cell = RECT { left: 7, top: 11, right: 7 + cw, bottom: 11 + ch };
+            let (icon, label) = well_card_parts(cell, dpi);
+            assert_eq!(icon.top - cell.top, px(dpi, 12), "dpi {dpi}");
+            assert_eq!(icon.bottom - icon.top, px(dpi, WELL_ICON_H), "dpi {dpi}");
+            assert_eq!(icon.right - icon.left, px(dpi, WELL_ICON_W), "dpi {dpi}");
+            assert_eq!(label.bottom - label.top, px(dpi, WELL_LABEL_H), "dpi {dpi}");
+            assert!(px(dpi, WELL_LABEL_H) <= px(dpi, 18), "dpi {dpi} label is about one line");
+            assert_eq!(label.left - cell.left, px(dpi, WELL_LABEL_PAD_X), "dpi {dpi}");
+            assert_eq!(cell.right - label.right, px(dpi, WELL_LABEL_PAD_X), "dpi {dpi}");
+            assert!(label.top >= icon.bottom, "dpi {dpi}");
+            assert!(contains_rect(cell, icon), "dpi {dpi}");
+            assert!(contains_rect(cell, label), "dpi {dpi}");
+            assert!(!overlaps(icon, label), "dpi {dpi}");
+        }
     }
 
     #[test]
