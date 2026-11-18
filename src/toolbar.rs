@@ -2213,7 +2213,8 @@ mod tests {
         let doc = Doc::default_layout();
         assert_eq!(doc.command_ids(), ["file.dir", "file.new", "file.delete", "file.paste", "edit.rename", "view.mode", "file.properties", "file.mark"]);
         assert_eq!(action_of("edit.rename"), Some(Action::RenameInPlace));
-        assert!(action_of("file.rename").is_none(), "file.rename is batch rename and is not a toolbar command");
+        assert_eq!(action_of("file.rename"), Some(Action::BatchRename), "file.rename is batch rename, available for the toolbar but not in the default layout");
+        assert!(!doc.command_ids().iter().any(|id| *id == "file.rename"));
         assert_eq!(key_id(Action::RenameInPlace), None);
         assert_eq!(fixed_shortcut(Action::RenameInPlace), Some("F2"));
         assert_eq!(fixed_shortcut(Action::DeleteSelection), Some("Del"));
