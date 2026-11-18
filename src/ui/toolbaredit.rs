@@ -58,8 +58,10 @@ fn catalog() -> &'static [Well] {
         Well::Action(Action::SplitBelow),
         Well::Action(Action::Open),
         Well::Action(Action::PaneColor),
+        Well::Action(Action::TabColor),
         Well::Action(Action::ClosePane),
         Well::Action(Action::Terminal),
+        Well::Action(Action::TerminalAdmin),
     ]
 }
 

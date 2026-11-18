@@ -82,6 +82,7 @@ const ICONS: &[IconDef] = &[
     IconDef { key: "add", kind: LineIcon::Add, name_ko: "추가" },
     IconDef { key: "new_tab", kind: LineIcon::NewTab, name_ko: "새 탭" },
     IconDef { key: "close", kind: LineIcon::Close, name_ko: "닫기" },
+    IconDef { key: "pane_close", kind: LineIcon::PaneClose, name_ko: "패널 닫기" },
     IconDef { key: "open_in", kind: LineIcon::OpenIn, name_ko: "다른 패널에서 열기" },
     IconDef { key: "split_side", kind: LineIcon::SplitSide, name_ko: "좌우 분할" },
     IconDef { key: "split_stack", kind: LineIcon::SplitStack, name_ko: "상하 분할" },
@@ -91,10 +92,13 @@ const ICONS: &[IconDef] = &[
     IconDef { key: "important", kind: LineIcon::Important, name_ko: "중요 표시" },
     IconDef { key: "bookmark", kind: LineIcon::Bookmark, name_ko: "책갈피" },
     IconDef { key: "tag", kind: LineIcon::Tag, name_ko: "태그" },
+    IconDef { key: "tab_color", kind: LineIcon::TabColor, name_ko: "탭 색" },
+    IconDef { key: "pane_color", kind: LineIcon::PaneColor, name_ko: "패널 색" },
     IconDef { key: "pin_file", kind: LineIcon::PinFile, name_ko: "고정" },
     IconDef { key: "compress", kind: LineIcon::Compress, name_ko: "압축" },
     IconDef { key: "extract", kind: LineIcon::Extract, name_ko: "압축 풀기" },
     IconDef { key: "terminal", kind: LineIcon::Terminal, name_ko: "터미널" },
+    IconDef { key: "terminal_admin", kind: LineIcon::TerminalAdmin, name_ko: "관리자 터미널" },
     IconDef { key: "gear", kind: LineIcon::Gear, name_ko: "설정" },
     IconDef { key: "save", kind: LineIcon::Save, name_ko: "이 탭 저장" },
     IconDef { key: "load", kind: LineIcon::Load, name_ko: "세션 열기" },
@@ -145,7 +149,7 @@ mod tests {
         (n, line_icon_coverage(n, dpi, kind))
     }
 
-    const APPROVED: [&str; 99] = [
+    const APPROVED: [&str; 103] = [
         "new_file", "del", "rename", "duplicate", "move", "properties", "edit", "save_as", "print", "restore", "empty_trash", "shred", "recent", "compare", "hidden", "file_link", "find_dupes",
         "group", "open_folder", "folder_tree", "root", "network_folder", "symlink_folder", "folder_size",
         "cut", "copy", "paste", "clip_history",
@@ -154,10 +158,10 @@ mod tests {
         "select_all", "invert", "deselect",
         "search", "filter", "filter_clear", "glob",
         "sort_name", "sort_date", "sort_size", "sort_asc", "sort_desc",
-        "list", "add", "new_tab", "close", "open_in", "split_side", "split_stack",
-        "star", "star_filled", "star_add", "important", "bookmark", "tag", "pin_file",
+        "list", "add", "new_tab", "close", "pane_close", "open_in", "split_side", "split_stack",
+        "star", "star_filled", "star_add", "important", "bookmark", "tag", "tab_color", "pane_color", "pin_file",
         "compress", "extract",
-        "terminal",
+        "terminal", "terminal_admin",
         "gear", "save", "load", "help", "about", "shortcuts", "undo", "redo", "more",
         "basket", "watch", "lock", "unlock", "share", "open_external", "download", "upload", "sync", "permissions",
     ];
@@ -208,8 +212,8 @@ mod tests {
 
     #[test]
     fn catalog_lists_every_approved_key_once() {
-        assert_eq!(icons().len(), 99);
-        assert_eq!(APPROVED.len(), 99);
+        assert_eq!(icons().len(), 103);
+        assert_eq!(APPROVED.len(), 103);
         let got: Vec<&str> = icons().iter().map(|e| e.key).collect();
         assert_eq!(got, APPROVED);
         let mut seen = std::collections::HashSet::new();

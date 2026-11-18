@@ -2767,7 +2767,7 @@ fn live_about() -> AboutCopy {
 pub(crate) fn with_icon_credit(mut copy: AboutCopy) -> AboutCopy {
     let catalog = crate::ui::icon_catalog::icons();
     let gear = crate::ui::icon_catalog::icon_by_key("gear");
-    if catalog.len() != 99 || gear.is_none_or(|e| e.name_ko.is_empty() || e.kind != crate::LineIcon::Gear) {
+    if catalog.len() < 99 || gear.is_none_or(|e| e.name_ko.is_empty() || e.kind != crate::LineIcon::Gear) {
         return copy;
     }
     if !copy.license.contains(crate::ICON_CREDIT) {
