@@ -470,7 +470,9 @@ pub(crate) unsafe fn paint_pane_tabs(
         let slot = pane_tab_close_rect(*r, dpi).filter(|_| locked || (on && tabs.len() > 1));
         if on {
             fill(dc, *r, pal().card);
-            fill(dc, RECT { bottom: r.top + s(2), ..*r }, accent);
+            // The strip under the header is horizontal, so the selected mark is the top
+            // bar only. A vertical strip would take the left bar. Colour is not a second edge.
+            fill(dc, pane_tab_mark_rect(*r, dpi, selected_tab_edge(false)), accent);
         } else if hot == Some(k) {
             fill(dc, *r, blend(pal().card, pal().bg, 0.45));
         } else if k + 1 != cur && k + 1 < tabs.len() {
@@ -485,6 +487,18 @@ pub(crate) unsafe fn paint_pane_tabs(
         }
     }
     text(dc, plus, "+", font, pal().sub, DT_CENTER);
+}
+
+/// Selected mark of one pane tab. Top is 2 DIP. Left is the window-tab left bar (4 DIP).
+/// Paint asks for `selected_tab_edge(false)` because the strip is horizontal.
+fn pane_tab_mark_rect(tab: RECT, dpi: i32, edge: TabEdge) -> RECT {
+    match edge {
+        TabEdge::Top => {
+            let h = 2 * dpi / 96;
+            RECT { bottom: tab.top + h, ..tab }
+        }
+        TabEdge::Left => tab_color_stripe_rect(tab, dpi),
+    }
 }
 
 #[cfg(test)]
@@ -584,5 +598,23 @@ mod tests {
         assert!(locked[3].enabled);
         assert_eq!(locked[4].label, Key::CopyFullPath);
         assert!(!locked[4].enabled);
+    }
+
+    #[test]
+    fn selected_pane_tab_uses_the_top_edge_only() {
+        // Pane tabs sit in a horizontal strip, so they ask for the top mark.
+        // The same rule a vertical window tab uses would ask for the left bar instead.
+        assert_eq!(selected_tab_edge(false), TabEdge::Top);
+        assert_eq!(selected_tab_edge(true), TabEdge::Left);
+        let tab = RECT { left: 10, top: 20, right: 180, bottom: 48 };
+        let top = pane_tab_mark_rect(tab, 96, selected_tab_edge(false));
+        let left = pane_tab_mark_rect(tab, 96, selected_tab_edge(true));
+        assert_eq!(top, RECT { left: 10, top: 20, right: 180, bottom: 22 });
+        assert_eq!(left, RECT { left: 10, top: 20, right: 14, bottom: 48 });
+        assert!(top.right == tab.right && top.bottom < tab.bottom);
+        assert!(left.bottom == tab.bottom && left.right < tab.right);
+        let hi = pane_tab_mark_rect(tab, 192, TabEdge::Top);
+        assert_eq!(hi.bottom, 24);
+        assert_eq!(pane_tab_mark_rect(tab, 192, TabEdge::Left).right, 18);
     }
 }

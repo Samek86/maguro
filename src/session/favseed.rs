@@ -19,16 +19,40 @@ use crate::{tr, Key, THIS_PC};
 /// open `::{CLSID}` places (This PC). The same form navigates to the Recycle Bin.
 pub(crate) const RECYCLE_BIN: &str = "::{645FF040-5081-101B-9F08-00AA002F954E}";
 
-/// `GetDriveTypeW`: removable media.
+/// `GetDriveTypeW` codes. `drive_tip` in `ui/drives.rs` matches these same numbers.
+const DRIVE_UNKNOWN: u32 = 0;
+const DRIVE_NO_ROOT: u32 = 1;
 const DRIVE_REMOVABLE: u32 = 2;
-/// `GetDriveTypeW`: fixed disk.
 const DRIVE_FIXED: u32 = 3;
+const DRIVE_REMOTE: u32 = 4;
+const DRIVE_CDROM: u32 = 5;
+const DRIVE_RAMDISK: u32 = 6;
 
-/// One fixed or removable drive letter. `removable` selects the display name.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What `GetDriveTypeW` reported. The kind picks the display name. It does not
+/// decide whether the letter is listed: every letter in the logical-drive mask is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DriveKind {
+    /// `DRIVE_UNKNOWN` (0), and any code this build does not name.
+    Unknown,
+    /// `DRIVE_NO_ROOT_DIR` (1). The letter is in the mask and no volume is mounted.
+    NoRoot,
+    /// `DRIVE_REMOVABLE` (2).
+    Removable,
+    /// `DRIVE_FIXED` (3).
+    Fixed,
+    /// `DRIVE_REMOTE` (4).
+    Network,
+    /// `DRIVE_CDROM` (5).
+    Optical,
+    /// `DRIVE_RAMDISK` (6).
+    Ram,
+}
+
+/// One logical drive. `kind` selects the display name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SeedDrive {
     pub(crate) letter: char,
-    pub(crate) removable: bool,
+    pub(crate) kind: DriveKind,
 }
 
 /// Places resolved on this machine. Tests pass their own; nothing here is a user profile path.
@@ -39,28 +63,33 @@ pub(crate) struct SeedSources {
     pub(crate) drives: Vec<SeedDrive>,
 }
 
-/// `Some(true)` is removable, `Some(false)` is fixed. Network, optical, and missing media stay out.
-pub(crate) fn classify_drive(kind: u32) -> Option<bool> {
+/// Every `GetDriveTypeW` code is a kind. None are dropped.
+pub(crate) fn classify_drive(kind: u32) -> DriveKind {
     match kind {
-        DRIVE_REMOVABLE => Some(true),
-        DRIVE_FIXED => Some(false),
-        _ => None,
+        DRIVE_NO_ROOT => DriveKind::NoRoot,
+        DRIVE_REMOVABLE => DriveKind::Removable,
+        DRIVE_FIXED => DriveKind::Fixed,
+        DRIVE_REMOTE => DriveKind::Network,
+        DRIVE_CDROM => DriveKind::Optical,
+        DRIVE_RAMDISK => DriveKind::Ram,
+        // `DRIVE_UNKNOWN` (0) and any code this build does not name.
+        DRIVE_UNKNOWN | _ => DriveKind::Unknown,
     }
 }
 
-/// Fixed and removable letters from a drive-type probe, in letter order. A repeated letter is kept once.
+/// Every letter from a drive-type probe, in letter order.
+/// A repeated letter is kept once, as the first entry. A non-letter is ignored.
+/// The kind is only the display name, the same split the drive buttons use:
+/// the mask decides which letters exist, and `GetDriveTypeW` only names them.
 pub(crate) fn drives_from_kinds(entries: &[(char, u32)]) -> Vec<SeedDrive> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for &(letter, kind) in entries {
-        let Some(removable) = classify_drive(kind) else {
-            continue;
-        };
         let letter = letter.to_ascii_uppercase();
         if !letter.is_ascii_alphabetic() || !seen.insert(letter) {
             continue;
         }
-        out.push(SeedDrive { letter, removable });
+        out.push(SeedDrive { letter, kind: classify_drive(kind) });
     }
     out.sort_by_key(|d| d.letter);
     out
@@ -71,13 +100,21 @@ fn drive_root(letter: char) -> Option<String> {
     letter.is_ascii_alphabetic().then(|| format!("{letter}:\\"))
 }
 
-fn drive_caption(removable: bool, letter: char) -> String {
-    let kind = if removable {
-        tr(Key::RemovableDrive)
-    } else {
-        tr(Key::LocalDisk)
-    };
-    format!("{kind} ({letter}:)")
+/// Language key for a drive kind. The arms match `drive_tip` in `ui/drives.rs`:
+/// removable, fixed, network, and CD/DVD have their own keys, and every other
+/// code (unknown, no root, RAM disk) uses `Drive`. No new key is added.
+fn drive_kind_key(kind: DriveKind) -> Key {
+    match kind {
+        DriveKind::Removable => Key::RemovableDrive,
+        DriveKind::Fixed => Key::LocalDisk,
+        DriveKind::Network => Key::NetworkDrive,
+        DriveKind::Optical => Key::CdDvdDrive,
+        DriveKind::Unknown | DriveKind::NoRoot | DriveKind::Ram => Key::Drive,
+    }
+}
+
+fn drive_caption(kind: DriveKind, letter: char) -> String {
+    format!("{} ({letter}:)", tr(drive_kind_key(kind)))
 }
 
 /// Identity of a favourite path. Drive roots and trailing slashes collapse, and case does not count.
@@ -147,8 +184,9 @@ fn append_to_group(nodes: &mut [FavNode], path: &[usize], missing: Vec<FavNode>)
     }
 }
 
-/// The Default group: This PC, Desktop, fixed and removable drives, then the Recycle Bin.
+/// The Default group: This PC, Desktop, every logical drive, then the Recycle Bin.
 /// Names come from the active UI language. Desktop is the path in `sources`, never a baked-in profile path.
+/// Drives are the same letters the drive buttons enumerate, in letter order.
 pub(crate) fn default_favorite_group(sources: &SeedSources) -> FavNode {
     let mut group = FavNode::group(tr(Key::Default));
     let mut seen = HashSet::new();
@@ -163,7 +201,7 @@ pub(crate) fn default_favorite_group(sources: &SeedSources) -> FavNode {
         let Some(root) = drive_root(drive.letter) else {
             continue;
         };
-        let caption = drive_caption(drive.removable, drive.letter.to_ascii_uppercase());
+        let caption = drive_caption(drive.kind, drive.letter.to_ascii_uppercase());
         push_place(&mut group.children, &mut seen, &root, &caption);
     }
     push_place(
@@ -197,11 +235,13 @@ pub(crate) fn seed_favorites_if_absent(
 
 /// Put back default places that are not already in the tree.
 ///
-/// The rows come from `default_favorite_group`, the same list a first launch builds.
-/// A path already stored anywhere (any case, with or without a trailing slash) is left
-/// where it is, including its name. Nothing is removed. Existing nodes stay in order.
-/// Missing rows are appended, in seed order, to the group that wears the current
-/// language's default name, or to a new group at the end when that name is absent.
+/// The rows come from `default_favorite_group`, the same list a first launch builds,
+/// including every logical drive. A path already stored anywhere (any case, with or
+/// without a trailing slash) is left where it is, including its name. Nothing is
+/// removed. Existing nodes stay in order. Missing rows, including a drive that is
+/// not stored in any group, are appended, in seed order, to the group that wears
+/// the current language's default name, or to a new group at the end when that
+/// name is absent.
 /// That group and its parents are opened so the side panel can show the new rows.
 /// Returns how many leaves were added. An existing tree is not rewritten when
 /// nothing is missing. A flat `favs` list with an empty tree is lifted first,
@@ -239,7 +279,7 @@ pub(crate) fn restore_default_favorites(session: &mut Session) -> usize {
     restore_missing_defaults(session, &machine_sources())
 }
 
-/// Desktop known folder for this user, plus fixed and removable drives that are present now.
+/// Desktop known folder for this user, plus every logical drive present now.
 fn machine_sources() -> SeedSources {
     SeedSources {
         desktop: desktop_known_folder(),
@@ -264,6 +304,11 @@ fn desktop_known_folder() -> String {
     }
 }
 
+/// Letters set in `GetLogicalDrives`, named by `GetDriveTypeW`, in letter order.
+/// Those two calls are the whole probe, the same pair the drive buttons use.
+/// A volume name, free space, or a directory listing is not asked: each of those
+/// can sit on a disconnected network drive or an empty optical drive.
+/// `GetDriveTypeW` itself is the type query and does not open the volume.
 fn probed_drives() -> Vec<SeedDrive> {
     let mask = unsafe { GetLogicalDrives() };
     let mut entries = Vec::new();
@@ -289,22 +334,12 @@ mod tests {
         SeedSources {
             desktop: r"D:\Desk".into(),
             drives: vec![
-                SeedDrive {
-                    letter: 'd',
-                    removable: true,
-                },
-                SeedDrive {
-                    letter: 'C',
-                    removable: false,
-                },
-                SeedDrive {
-                    letter: 'C',
-                    removable: false,
-                },
-                SeedDrive {
-                    letter: 'E',
-                    removable: true,
-                },
+                SeedDrive { letter: 'd', kind: DriveKind::Removable },
+                SeedDrive { letter: 'C', kind: DriveKind::Fixed },
+                SeedDrive { letter: 'C', kind: DriveKind::Fixed },
+                SeedDrive { letter: 'E', kind: DriveKind::Network },
+                SeedDrive { letter: 'F', kind: DriveKind::Optical },
+                SeedDrive { letter: 'G', kind: DriveKind::Ram },
             ],
         }
     }
@@ -324,28 +359,33 @@ mod tests {
     }
 
     #[test]
-    fn drive_probe_keeps_fixed_and_removable_in_letter_order() {
+    fn drive_probe_keeps_every_logical_drive_in_letter_order() {
+        // The old probe dropped network, optical, RAM, unknown, and no-root.
+        // Drive buttons keep every letter in the mask, and so does this list.
+        // A repeated letter stays as the first entry. A non-letter is ignored.
         let drives = drives_from_kinds(&[
-            ('Z', 0),
+            ('Z', DRIVE_UNKNOWN),
             ('d', DRIVE_REMOVABLE),
             ('C', DRIVE_FIXED),
-            ('E', 4),
-            ('F', 5),
-            ('B', 1),
-            ('G', 6),
-            ('c', DRIVE_FIXED),
+            ('E', DRIVE_REMOTE),
+            ('F', DRIVE_CDROM),
+            ('B', DRIVE_NO_ROOT),
+            ('G', DRIVE_RAMDISK),
+            ('c', DRIVE_REMOTE),
+            ('H', 99),
+            ('1', DRIVE_FIXED),
         ]);
         assert_eq!(
             drives,
             vec![
-                SeedDrive {
-                    letter: 'C',
-                    removable: false
-                },
-                SeedDrive {
-                    letter: 'D',
-                    removable: true
-                },
+                SeedDrive { letter: 'B', kind: DriveKind::NoRoot },
+                SeedDrive { letter: 'C', kind: DriveKind::Fixed },
+                SeedDrive { letter: 'D', kind: DriveKind::Removable },
+                SeedDrive { letter: 'E', kind: DriveKind::Network },
+                SeedDrive { letter: 'F', kind: DriveKind::Optical },
+                SeedDrive { letter: 'G', kind: DriveKind::Ram },
+                SeedDrive { letter: 'H', kind: DriveKind::Unknown },
+                SeedDrive { letter: 'Z', kind: DriveKind::Unknown },
             ]
         );
     }
@@ -367,7 +407,7 @@ mod tests {
             let paths: Vec<&str> = group.children.iter().map(|n| n.path.as_str()).collect();
             assert_eq!(
                 paths,
-                vec![THIS_PC, r"D:\Desk", r"C:\", r"D:\", r"E:\", RECYCLE_BIN]
+                vec![THIS_PC, r"D:\Desk", r"C:\", r"D:\", r"E:\", r"F:\", r"G:\", RECYCLE_BIN]
             );
             let names: Vec<&str> = group.children.iter().map(|n| n.name.as_str()).collect();
             assert_eq!(
@@ -377,7 +417,9 @@ mod tests {
                     "Desktop",
                     "Local disk (C:)",
                     "Removable drive (D:)",
-                    "Removable drive (E:)",
+                    "Network drive (E:)",
+                    "CD/DVD drive (F:)",
+                    "Drive (G:)",
                     "Recycle Bin",
                 ]
             );
@@ -388,22 +430,40 @@ mod tests {
 
         with_ui(1, || {
             let group = default_favorite_group(&sources());
+            let names: Vec<&str> = group.children.iter().map(|n| n.name.as_str()).collect();
             assert_eq!(group.name, "기본");
-            assert_eq!(group.children[0].name, "내 PC");
-            assert_eq!(group.children[1].name, "바탕 화면");
-            assert_eq!(group.children[2].name, "로컬 디스크 (C:)");
-            assert_eq!(group.children[3].name, "이동식 드라이브 (D:)");
-            assert_eq!(group.children[5].name, "휴지통");
+            assert_eq!(
+                names,
+                vec![
+                    "내 PC",
+                    "바탕 화면",
+                    "로컬 디스크 (C:)",
+                    "이동식 드라이브 (D:)",
+                    "네트워크 드라이브 (E:)",
+                    "CD/DVD 드라이브 (F:)",
+                    "드라이브 (G:)",
+                    "휴지통",
+                ]
+            );
         });
 
         with_ui(2, || {
             let group = default_favorite_group(&sources());
+            let names: Vec<&str> = group.children.iter().map(|n| n.name.as_str()).collect();
             assert_eq!(group.name, "既定");
-            assert_eq!(group.children[0].name, "PC");
-            assert_eq!(group.children[1].name, "デスクトップ");
-            assert_eq!(group.children[2].name, "ローカル ディスク (C:)");
-            assert_eq!(group.children[3].name, "リムーバブル ドライブ (D:)");
-            assert_eq!(group.children[5].name, "ごみ箱");
+            assert_eq!(
+                names,
+                vec![
+                    "PC",
+                    "デスクトップ",
+                    "ローカル ディスク (C:)",
+                    "リムーバブル ドライブ (D:)",
+                    "ネットワーク ドライブ (E:)",
+                    "CD/DVD ドライブ (F:)",
+                    "ドライブ (G:)",
+                    "ごみ箱",
+                ]
+            );
         });
     }
 
@@ -411,10 +471,7 @@ mod tests {
     fn blank_desktop_is_omitted_and_the_path_is_the_one_given() {
         let src = SeedSources {
             desktop: "  ".into(),
-            drives: vec![SeedDrive {
-                letter: 'C',
-                removable: false,
-            }],
+            drives: vec![SeedDrive { letter: 'C', kind: DriveKind::Fixed }],
         };
         let group = default_favorite_group(&src);
         let paths: Vec<&str> = group.children.iter().map(|n| n.path.as_str()).collect();
@@ -612,7 +669,9 @@ mod tests {
             partial.children.push(FavNode::leaf(THIS_PC, "PC", false));
             session.tree = vec![work, partial];
             session.favs.clear();
-            assert_eq!(restore_missing_defaults(&mut session, &src), 2);
+            // Desktop, C:, This PC, and the Recycle Bin are already stored.
+            // D, E, F, and G are not, so they append to Default.
+            assert_eq!(restore_missing_defaults(&mut session, &src), 4);
 
             assert_eq!(session.tree.len(), 2);
             assert_eq!(session.tree[0].name, "Work");
@@ -622,13 +681,15 @@ mod tests {
             assert!(group.open);
             assert_eq!(
                 child_paths(group),
-                vec![RECYCLE_BIN, "c:/", THIS_PC, r"D:\", r"E:\"]
+                vec![RECYCLE_BIN, "c:/", THIS_PC, r"D:\", r"E:\", r"F:\", r"G:\"]
             );
             assert_eq!(group.children[0].name, "Bin");
             assert_eq!(group.children[1].name, "Mine");
             assert_eq!(group.children[2].name, "PC");
             assert_eq!(group.children[3].name, "Removable drive (D:)");
-            assert_eq!(group.children[4].name, "Removable drive (E:)");
+            assert_eq!(group.children[4].name, "Network drive (E:)");
+            assert_eq!(group.children[5].name, "CD/DVD drive (F:)");
+            assert_eq!(group.children[6].name, "Drive (G:)");
             assert!(session.favs[0].starts_with(r"D:\Photos"));
             let mine = session.favs.iter().position(|f| f.starts_with("c:/")).unwrap();
             let added = session.favs.iter().position(|f| f.contains("Removable drive (D:)")).unwrap();
@@ -651,8 +712,8 @@ mod tests {
             let mut session = Session::default();
             session.tree = vec![places];
             let n = restore_missing_defaults(&mut session, &src);
-            // This PC is already stored. Desktop, three drives, and the Recycle Bin are not.
-            assert_eq!(n, 5);
+            // This PC is already stored. Desktop, five drives, and the Recycle Bin are not.
+            assert_eq!(n, 7);
             assert_eq!(session.tree.len(), 2);
             assert_eq!(session.tree[0].name, "Places");
             assert_eq!(child_paths(&session.tree[0]), vec![THIS_PC, r"E:\Mine"]);
@@ -662,7 +723,7 @@ mod tests {
             assert!(added.open);
             assert_eq!(
                 child_paths(added),
-                vec![r"D:\Desk", r"C:\", r"D:\", r"E:\", RECYCLE_BIN]
+                vec![r"D:\Desk", r"C:\", r"D:\", r"E:\", r"F:\", r"G:\", RECYCLE_BIN]
             );
 
             // A nested group with the seed name receives the rows. No second group is created.
@@ -687,12 +748,50 @@ mod tests {
             // A flat list is lifted into the tree first, then only the missing places are added.
             session.tree.clear();
             session.favs = vec![r"C:\".into(), r"D:\Photos".into()];
-            assert_eq!(restore_missing_defaults(&mut session, &src), 5);
+            // C: is already a leaf. This PC, Desktop, D, E, F, G, and the Recycle Bin are not.
+            assert_eq!(restore_missing_defaults(&mut session, &src), 7);
             assert_eq!(session.tree[0].path, r"C:\");
             assert_eq!(session.tree[1].path, r"D:\Photos");
             assert!(session.tree[2].is_group());
             assert!(!session.tree[2].children.iter().any(|n| path_key(&n.path) == path_key(r"C:\")));
             assert_eq!(session.tree[2].children[0].path, THIS_PC);
+        });
+    }
+
+    #[test]
+    fn restore_adds_missing_drives_to_the_default_group_and_skips_one_stored_elsewhere() {
+        with_ui(0, || {
+            let src = sources();
+            // E: already lives in another group. A different slash and case still counts,
+            // so restore must not copy it into Default.
+            let mut work = FavNode::group("Work");
+            work.children.push(FavNode::leaf("e:/", "Share", false));
+            let mut defaults = FavNode::group("Default");
+            defaults.open = false;
+            defaults.children.push(FavNode::leaf(THIS_PC, "PC", false));
+            let mut session = Session::default();
+            session.tree = vec![work, defaults];
+            // Desktop, C, D, F, G, and the Recycle Bin. E is already in Work.
+            assert_eq!(restore_missing_defaults(&mut session, &src), 6);
+            assert_eq!(session.tree.len(), 2);
+            assert_eq!(session.tree[0].name, "Work");
+            assert_eq!(child_paths(&session.tree[0]), vec!["e:/"]);
+            assert_eq!(session.tree[0].children[0].name, "Share");
+            let group = &session.tree[1];
+            assert_eq!(group.name, "Default");
+            assert!(group.open);
+            assert_eq!(
+                child_paths(group),
+                vec![THIS_PC, r"D:\Desk", r"C:\", r"D:\", r"F:\", r"G:\", RECYCLE_BIN]
+            );
+            assert!(!group.children.iter().any(|n| path_key(&n.path) == path_key(r"E:\")));
+            assert_eq!(group.children[2].name, "Local disk (C:)");
+            assert_eq!(group.children[3].name, "Removable drive (D:)");
+            assert_eq!(group.children[4].name, "CD/DVD drive (F:)");
+            assert_eq!(group.children[5].name, "Drive (G:)");
+            let tree = session.tree.clone();
+            assert_eq!(restore_missing_defaults(&mut session, &src), 0);
+            assert_eq!(session.tree, tree);
         });
     }
 }
