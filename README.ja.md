@@ -16,7 +16,7 @@
   <a href="https://github.com/Samek86/maguro"><img alt="プラットフォーム: Windows" src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white"></a>
   <a href="LICENSE"><img alt="ライセンス: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <a href="https://github.com/Samek86/maguro"><img alt="言語: Rust" src="https://img.shields.io/badge/language-Rust-000000?logo=rust&logoColor=white"></a>
-  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="リリース 0.2.25" src="https://img.shields.io/badge/release-0.2.25-0A9BD6"></a>
+  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="リリース 0.3.0" src="https://img.shields.io/badge/release-0.3.0-0A9BD6"></a>
 </p>
 
 <p align="center">
@@ -42,8 +42,8 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images-v8/ja/hero_dark.png">
-    <img alt="Maguro、ライトテーマ、ペイン二つ" src="docs/images-v8/ja/hero_light.png">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images-v10/ja/hero_dark.png">
+    <img alt="Maguro、ライトテーマ、ペイン二つ" src="docs/images-v10/ja/hero_light.png">
   </picture>
 </p>
 
@@ -73,27 +73,27 @@
 
 ペインひとつから始めて、組み込みの格子（最大 4×4）を選べます。境界をドラッグしてサイズ変更。名前付きセッションにはレイアウト・フォルダ・列・色ラベルが入り、開くと今のタブの横にウィンドウタブが増えます。
 
-<p align="center"><img width="760" alt="マルチペイン・レイアウト" src="docs/images-v8/ja/layout.png"></p>
+<p align="center"><img width="760" alt="マルチペイン・レイアウト" src="docs/images-v10/ja/layout.png"></p>
 
 <table>
 <tr>
-<td><img alt="1 ペイン" src="docs/images-v8/common/layout_1.png"></td>
-<td><img alt="横 2" src="docs/images-v8/common/layout_2h.png"></td>
-<td><img alt="縦 2" src="docs/images-v8/common/layout_2v.png"></td>
+<td><img alt="1 ペイン" src="docs/images-v10/common/layout_1.png"></td>
+<td><img alt="横 2" src="docs/images-v10/common/layout_2h.png"></td>
+<td><img alt="縦 2" src="docs/images-v10/common/layout_2v.png"></td>
 </tr>
 <tr>
-<td><img alt="3 ペイン" src="docs/images-v8/common/layout_3.png"></td>
-<td><img alt="縦積み 3" src="docs/images-v8/common/layout_3_stack.png"></td>
-<td><img alt="3 列" src="docs/images-v8/common/layout_3col.png"></td>
+<td><img alt="3 ペイン" src="docs/images-v10/common/layout_3.png"></td>
+<td><img alt="縦積み 3" src="docs/images-v10/common/layout_3_stack.png"></td>
+<td><img alt="3 列" src="docs/images-v10/common/layout_3col.png"></td>
 </tr>
 <tr>
-<td><img alt="4 ペイン" src="docs/images-v8/common/layout_4.png"></td>
-<td><img alt="縦長 4" src="docs/images-v8/common/layout_4_tall.png"></td>
-<td><img alt="5 ペイン" src="docs/images-v8/common/layout_5.png"></td>
+<td><img alt="4 ペイン" src="docs/images-v10/common/layout_4.png"></td>
+<td><img alt="縦長 4" src="docs/images-v10/common/layout_4_tall.png"></td>
+<td><img alt="5 ペイン" src="docs/images-v10/common/layout_5.png"></td>
 </tr>
 <tr>
-<td><img alt="1+1+2" src="docs/images-v8/common/layout_preset_112.png"></td>
-<td><img alt="3+1" src="docs/images-v8/common/layout_preset_31.png"></td>
+<td><img alt="1+1+2" src="docs/images-v10/common/layout_preset_112.png"></td>
+<td><img alt="3+1" src="docs/images-v10/common/layout_preset_31.png"></td>
 <td></td>
 </tr>
 </table>
@@ -102,127 +102,149 @@
 
 ウィンドウ全体の Chrome 風タブに加え、各ペインの中にもタブがあります。タブ名はアクティブなフォルダから付き、ツールチップにフルパスが出ます。タブの複製、別ウィンドウへの移動、セッション保存もできます。
 
-<p align="center"><img width="760" alt="ウィンドウタブとペインタブ" src="docs/images-v9/ja/tabs.png"></p>
+<p align="center"><img width="760" alt="ウィンドウタブとペインタブ" src="docs/images-v10/ja/tabs.png"></p>
 
 ### 3. 縦のウィンドウタブ
 
 ウィンドウのタブ一覧を、お気に入りパネルの右に縦に並べられます（設定 → 外観 → タブを縦に並べる、または歯車メニュー → 表示 → タブを縦に並べる。既定はオフ）。右端をドラッグして幅を変え、端をダブルクリックすると元の幅に戻ります。幅は記憶されます。
 
-<p align="center"><img width="760" alt="縦のウィンドウタブ" src="docs/images-v9/ja/vertical_tabs.png"></p>
+<p align="center"><img width="760" alt="縦のウィンドウタブ" src="docs/images-v10/ja/vertical_tabs.png"></p>
 
-### 4. タブの固定名・ロック・色
+
+### 4. カスタマイズできるツールバー
+
+コマンドツールバーはアイコンだけを表示します。ウィンドウタブが上段にあるときはペインの横の縦列、縦のウィンドウタブをオンにすると同じコマンドが横バーに移ります。同梱アイコンは約 99 個です。ウィンドウが狭くてボタンが収まりきらない分は、**その他** のオーバーフローメニューに入ります。
+
+新規インストール、またはエディターの **デフォルトに戻す** では、新しいフォルダー、新しいテキスト ファイル、削除、貼り付け、名前の変更、表示、プロパティ、重要としてマークのあとに区切り、隠しファイルを表示、右にペインを複製、下にペインを複製、ペインを閉じる、ターミナルを開く、が初期配置です。すでに保存したツールバーはそのままです。
+
+<p align="center"><img width="760" alt="縦のコマンドツールバー" src="docs/images-v10/ja/toolbar_vertical.png"></p>
+<p align="center"><img width="760" alt="横のコマンドツールバー" src="docs/images-v10/ja/toolbar_horizontal.png"></p>
+
+### 5. ツールバーエディター
+
+縦列の下にある鉛筆ボタン、または横バーの同じボタンからエディターを開きます。バーにコマンドをドラッグして並べ替え、下のパレットから選びます。特定のフォルダーやファイルを開く対象を追加でき、その対象が一般の「開く」項目の代わりになります。エディターはサイズ変更でき、バーとパレットが使えるよう最小サイズが決まっています。パレットカードの長い名前は省略記号で終わり、ツールチップに正式名が出ます。
+
+<p align="center"><img width="560" alt="ツールバーエディター" src="docs/images-v10/ja/toolbar_editor.png"></p>
+
+### 6. トグルボタン
+
+隠しファイルの表示のようなトグルは、他のボタンと同じ背景のままです。オンのときはアイコンだけがアクセント色になります。
+
+<p align="center"><img width="560" alt="隠しファイル表示のオフとオン" src="docs/images-v10/ja/toolbar_toggle.png"></p>
+
+### 7. タブの固定名・ロック・色
 
 タブをダブルクリック、または右クリック → 名前の変更で好きな名前を固定できます。ロックすれば誤って閉じにくくなります。色を付けると、関連する作業が一目で分かります。選択中の色付きタブだけ左に色の帯が出て、それ以外の色付きタブは薄い色だけになります。
 
-### 5. ペインをドラッグして移動 — Ctrl+ドラッグでコピー
+### 8. ペインをドラッグして移動 — Ctrl+ドラッグでコピー
 
 ペイン番号バッジかヘッダーをつまんでドラッグします。別ペインの中央に落とすと二つが入れ替わります。端に落とすとそのペインが分割されます。**Ctrl** を押しながらドラッグすると、今のペイン タブをコピーします。端では対象を分割してこのペインは残り、中央ではそのセルにペイン タブを追加します。
 
 <p align="center">
-  <img width="360" alt="ドラッグ前" src="docs/images-v8/common/panedrag_before.png">
-  <img width="360" alt="入れ替え後" src="docs/images-v8/common/panedrag_after.png">
+  <img width="360" alt="ドラッグ前" src="docs/images-v10/common/panedrag_before.png">
+  <img width="360" alt="入れ替え後" src="docs/images-v10/common/panedrag_after.png">
 </p>
-<p align="center"><img width="560" alt="Ctrl+ドラッグでペインを複製" src="docs/images-v8/common/panedrag_dup.png"></p>
+<p align="center"><img width="560" alt="Ctrl+ドラッグでペインを複製" src="docs/images-v10/common/panedrag_dup.png"></p>
 
-### 6. ペインごとの色
+### 9. ペインごとの色
 
 ペインごとにアクセント色を付けられます。ソースと行き先を間違えにくい、忙しいマルチペイン向きの仕込みです。
 
-<p align="center"><img width="760" alt="ペインごとの色" src="docs/images-v8/ja/pane_colors.png"></p>
+<p align="center"><img width="760" alt="ペインごとの色" src="docs/images-v10/ja/pane_colors.png"></p>
 
-### 7. 速さのための設計
+### 10. 速さのための設計
 
 このポータブルデモでのコールドスタート実測は **607 ms**。ネットワークフォルダへの貼り付けやドラッグは robocopy を使えます（設定 → ファイル操作。既定はオフ）。右クリック → 高速貼り付けは常にこちらで、Maguro 独自の進捗と上書き／スキップ／キャンセルが出ます。
 
 **Everything 連携のペイン検索。** ペインで Ctrl+F すると入力のたびに絞り込み。サブフォルダをオンにすると [voidtools Everything](https://www.voidtools.com/) に聞いて一瞬で結果を出し、Everything が無ければディスクを歩きます。
 
-<p align="center"><img width="760" alt="Everything 連携のペイン検索" src="docs/images-v8/ja/search.png"></p>
+<p align="center"><img width="760" alt="Everything 連携のペイン検索" src="docs/images-v10/ja/search.png"></p>
 
-### 8. お気に入り — フォルダもファイルも、グループで
+### 11. お気に入り — フォルダもファイルも、グループで
 
 サイドバーは上下半分。上がお気に入り、下がフォルダツリー。お気に入りにはエクスプローラーのクイックアクセスに加え、自分で作ったグループ（フォルダもファイルも入れられ、ドラッグで並べ替え）が入ります。Ctrl+B でクイック一覧。パネルにファイルやフォルダを落とすとピン留めされます。
 
-<p align="center"><img width="760" alt="グループ分けしたお気に入り" src="docs/images-v8/ja/favorites.png"></p>
+<p align="center"><img width="760" alt="グループ分けしたお気に入り" src="docs/images-v10/ja/favorites.png"></p>
 
-### 9. クイックプレビュー
+### 12. クイックプレビュー
 
 F3 でクイックルックを開きます。画像、PDF、Office、HTML、Markdown、コード、CSV、ZIP、HWP/HWPX（Hancom）などを表示します。「スペースでプレビュー」がオン（既定）なら Space でも開きます。Ctrl+ホイールで拡大（10–800%）、ドラッグでパン、ホイールでスクロール、←/→ で前後のファイルへ。クイックルックでは **F2** で名前変更、**Del** で表示中のファイルを削除できます。
 
 <p align="center">
-  <img width="480" alt="ペイン内プレビュー" src="docs/images-v8/ja/preview.png">
-  <img width="240" alt="クイックルック" src="docs/images-v8/ja/preview_peek.png">
+  <img width="480" alt="ペイン内プレビュー" src="docs/images-v10/ja/preview.png">
+  <img width="240" alt="クイックルック" src="docs/images-v10/ja/preview_peek.png">
 </p>
 
-### 10. カスタムできる右クリックメニュー
+### 13. カスタムできる右クリックメニュー
 
 設定 → 右クリックメニュー項目では、Windows のコマンドと Maguro のコマンドをそれぞれ隠せます。どちらもオンから始まり、隠しても Maguro のメニューだけで、エクスプローラーは変わりません。プロパティは常に一番下で、Maguro の項目はそのすぐ上です。
 
-<p align="center"><img width="560" alt="右クリックメニューの設定" src="docs/images-v9/ja/settings_ctxmenu.png"></p>
+<p align="center"><img width="560" alt="右クリックメニューの設定" src="docs/images-v10/ja/settings_ctxmenu.png"></p>
 
-### 11. 名前のプレビュー付き一括リネーム
+### 14. 名前のプレビュー付き一括リネーム
 
 ファイルを選んで Ctrl+Shift+R。検索／置換、連番、拡張子、プリセットを変えるたびに、確定前の新しい名前が一覧で更新されます。
 
-<p align="center"><img width="560" alt="名前プレビュー付き一括リネーム" src="docs/images-v8/ja/rename.png"></p>
+<p align="center"><img width="560" alt="名前プレビュー付き一括リネーム" src="docs/images-v10/ja/rename.png"></p>
 
-### 12. サーバー接続
+### 15. サーバー接続
 
 お気に入りパネル（またはグループ）を右クリック → **サーバー接続を追加…**。SMB と WebDAV は普通の Windows フォルダとして開きます。SFTP と FTP は rclone と WinFsp でマウントしたあと、プレビューも右クリックも高速コピーも他のフォルダと同じように使えます。パスワードは Windows 資格情報マネージャーだけに置き、`maguro.json` には書きません。
 
-<p align="center"><img width="420" alt="入力済みのサーバー接続ダイアログ" src="docs/images-v8/ja/servers.png"></p>
+<p align="center"><img width="420" alt="入力済みのサーバー接続ダイアログ" src="docs/images-v10/ja/servers.png"></p>
 
 
-### 13. Excel の読み取り専用オープンと A1・100%に整える
+### 16. Excel の読み取り専用オープンと A1・100%に整える
 
 `.xls`、`.xlsx`、`.xlsm`、`.csv` を右クリック → **読み取り専用で開く** でロックせずに Excel を開きます。**A1・100%に整える** は `.xlsx` と `.xlsm` だけです。選択を A1 へ、ズームを 100% へ、先頭シートの選択、`.bak.xlsx` バックアップの四つを個別に選べ、その選択は今回の起動中は覚えます。
 
-<p align="center"><img width="420" alt="Excel を A1・100%に整える" src="docs/images-v8/ja/feature_excel_readonly_tidy.png"></p>
+<p align="center"><img width="420" alt="Excel を A1・100%に整える" src="docs/images-v10/ja/feature_excel_readonly_tidy.png"></p>
 
-### 14. ファイルバスケット
+### 17. ファイルバスケット
 
 Ctrl+Shift+B で常に手前の小さなバスケットを開きます。ファイルをドロップするか Ctrl+Alt+B でアクティブペインの選択を入れ、あとから任意のペインへコピー／移動します。パスはセッションではなく `maguro.json` だけに残ります。元ファイルがなくても一覧に残り、削除するまで表示されます。
 
-<p align="center"><img width="420" alt="設定スタイルのコンパクト行のファイルバスケット" src="docs/images-v8/ja/feature_basket.png"></p>
+<p align="center"><img width="420" alt="設定スタイルのコンパクト行のファイルバスケット" src="docs/images-v10/ja/feature_basket.png"></p>
 
-### 15. フォルダー監視
+### 18. フォルダー監視
 
 Ctrl+Shift+W でフォルダー監視を開きます。フォルダー・アクティブペインに加え、**個別ファイル**も追加できます。行のチェックボックスは設定と同じティックです。Maguro の実行中だけ変更を通知します。監視中のファイルが消えると「ファイルが見つかりません」と表示されます。
 
-<p align="center"><img width="560" alt="フォルダーとファイル行があるフォルダー監視" src="docs/images-v8/ja/feature_folder_watch.png"></p>
+<p align="center"><img width="560" alt="フォルダーとファイル行があるフォルダー監視" src="docs/images-v10/ja/feature_folder_watch.png"></p>
 
-### 16. クリップボードのパスを開く（Alt+Z）
+### 19. クリップボードのパスを開く（Alt+Z）
 
 Maguro が起動していれば **Alt+Z** で、ほかのアプリが前面でもクリップボードのパスを開きます。フォルダーは新しいタブになり、Maguro が前面に出ます。ファイルは既定のアプリで開きます。
 
-<p align="center"><img width="760" alt="クリップボードのパスを新しいタブで開いたところ" src="docs/images-v8/ja/feature_win_shift_v.png"></p>
+<p align="center"><img width="760" alt="クリップボードのパスを新しいタブで開いたところ" src="docs/images-v10/ja/feature_win_shift_v.png"></p>
 
-### 17. タブ一覧
+### 20. タブ一覧
 
 **Ctrl+Shift+L**、タブ行右端の一覧ボタン、またはタブ右クリックの **タブ一覧…** で、各タブの配置・ペイン・フォルダーを見ます。名前で絞り込み、Enter かダブルクリックで移動し、F2 で名前を変えます。各タブは代表フォルダーと残りの `+N` だけの一行から始まり、**Right** で展開、**Left** で折りたたみます。現在のタブは最初から開いています。フィルターは一致するタブだけを展開します。
 
-<p align="center"><img width="560" alt="各タブの配置・ペイン・フォルダーを示すタブ一覧" src="docs/images-v8/en/tab_list.png"></p>
+<p align="center"><img width="560" alt="各タブの配置・ペイン・フォルダーを示すタブ一覧" src="docs/images-v10/en/tab_list.png"></p>
 
-### 18. ワークスペース
+### 21. ワークスペース
 
 名前付きレイアウトを最大九つ。**Ctrl+Alt+1…9** でスロットを開き、**Ctrl+Alt+Shift+1…9** で今のタブ・ペイン・フォルダーをそのスロットに保存します。歯車メニュー → **ワークスペース** で保存・読み込み・名前の変更・消去ができます。スロットは `maguro.json` にあります。
 
-<p align="center"><img width="480" alt="歯車メニュー → ワークスペース" src="docs/images-v8/ja/workspaces.png"></p>
+<p align="center"><img width="480" alt="歯車メニュー → ワークスペース" src="docs/images-v10/ja/workspaces.png"></p>
 
-### 19. ダイアログジャンプ
+### 22. ダイアログジャンプ
 
 ほかのアプリの開く／保存ダイアログが前面のとき、**Ctrl+Alt+G** で Maguro に開いているフォルダーを選び、ダイアログをそこに移します。仮想フォルダーは除きます。このキーは、そのようなダイアログが前面のときだけ登録されます。
 
-<p align="center"><img width="420" alt="ダイアログジャンプで Maguro のフォルダーを選ぶ" src="docs/images-v8/ja/dialog_jump.png"></p>
+<p align="center"><img width="420" alt="ダイアログジャンプで Maguro のフォルダーを選ぶ" src="docs/images-v10/ja/dialog_jump.png"></p>
 
-### 20. 重要マーク
+### 23. 重要マーク
 
 ファイルやフォルダーを右クリックして **重要としてマーク**、または **Ctrl+Alt+S**。すでにマークされていれば **重要マークを解除** です。複数選んだとき、マークされていないものが一つでもあれば選択をまとめてマークし、すべてマーク済みならまとめて解除します。**重要マークの星を表示**（既定はオン）は、フォルダーペインのマークしたファイルとフォルダーに小さな金色の星を描くか隠します。星を隠してもマークは残ります。ステータスバーには開いているフォルダーの件数が、たとえば **重要 6** と出ます。星は Maguro がフォルダーペインに描きます。シェルのアイコンオーバーレイではなく、レジストリも変更しません。フォルダーをマークしても、中のファイルに星は付きません。
 
-<p align="center"><img width="720" alt="マークしたファイルとフォルダーの金色の星" src="docs/images-v8/common/feature_marks.png"></p>
+<p align="center"><img width="720" alt="マークしたファイルとフォルダーの金色の星" src="docs/images-v10/common/feature_marks.png"></p>
 
 名前の変更、移動、ごみ箱についていきます。Maguro の実行中に復元してもマークは残ります。コピーには付きません。ファイルが見つからなくなると、見つからない項目として 180 日後に外れ、一覧からそれより早く消すこともできます。歯車メニューの **重要リスト**（**Ctrl+Shift+I**）では、検索、**場所を開く**、マークの解除、**見つからない項目を整理**、**エクスポート**と**インポート**ができます。設定のエクスポート、インポート、初期化はマークを変えません。マークは設定の隣の `marks.json` にあります（`%APPDATA%\Maguro\marks.json`。`portable.txt` があるときは exe の隣）。`maguro.json` とは別のファイルです。その日の最初の保存で、直前のファイルを `marks.json.bak` に残します。`marks.json` が読めないときはファイルをそのまま残し、リストに理由と場所が出ます。
 
-<p align="center"><img width="640" alt="検索、状態、エクスポートがある重要リスト" src="docs/images-v8/common/feature_marks_list.png"></p>
+<p align="center"><img width="640" alt="検索、状態、エクスポートがある重要リスト" src="docs/images-v10/common/feature_marks_list.png"></p>
 
 ### テーマとアクセント
 
@@ -230,10 +252,10 @@ Windows に従うライト／ダーク、テーマごとにアクセント色の
 
 <table>
 <tr>
-<td><img alt="設定" src="docs/images-v8/ja/settings.png"></td>
+<td><img alt="設定" src="docs/images-v10/ja/settings.png"></td>
 </tr>
 <tr>
-<td><img alt="ダークテーマ" src="docs/images-v8/ja/hero_dark.png"></td>
+<td><img alt="ダークテーマ" src="docs/images-v10/ja/hero_dark.png"></td>
 </tr>
 </table>
 

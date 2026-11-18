@@ -155,6 +155,9 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             // While the user drags the window edge, lay the panes out once at the end (same cost reason as splitters).
             WM_SIZE => {
                 let kind = wp.0 as u32;
+                if kind == SIZE_MINIMIZED {
+                    crate::toolbar::dismiss_for(h, crate::toolbar::TipCause::Minimize);
+                }
                 let sizing = app(|a| {
                     if kind != SIZE_MINIMIZED {
                         a.was_max = kind == SIZE_MAXIMIZED;
@@ -211,7 +214,9 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if wp.0 != 0 {
                     _ = PostMessageW(Some(h), WM_DRIVES, WPARAM(0), LPARAM(0));
                     resume_status_timer(h);
+                    crate::toolbar::arm_tip_leave(h);
                 } else {
+                    crate::toolbar::dismiss_for(h, crate::toolbar::TipCause::Inactive);
                     pause_status_timer(h);
                 }
             }
@@ -496,6 +501,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 ID_ACCENT_PICK => pick_accent(),
                 ID_KEYS => toggle_keys(),
                 id if crate::winmerge::gear(h, id) => {}
+                id if crate::toolbar::command(h, id) => {}
                 _ => {}
             },
             WM_INITMENUPOPUP => {
@@ -589,6 +595,12 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 // Back in front: refresh Explorer pins and favourite files if either group is open.
                 // Debounced in request_pins. One read fills both lists.
                 let (state, min) = ((wp.0 & 0xffff) as u32, (wp.0 >> 16) & 0xffff != 0);
+                // A tracking tip survives deactivation: the button never sees WM_MOUSELEAVE.
+                if state == WA_INACTIVE || min {
+                    crate::toolbar::dismiss_for(h, if min { crate::toolbar::TipCause::Minimize } else { crate::toolbar::TipCause::Inactive });
+                } else {
+                    crate::toolbar::arm_tip_leave(h);
+                }
                 if state != WA_INACTIVE {
                     app(|a| a.last_front = a.cur);
                     request_pins(false);
@@ -613,8 +625,13 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_SYSCOMMAND => {
                 if (wp.0 as u32) & 0xfff0 == SC_MINIMIZE {
+                    crate::toolbar::dismiss_for(h, crate::toolbar::TipCause::Minimize);
                     keep_focus(h);
                 }
+                return DefWindowProcW(h, msg, wp, lp);
+            }
+            WM_KILLFOCUS => {
+                crate::toolbar::note_focus_left(h, HWND(wp.0 as *mut std::ffi::c_void));
                 return DefWindowProcW(h, msg, wp, lp);
             }
             WM_TIMER if wp.0 == TIMER_FOCUS => {
@@ -691,6 +708,8 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_THEME_RELAUNCH => theme_relaunch(),
             WM_UPDATE => on_update(h, wp.0),
             crate::remote::WM_REMOTE => remote_arrived(),
+            // A chord posted before capture dropped the registration must not still run.
+            WM_HOTKEY if crate::keys::capture_gate(crate::keys::capturing()).block_hotkey => {}
             WM_HOTKEY if wp.0 == HOTKEY_ID as usize => hotkey_pressed(),
             WM_HOTKEY if wp.0 == crate::dialogjump::DIALOG_HOTKEY_ID as usize => crate::dialogjump::on_hotkey(),
             WM_HOTKEY if wp.0 == crate::cliphot::CLIP_HOTKEY_ID as usize => crate::cliphot::on_hotkey(),
@@ -729,7 +748,9 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 m.ptMinTrackSize.y = y;
                 return LRESULT(0);
             }
+            WM_CLIPBOARDUPDATE => crate::toolbar::note_clipboard(),
             WM_DESTROY => {
+                crate::toolbar::remove_clipboard(h);
                 release_hotkey_hwnd(h);
                 crate::shell::listsync::disarm(h);
                 crate::cliphot::release(h);
@@ -780,6 +801,9 @@ pub(crate) unsafe fn paint_main(h: HWND) {
         // The top row is the toolbar once the tabs leave it. The strip used to paint this line.
         if vertical && g.top > 0 {
             fill(dc, RECT { left: 0, top: g.top - 1, right: g.w, bottom: g.top }, pal().line);
+        }
+        for r in crate::toolbar::separator_rects() {
+            fill(dc, r, pal().line);
         }
         if g.side > 0 {
             let side = side_rect(&g);
@@ -1223,6 +1247,9 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             // loop handles WM_XBUTTONUP first; a mouse-sourced command for that same click
             // is claimed there and must not step history again.
             WM_APPCOMMAND => {
+                if crate::keys::capture_gate(crate::keys::capturing()).block_app {
+                    return LRESULT(0);
+                }
                 let Some((dir, path)) = appcommand_event(lp.0) else {
                     return DefWindowProcW(h, msg, wp, lp);
                 };
@@ -1253,6 +1280,12 @@ pub(crate) unsafe fn set_hotkey(main: HWND, on: bool) -> bool {
     if !on {
         _ = UnregisterHotKey(Some(main), HOTKEY_ID);
         return false;
+    }
+    // Capture needs the chord as a normal key. Report success so the wish stays on and no toast appears.
+    if !crate::keys::register_hotkey_now(crate::keys::capturing(), true) {
+        _ = UnregisterHotKey(Some(main), HOTKEY_ID);
+        crate::keys::set_hot_hold(true);
+        return true;
     }
     let Some(chord) = crate::keys::hot_chord() else { return false };
     if chord.digits || (!chord.ctrl && !chord.alt && !chord.shift && !chord.win) {
@@ -1286,8 +1319,36 @@ pub(crate) unsafe fn try_register_hotkey(main: HWND) {
     });
 }
 
+/// Drop Win+Shift+E, the clipboard chord, and the file-dialog chord while a shortcut is captured.
+/// The on/off wishes stay. [`resume_global_hotkeys`] puts the registrations back.
+pub(crate) unsafe fn suspend_global_hotkeys() {
+    crate::keys::set_hot_hold(true);
+    let (front, clip) = app(|a| (a.hot_hwnd, a.clip_hwnd));
+    if !front.0.is_null() {
+        _ = UnregisterHotKey(Some(front), HOTKEY_ID);
+    }
+    if !clip.0.is_null() {
+        _ = UnregisterHotKey(Some(clip), crate::cliphot::CLIP_HOTKEY_ID);
+    }
+    crate::dialogjump::suspend_for_capture();
+}
+
+/// Register the global chords again after capture. A no-op when they were not dropped.
+pub(crate) unsafe fn resume_global_hotkeys() {
+    if !crate::keys::take_hot_hold() {
+        return;
+    }
+    apply_hotkey(false);
+}
+
 /// After a rebind or a reset. The wish stays on when the new chord cannot be registered.
+/// While a shortcut row is capturing, registration waits until capture ends.
 pub(crate) unsafe fn apply_hotkey(notify: bool) {
+    if crate::keys::capturing() {
+        suspend_global_hotkeys();
+        return;
+    }
+    crate::keys::set_hot_hold(false);
     let (want, old, main) = app(|a| (a.s.hotkey, a.hot_hwnd, a.main));
     if !old.0.is_null() {
         _ = UnregisterHotKey(Some(old), HOTKEY_ID);

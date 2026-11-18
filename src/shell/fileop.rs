@@ -108,6 +108,46 @@ pub(crate) unsafe fn copy_plain(text: &str) -> bool {
     ok
 }
 
+/// Selected file or folder paths, or the open folder when nothing is selected. Not quoted.
+pub(crate) unsafe fn copy_location(a: usize) {
+    let Some(fv) = view_of::<IFolderView2>(a) else { return };
+    let path = |it: IShellItem| it.GetDisplayName(SIGDN_FILESYSPATH).ok().map(|p| pwstr(p));
+    let mut paths: Vec<String> = Vec::new();
+    if let Ok(arr) = fv.GetSelection(false) {
+        paths = (0..arr.GetCount().unwrap_or(0)).filter_map(|k| path(arr.GetItemAt(k).ok()?)).collect();
+    }
+    if fv.ItemCount(SVGIO_SELECTION).unwrap_or(0) == 0 {
+        paths = fv.GetFolder::<IShellItem>().ok().and_then(path).into_iter().collect();
+    }
+    if paths.is_empty() {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    }
+    let text: Vec<u16> = paths.join("\r\n").encode_utf16().chain([0]).collect();
+    let main = app(|x| x.main);
+    let mut ok = false;
+    if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, text.len() * 2) {
+        let p = GlobalLock(h) as *mut u16;
+        if !p.is_null() {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), p, text.len());
+            _ = GlobalUnlock(h);
+            if OpenClipboard(Some(main)).is_ok() {
+                ok = EmptyClipboard().is_ok() && SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(h.0))).is_ok();
+                _ = CloseClipboard();
+            }
+        }
+        if !ok {
+            _ = GlobalFree(Some(h));
+        }
+    }
+    if !ok {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    }
+    app(|x| x.note = Some((tr(Key::CopiedPath).to_string(), Instant::now() + std::time::Duration::from_secs(3))));
+    update_status();
+}
+
 // Ctrl+Shift+C in a file list: the selected items' paths (or the folder's), quoted, one per line.
 // Virtual items without a file path are skipped. The clipboard is only touched once the text is ready.
 pub(crate) unsafe fn copy_paths(a: usize) {
@@ -641,6 +681,36 @@ unsafe fn copy_once(srcs: &[String], dst: &str, rename: bool, mv: bool) -> super
     }
     let (result, locked) = super::inuse::perform_watched(&op);
     super::inuse::Attempt { result, locked }
+}
+
+/// Shell Properties for the active pane's selection.
+pub(crate) unsafe fn show_selection_properties(i: usize) {
+    let Some(sv) = view_of::<IShellView>(i) else {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    };
+    let Ok(cm) = sv.GetItemObject::<IContextMenu>(SVGIO_SELECTION) else {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    };
+    let Ok(menu) = CreatePopupMenu() else { return };
+    let verb = b"properties\0";
+    let hwnd = sv.GetWindow().unwrap_or_else(|_| app(|a| a.main));
+    if cm.QueryContextMenu(menu, 0, 1, 0x7fff, CMF_NORMAL).is_ok() {
+        let ci = CMINVOKECOMMANDINFO {
+            cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
+            hwnd,
+            lpVerb: PCSTR(verb.as_ptr()),
+            nShow: SW_SHOWNORMAL.0 as i32,
+            ..Default::default()
+        };
+        if cm.InvokeCommand(&ci).is_err() {
+            _ = MessageBeep(MB_ICONWARNING);
+        }
+    } else {
+        _ = MessageBeep(MB_ICONWARNING);
+    }
+    _ = DestroyMenu(menu);
 }
 
 pub(crate) unsafe fn delete_selection(i: usize, shift: bool) {

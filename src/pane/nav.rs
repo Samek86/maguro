@@ -11,6 +11,7 @@ use windows::Win32::NetworkManagement::WNet::{
     WNetAddConnection3W, WNetGetConnectionW, CONNECT_INTERACTIVE, NETRESOURCEW, RESOURCETYPE_DISK,
 };
 use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetFileAttributesW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, INVALID_FILE_ATTRIBUTES};
+use windows::Win32::UI::Controls::LVS_SHOWSELALWAYS;
 
 use super::reconnect::{cached_kind, folder_is_share, needs_credentials, next_resume_wait, share_root_of, RESUME_RETRIES};
 
@@ -1579,6 +1580,67 @@ pub(crate) unsafe fn focus_view(i: usize) {
     }
 }
 
+/// Where focus sits when a context menu or a file drag returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModalFocus {
+    /// Nothing, the main frame, or this pane's file list.
+    List,
+    /// Address, filter, or an inline rename. Leave the caret there.
+    Field,
+    /// Another pane, the tree, or a different window.
+    Elsewhere,
+}
+
+/// The list is activated again only when the user has not moved somewhere else.
+pub(crate) fn restore_list_after_modal(focus: ModalFocus) -> bool {
+    matches!(focus, ModalFocus::List)
+}
+
+/// `outer` is the mouse message that entered the shell drag. Nested messages
+/// dispatched inside `DoDragDrop` are not outer, so focus is restored once.
+pub(crate) fn refocus_after_file_drag(outer: bool, saw_drag: bool) -> bool {
+    outer && saw_drag
+}
+
+pub(crate) unsafe fn modal_focus(pane: usize) -> ModalFocus {
+    let focus = GetFocus();
+    if focus.0.is_null() || !IsWindow(Some(focus)).as_bool() {
+        return ModalFocus::List;
+    }
+    let (main, fields) = app(|a| {
+        let mut fields = Vec::new();
+        for p in a.panes.iter().flatten() {
+            if let Ok(e) = GetDlgItem(Some(p.hwnd), ID_EDIT) {
+                fields.push(e);
+            }
+            if let Ok(f) = GetDlgItem(Some(p.hwnd), ID_FILTER) {
+                fields.push(f);
+            }
+        }
+        (a.main, fields)
+    });
+    if focus == main {
+        return ModalFocus::List;
+    }
+    if pane_shell_label_open(pane) || fields.iter().any(|h| *h == focus) {
+        return ModalFocus::Field;
+    }
+    if let Some(list) = view_of::<IShellView>(pane).and_then(|sv| sv.GetWindow().ok()) {
+        if !list.0.is_null() && (focus == list || IsChild(list, focus).as_bool()) {
+            return ModalFocus::List;
+        }
+    }
+    ModalFocus::Elsewhere
+}
+
+/// `UIActivate(SVUIA_ACTIVATE_FOCUS)` after a menu or a drag, unless that would
+/// take the caret out of a field the user just clicked.
+pub(crate) unsafe fn refocus_after_modal(pane: usize) {
+    if restore_list_after_modal(modal_focus(pane)) {
+        focus_view(pane);
+    }
+}
+
 /// Remember which of this window's controls had focus as it goes to the back.
 pub(crate) unsafe fn keep_focus(main: HWND) {
     let f = GetFocus();
@@ -2037,6 +2099,50 @@ pub(crate) unsafe fn open_in_menu(h: HWND, src: usize) {
     }
 }
 
+/// Menu id 1 is no tint. 2..=7 are the six colour labels, same order as the header submenu.
+pub(crate) fn tint_pick(pick: usize) -> Option<u8> {
+    if (1..=7).contains(&pick) {
+        Some((pick - 1) as u8)
+    } else {
+        None
+    }
+}
+
+unsafe fn fill_tint_menu(menu: HMENU, cur: u8) {
+    for k in 0..=6u8 {
+        let flags = if k == cur { MF_STRING | MF_CHECKED } else { MF_STRING };
+        let name = if k == 0 { tr(crate::Key::None) } else { tint_name(k) };
+        _ = AppendMenuW(menu, flags, k as usize + 1, &HSTRING::from(name));
+    }
+}
+
+/// Write a pane tint and repaint the header. Same save path as the header menu.
+pub(crate) unsafe fn apply_pane_tint(pane: usize, tint: u8) {
+    if pane >= MAXP {
+        return;
+    }
+    app(|a| {
+        set_pane_tint(&mut a.s, pane, tint);
+    });
+    if let Some(h) = pane_hwnd(pane) {
+        repaint_header(h);
+    }
+    check_dirty();
+    note_save();
+}
+
+/// None, then the six pane colour labels. Applies the choice to `pane`.
+pub(crate) unsafe fn popup_pane_tint(owner: HWND, pane: usize, at: POINT) {
+    let cur = app(|a| a.s.tints.get(pane).copied().unwrap_or(0));
+    let Ok(menu) = CreatePopupMenu() else { return };
+    fill_tint_menu(menu, cur);
+    let pick = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, at.x, at.y, None, owner, None).0 as usize;
+    _ = DestroyMenu(menu);
+    if let Some(tint) = tint_pick(pick) {
+        apply_pane_tint(pane, tint);
+    }
+}
+
 /// Right-click on a pane header: view, colour, then split / tab / path / close.
 const VIEW_CMD: usize = 210;
 const SAVE_VIEW_CMD: usize = 218;
@@ -2080,11 +2186,7 @@ pub(crate) unsafe fn tint_menu(h: HWND, i: usize, at: POINT) {
     let save_flags = if checked.is_some() { MF_STRING } else { MF_STRING | MF_GRAYED };
     _ = AppendMenuW(view, save_flags, SAVE_VIEW_CMD, &HSTRING::from(tr(crate::Key::SaveAsDefaultView)));
     _ = AppendMenuW(menu, MF_POPUP, view.0 as usize, &HSTRING::from(tr(crate::Key::View)));
-    for k in 0..=6u8 {
-        let flags = if k == cur { MF_STRING | MF_CHECKED } else { MF_STRING };
-        let name = if k == 0 { tr(crate::Key::None) } else { tint_name(k) };
-        _ = AppendMenuW(colors, flags, k as usize + 1, &HSTRING::from(name));
-    }
+    fill_tint_menu(colors, cur);
     _ = AppendMenuW(menu, MF_POPUP, colors.0 as usize, &HSTRING::from(tr(crate::Key::PaneColour)));
     _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let item = |id: usize, text: &str, on: bool| {
@@ -2115,13 +2217,10 @@ pub(crate) unsafe fn tint_menu(h: HWND, i: usize, at: POINT) {
         save_pane_default_view(i);
         return;
     }
-    if pick > 0 && pick <= 7 && i < MAXP {
-        app(|a| {
-            set_pane_tint(&mut a.s, i, pick as u8 - 1);
-        });
-        repaint_header(h);
-        check_dirty();
-        note_save();
+    if let Some(tint) = tint_pick(pick) {
+        if i < MAXP {
+            apply_pane_tint(i, tint);
+        }
         return;
     }
     match pick {
@@ -2136,6 +2235,24 @@ pub(crate) unsafe fn tint_menu(h: HWND, i: usize, at: POINT) {
         EXPLORER_CMD => open_pane_in_explorer(i),
         CLOSE_PANE_CMD => header_close(i),
         _ => {}
+    }
+}
+
+/// View-mode list from the pane header menu: extra large through content.
+pub(crate) unsafe fn popup_view_modes(owner: HWND, pane: usize, at: POINT) {
+    let checked = pane_mode_icon(pane).and_then(|(m, z)| explorer_view_index(m, z));
+    let Ok(view) = CreatePopupMenu() else { return };
+    for (k, &(_, _, label)) in EXPLORER_VIEWS.iter().enumerate() {
+        _ = AppendMenuW(view, MF_STRING, VIEW_CMD + k, &HSTRING::from(tr(label)));
+    }
+    if let Some(k) = checked {
+        _ = CheckMenuRadioItem(view, VIEW_CMD as u32, (VIEW_CMD + EXPLORER_VIEWS.len() - 1) as u32, (VIEW_CMD + k) as u32, MF_BYCOMMAND.0);
+    }
+    let pick = TrackPopupMenu(view, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, at.x, at.y, None, owner, None).0 as usize;
+    _ = DestroyMenu(view);
+    if (VIEW_CMD..VIEW_CMD + EXPLORER_VIEWS.len()).contains(&pick) {
+        let (mode, icon, ..) = EXPLORER_VIEWS[pick - VIEW_CMD];
+        commit_pane_view(pane, mode, icon);
     }
 }
 
@@ -2176,7 +2293,7 @@ unsafe fn open_pane_in_explorer(i: usize) {
 
 /// New column to the right, or new row under this pane. The new pane shows this folder
 /// with the same sort, column widths and view, and an empty back/forward list.
-unsafe fn header_split(i: usize, below: bool) {
+pub(crate) unsafe fn header_split(i: usize, below: bool) {
     let plan = app(|a| {
         if i >= a.s.panes() {
             return None;
@@ -2196,7 +2313,7 @@ unsafe fn header_split(i: usize, below: bool) {
 }
 
 /// Remove this pane. The active pane follows it to a neighbour; every other pane keeps its folder.
-unsafe fn header_close(i: usize) {
+pub(crate) unsafe fn header_close(i: usize) {
     let plan = app(|a| {
         if i >= a.s.panes() {
             return None;
@@ -2259,6 +2376,7 @@ pub(crate) unsafe fn commit_pane_view(i: usize, mode: i32, icon: i32) {
         });
         check_dirty();
         note_save();
+        ensure_show_sel(&fv);
         super::marks_overlay::on_view_mode(i);
         return;
     };
@@ -2309,6 +2427,7 @@ pub(crate) unsafe fn commit_pane_view(i: usize, mode: i32, icon: i32) {
             }
         }
     });
+    ensure_show_sel(&fv);
     super::marks_overlay::on_view_mode(i);
 }
 
@@ -3151,6 +3270,10 @@ unsafe fn apply_planned(fv: &IFolderView2, writes: u8, mode: i32, icon: i32, col
             put_widths(fv, cols, lv);
         }
     }
+    // A new mode or column set rebuilds the list and can drop the selection flag.
+    if plan.mode || plan.columns {
+        ensure_show_sel(fv);
+    }
     if plan.mode || plan.columns { 1 } else { writes }
 }
 
@@ -3235,9 +3358,7 @@ unsafe fn finish_theme_refresh(i: usize, h: HWND, shown: &str) {
         }
     }
     if let Some(fv) = view_of::<IFolderView2>(i) {
-        if fv.GetCurrentFolderFlags().is_ok_and(|f| f & FWF_FULLROWSELECT.0 as u32 != 0) {
-            _ = fv.SetCurrentFolderFlags(FWF_FULLROWSELECT.0 as u32, 0);
-        }
+        ensure_show_sel(&fv);
     }
     paint_list_theme(h);
     if keep.had_focus {
@@ -3410,10 +3531,9 @@ unsafe fn on_nav_impl(i: usize, pidl: *const ITEMIDLIST) {
                 }
                 // No full-row select: a drag that starts in the size/date cells draws a selection box
                 // (and selects the names it covers) instead of grabbing that row's file.
-                // Only when the flag is still on. Setting it again rebuilds the view.
-                if fv.GetCurrentFolderFlags().is_ok_and(|f| f & FWF_FULLROWSELECT.0 as u32 != 0) {
-                    _ = fv.SetCurrentFolderFlags(FWF_FULLROWSELECT.0 as u32, 0);
-                }
+                // Show-selection-always is turned on in the same write when it is missing.
+                // Only when a bit is wrong. Setting the same flags again rebuilds the view.
+                ensure_show_sel(&fv);
                 mark_view_written(i, cols.filter(|c| !c.is_empty()));
             }
         }
@@ -3510,7 +3630,7 @@ impl IExplorerBrowserEvents_Impl for Events_Impl {
         if refreshing {
             return Ok(());
         }
-        set_nav_busy(i, true);
+        mark_nav_busy(i, NavBusyStep::Start);
         unsafe { super::marks_overlay::on_leaving(i) };
         pane_left(i);
         unsafe {
@@ -3521,6 +3641,9 @@ impl IExplorerBrowserEvents_Impl for Events_Impl {
             // Cancel before explorerframe binds a folder that is already gone (back, forward,
             // the tree, session restore). A share is not stat'd here.
             if local_path_gone(&path) {
+                // Busy was set above. A cancel here used to return without Complete or Failed,
+                // so the pane stayed busy and the next browse never started.
+                flush_nav_pending(i, NavBusyStep::TargetMissing);
                 return Err(Error::from(HRESULT::from_win32(ERROR_CANCELLED.0)));
             }
             // Before the view enumerates, so IncludeObject can hide missing Recent links.
@@ -3567,22 +3690,25 @@ impl IExplorerBrowserEvents_Impl for Events_Impl {
         unsafe {
             on_nav(i, pidl);
             schedule_pane_drop(i);
-            flush_nav_pending(i);
+            flush_nav_pending(i, NavBusyStep::Finish);
         }
         Ok(())
     }
     fn OnNavigationFailed(&self, pidl: *const ITEMIDLIST) -> Result<()> {
         NAV_GEN.fetch_add(1, Ordering::SeqCst);
+        let i = self.0.load(Ordering::SeqCst);
+        // A cancel after Pending can arrive with no pidl. That used to return
+        // before the busy flag was cleared, so the pane stayed busy.
         if pidl.is_null() {
+            unsafe { flush_nav_pending(i, NavBusyStep::FailedNull) };
             return Ok(());
         }
-        let i = self.0.load(Ordering::SeqCst);
         clear_theme_keep(i);
         unsafe {
             let cur = app(|a| a.s.paths.get(i).cloned().unwrap_or_default());
             super::recent::note_folder(i, &cur);
             super::recent::nav_failed(i);
-            flush_nav_pending(i);
+            flush_nav_pending(i, NavBusyStep::Finish);
             rec_event(i, Nav::Failed, pidl);
             let cur = app(|a| a.s.paths.get(i).cloned().unwrap_or_default());
             pane_here(i, &cur, classify_ui(&cur));
@@ -4469,6 +4595,73 @@ pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
     }
 }
 
+/// Flags passed to `IExplorerBrowser::Initialize`. No web view, and the selection
+/// stays drawn when the list does not have focus.
+pub(crate) fn pane_folder_flags(no_web: u32, show_sel: u32) -> u32 {
+    no_web | show_sel
+}
+
+/// `(mask, flags)` for one `IFolderView2::SetCurrentFolderFlags` call.
+/// Full-row select is cleared. Show-selection-always is set.
+/// `None` when both are already right, so the list is not rebuilt.
+pub(crate) fn list_folder_flag_write(current: u32, full_row: u32, show_sel: u32) -> Option<(u32, u32)> {
+    let mut mask = 0u32;
+    let mut flags = 0u32;
+    if current & full_row != 0 {
+        mask |= full_row;
+    }
+    if current & show_sel == 0 {
+        mask |= show_sel;
+        flags |= show_sel;
+    }
+    (mask != 0).then_some((mask, flags))
+}
+
+/// Keep full-row select off and show-selection-always on. A SysListView32 also
+/// gets `LVS_SHOWSELALWAYS`. Nothing is written when the bits are already right.
+pub(crate) unsafe fn ensure_show_sel(fv: &IFolderView2) {
+    if let Ok(cur) = fv.GetCurrentFolderFlags() {
+        if let Some((mask, flags)) = list_folder_flag_write(cur, FWF_FULLROWSELECT.0 as u32, FWF_SHOWSELALWAYS.0 as u32) {
+            _ = fv.SetCurrentFolderFlags(mask, flags);
+        }
+    }
+    show_sel_on_list(view_list(fv));
+}
+
+unsafe fn show_sel_on_list(lv: HWND) {
+    if !is_sys_list(lv) {
+        return;
+    }
+    let style = GetWindowLongPtrW(lv, GWL_STYLE) as u32;
+    if style & LVS_SHOWSELALWAYS == 0 {
+        SetWindowLongPtrW(lv, GWL_STYLE, (style | LVS_SHOWSELALWAYS) as isize);
+    }
+}
+
+/// What a navigation callback does to `nav_busy`. Every step except `Start` clears it.
+/// A second clear stays clear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NavBusyStep {
+    /// `OnNavigationPending` accepted the folder.
+    Start,
+    /// Pending returned because the target folder is already gone.
+    TargetMissing,
+    /// `OnNavigationFailed` with a null pidl.
+    FailedNull,
+    /// Complete, or failed with a pidl.
+    Finish,
+}
+
+pub(crate) fn nav_busy_after(busy: bool, step: NavBusyStep) -> bool {
+    match step {
+        NavBusyStep::Start => true,
+        // Already clear or still busy: both end clear. A second Finish does not panic.
+        NavBusyStep::TargetMissing | NavBusyStep::FailedNull | NavBusyStep::Finish => match busy {
+            true | false => false,
+        },
+    }
+}
+
 fn pane_nav_busy(i: usize) -> bool {
     app(|a| a.panes.get(i).and_then(|p| p.as_ref()).is_some_and(|p| p.nav_busy))
 }
@@ -4489,12 +4682,20 @@ fn set_nav_busy(i: usize, busy: bool) {
     });
 }
 
+fn mark_nav_busy(i: usize, step: NavBusyStep) {
+    let next = app(|a| {
+        let busy = a.panes.get(i).and_then(|p| p.as_ref()).is_some_and(|p| p.nav_busy);
+        nav_busy_after(busy, step)
+    });
+    set_nav_busy(i, next);
+}
+
 fn take_nav_pending(i: usize) -> Option<String> {
     app(|a| a.panes.get_mut(i).and_then(|p| p.as_mut()).and_then(|p| p.nav_pending.take()))
 }
 
-unsafe fn flush_nav_pending(i: usize) {
-    set_nav_busy(i, false);
+unsafe fn flush_nav_pending(i: usize, step: NavBusyStep) {
+    mark_nav_busy(i, step);
     if let Some(path) = take_nav_pending(i) {
         if navigate(i, &path) && !net_failed(i) {
             focus_view(i);
@@ -4672,6 +4873,7 @@ impl PaneDrop {
 impl IDropTarget_Impl for PaneDrop_Impl {
     fn DragEnter(&self, d: Ref<IDataObject>, key: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         unsafe {
+            note_shell_drag();
             let basket = d.as_ref().is_some_and(|obj| crate::basket::is_basket_data(obj));
             self.basket.set(basket);
             self.ok.set(if basket { true } else { drop_items(&d).is_some() });
@@ -4712,6 +4914,7 @@ impl IDropTarget_Impl for PaneDrop_Impl {
             self.basket.set(false);
             self.hover(false);
             pane_tab_drag_leave(self.hwnd);
+            end_shell_drag_target();
             if let Some(hp) = &self.helper {
                 _ = hp.DragLeave();
             }
@@ -4720,6 +4923,7 @@ impl IDropTarget_Impl for PaneDrop_Impl {
     }
     fn Drop(&self, d: Ref<IDataObject>, key: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         unsafe {
+            end_shell_drag_target();
             let basket = self.basket.get();
             self.basket.set(false);
             if pane_tab_drop(self.hwnd, &d, key, pt, effect) {
@@ -5294,5 +5498,62 @@ mod activation_dedupe {
         assert!(super::click_defers_to_shell(r"C:\Work\pack.ZIP"));
         assert!(super::click_defers_to_shell(r"C:\Work\pics.cab"));
         assert!(super::click_defers_to_shell(r"C:\Work\docs.library-ms"));
+    }
+}
+
+#[cfg(test)]
+mod selection_visible_tests {
+    use super::{
+        list_folder_flag_write, nav_busy_after, pane_folder_flags, refocus_after_file_drag, restore_list_after_modal, ModalFocus, NavBusyStep,
+    };
+    use windows::Win32::UI::Shell::{FWF_FULLROWSELECT, FWF_NOWEBVIEW, FWF_SHOWSELALWAYS};
+
+    fn busy_after(steps: &[NavBusyStep]) -> bool {
+        let mut busy = false;
+        for step in steps {
+            busy = nav_busy_after(busy, *step);
+        }
+        busy
+    }
+
+    #[test]
+    fn nav_busy_clears_on_a_missing_target_a_null_pidl_and_a_complete() {
+        assert!(busy_after(&[NavBusyStep::Start]), "starting a navigation sets busy");
+        assert!(!busy_after(&[NavBusyStep::Start, NavBusyStep::TargetMissing]), "a missing target clears busy");
+        assert!(!busy_after(&[NavBusyStep::Start, NavBusyStep::FailedNull]), "a null-pidl failure clears busy");
+        assert!(!busy_after(&[NavBusyStep::Start, NavBusyStep::Finish]), "complete clears busy");
+        // A second clear is a no-op. The next navigation can set busy again.
+        assert!(!busy_after(&[NavBusyStep::Start, NavBusyStep::Finish, NavBusyStep::Finish]));
+        assert!(!busy_after(&[NavBusyStep::FailedNull]));
+        assert!(!busy_after(&[NavBusyStep::TargetMissing]));
+        assert!(busy_after(&[NavBusyStep::Start, NavBusyStep::Finish, NavBusyStep::Start]));
+        assert!(!busy_after(&[NavBusyStep::Start, NavBusyStep::TargetMissing, NavBusyStep::Finish]));
+    }
+
+    #[test]
+    fn folder_flags_show_the_selection_and_keep_full_row_off() {
+        let no_web = FWF_NOWEBVIEW.0 as u32;
+        let full = FWF_FULLROWSELECT.0 as u32;
+        let show = FWF_SHOWSELALWAYS.0 as u32;
+        let born = pane_folder_flags(no_web, show);
+        assert_eq!(born & no_web, no_web);
+        assert_eq!(born & show, show);
+        assert_eq!(born & full, 0);
+
+        assert_eq!(list_folder_flag_write(full, full, show), Some((full | show, show)));
+        assert_eq!(list_folder_flag_write(show, full, show), None, "already correct: do not rebuild");
+        assert_eq!(list_folder_flag_write(0, full, show), Some((show, show)));
+        assert_eq!(list_folder_flag_write(full | show, full, show), Some((full, 0)));
+        assert_eq!(list_folder_flag_write(full | no_web, full, show), Some((full | show, show)));
+    }
+
+    #[test]
+    fn a_modal_shell_loop_does_not_steal_a_field_or_another_window() {
+        assert!(restore_list_after_modal(ModalFocus::List));
+        assert!(!restore_list_after_modal(ModalFocus::Field));
+        assert!(!restore_list_after_modal(ModalFocus::Elsewhere));
+        assert!(refocus_after_file_drag(true, true));
+        assert!(!refocus_after_file_drag(false, true), "a nested message inside DoDragDrop is not the end");
+        assert!(!refocus_after_file_drag(true, false), "a click that never dragged");
     }
 }

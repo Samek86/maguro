@@ -544,34 +544,83 @@ pub(crate) fn header_colors(pane: HWND) -> (u32, u32) {
     (c.head, c.ink)
 }
 
+/// Pointer state of an owner-drawn chrome button. Pressed wins over hover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChromePress {
+    Rest,
+    Hover,
+    Pressed,
+}
+
+/// Fill and icon for one chrome button. `fill` is the whole face, after hover or press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ChromeFace {
+    pub fill: u32,
+    pub icon: u32,
+}
+
+/// Face of an owner-drawn chrome button.
+///
+/// The horizontal bar, the vertical column, the overflow chevron, and the
+/// right-hand icon strip all go through [`draw_button`]. An on toggle keeps the
+/// same fill as the off button, including hover and press, and paints only the
+/// icon in `accent`. A disabled command stays gray and does not look on.
+pub(crate) fn chrome_button_face(on: bool, press: ChromePress, disabled: bool, tinted: bool, bg: u32, ink: u32, sub: u32, accent: u32) -> ChromeFace {
+    if disabled {
+        return ChromeFace { fill: bg, icon: blend(bg, sub, 0.45) };
+    }
+    // Same mixes the off button already used. They blend into the plain ground,
+    // not into an accent wash, so an on toggle does not grow a second colour.
+    let wash = match (tinted, press) {
+        (_, ChromePress::Rest) => None,
+        (true, ChromePress::Pressed) => Some(0.3),
+        (true, ChromePress::Hover) => Some(0.18),
+        (false, ChromePress::Pressed) => Some(0.13),
+        (false, ChromePress::Hover) => Some(0.07),
+    };
+    let fill = match wash {
+        Some(t) => blend(bg, ink, t),
+        None => bg,
+    };
+    let icon = if on {
+        accent
+    } else if tinted || press != ChromePress::Rest {
+        ink
+    } else {
+        sub
+    };
+    ChromeFace { fill, icon }
+}
+
 pub(crate) unsafe fn draw_button(d: &DRAWITEMSTRUCT) {
     let (hover, dpi, font, icon_font, main) = app(|a| (a.hover, a.dpi, a.font, a.icon_font, a.main));
     let parent = GetParent(d.hwndItem).unwrap_or_default();
     let on_main = parent == main;
     let (dc, rc, id) = (d.hDC, d.rcItem, d.CtlID as i32);
-    let disabled = d.itemState.0 & ODS_DISABLED.0 != 0;
+    // Command buttons stay enabled so a gray command still receives the mouse (its tooltip).
+    // The logical flag is what paints gray and what ignores the click.
+    let cmd = if on_main && crate::toolbar::is_command_control(id) {
+        crate::toolbar::command_visual(id)
+    } else {
+        None
+    };
+    let disabled = d.itemState.0 & ODS_DISABLED.0 != 0 || cmd.as_ref().is_some_and(|c| !c.enabled);
     let pressed = !disabled && d.itemState.0 & ODS_SELECTED.0 != 0;
     let hot = !disabled && hover == d.hwndItem;
     let (bg, ink) = if on_main { (pal().bg, pal().text) } else { header_colors(parent) };
     let tinted = bg != pal().bg && bg != pal().card;
-    fill(dc, rc, bg);
-    if pressed || hot {
-        let t = match (tinted, pressed) {
-            (true, true) => 0.3,
-            (true, false) => 0.18,
-            (false, true) => 0.13,
-            (false, false) => 0.07,
-        };
-        fill(dc, rc, blend(bg, ink, t));
-    }
-    // Disabled sits below the resting sub colour. Hover and press use the full ink, same as the glyphs.
-    let fg = if disabled {
-        blend(bg, pal().sub, 0.45)
-    } else if tinted || hot || pressed {
-        ink
+    let toggled = cmd.as_ref().is_some_and(|c| c.on && !disabled);
+    let press = if pressed {
+        ChromePress::Pressed
+    } else if hot {
+        ChromePress::Hover
     } else {
-        pal().sub
+        ChromePress::Rest
     };
+    let accent = if toggled { app(|a| a.s.accent_now()) } else { 0 };
+    let paint = chrome_button_face(toggled, press, disabled, tinted, bg, ink, pal().sub, accent);
+    fill(dc, rc, paint.fill);
+    let fg = paint.icon;
     if id == ID_FAV {
         // ★ filled (gray, or the header ink when tinted) in a favourite folder, otherwise ☆ with a small +
         let fav = app(|a| a.panes.iter().position(|p| p.as_ref().is_some_and(|p| p.hwnd == parent)).is_some_and(|i| a.s.is_fav(&a.s.paths[i])));
@@ -603,7 +652,10 @@ pub(crate) unsafe fn draw_button(d: &DRAWITEMSTRUCT) {
         if marked {
             fill(dc, RECT { left: rc.left + s(7), top: rc.bottom - s(2), right: rc.right - s(7), bottom: rc.bottom }, accent);
         }
-        return text(dc, rc, &text_of(d.hwndItem), font, if marked { pal().text } else { fg }, DT_CENTER);
+        // Caps sit high next to the line icons. One DIP lowers the letter without touching the underline.
+        let drop = s(1);
+        let letter = RECT { top: rc.top + drop, bottom: rc.bottom + drop, ..rc };
+        return text(dc, letter, &text_of(d.hwndItem), font, if marked { pal().text } else { fg }, DT_CENTER);
     }
     if id == ID_TB_LAYOUT {
         // the one label in the chrome: the current grid, after the 2×2 icon
@@ -615,6 +667,13 @@ pub(crate) unsafe fn draw_button(d: &DRAWITEMSTRUCT) {
     if let Some(kind) = tool_line_icon(id) {
         let dirty = id == ID_TB_SAVE && app(|a| a.dirty);
         draw_line_icon(dc, rc, kind, if dirty { GREEN } else { fg }, dpi);
+        return;
+    }
+    // Command toolbar: icon only. The accessible name stays on the button window.
+    if crate::toolbar::is_command_control(id) {
+        if let Some(face) = &cmd {
+            draw_line_icon(dc, rc, face.icon, fg, dpi);
+        }
         return;
     }
     text(dc, rc, glyph(id), icon_font, fg, DT_CENTER);
@@ -2143,6 +2202,79 @@ mod pane_num_digit_tests {
                 delete_font(font);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod chrome_face_tests {
+    use super::{chrome_button_face, ChromePress};
+    use crate::{blend, group_tint, DARK, LIGHT};
+
+    fn contrast(a: u32, b: u32) -> f32 {
+        let channel = |c: u32, shift: u32| {
+            let x = (c >> shift & 0xFF) as f32 / 255.0;
+            if x <= 0.04045 {
+                x / 12.92
+            } else {
+                ((x + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let lum = |c: u32| 0.2126 * channel(c, 16) + 0.7152 * channel(c, 8) + 0.0722 * channel(c, 0);
+        let (x, y) = (lum(a), lum(b));
+        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    fn assert_theme(bg: u32, ink: u32, sub: u32, accent: u32, dark: bool) {
+        let rest_on = chrome_button_face(true, ChromePress::Rest, false, false, bg, ink, sub, accent);
+        let rest_off = chrome_button_face(false, ChromePress::Rest, false, false, bg, ink, sub, accent);
+        assert_eq!(rest_on.fill, bg);
+        assert_eq!(rest_off.fill, rest_on.fill);
+        assert_ne!(rest_on.fill, group_tint(accent, bg, dark), "on does not fill with the accent wash");
+        assert_eq!(rest_on.icon, accent);
+        assert_eq!(rest_off.icon, sub);
+        assert_ne!(rest_off.icon, accent);
+
+        for (press, tinted) in [(ChromePress::Hover, false), (ChromePress::Pressed, false), (ChromePress::Hover, true), (ChromePress::Pressed, true), (ChromePress::Rest, true)] {
+            let on = chrome_button_face(true, press, false, tinted, bg, ink, sub, accent);
+            let off = chrome_button_face(false, press, false, tinted, bg, ink, sub, accent);
+            assert_eq!(on.fill, off.fill, "{press:?} tinted={tinted}");
+            assert_eq!(on.icon, accent, "{press:?} tinted={tinted}");
+            if press == ChromePress::Rest && !tinted {
+                assert_eq!(off.icon, sub);
+            } else {
+                assert_eq!(off.icon, ink, "{press:?} tinted={tinted}");
+            }
+            if press != ChromePress::Rest {
+                let t = match (tinted, press) {
+                    (true, ChromePress::Pressed) => 0.3,
+                    (true, ChromePress::Hover) => 0.18,
+                    (false, ChromePress::Pressed) => 0.13,
+                    _ => 0.07,
+                };
+                assert_eq!(off.fill, blend(bg, ink, t), "{press:?} tinted={tinted}");
+                let old = blend(group_tint(accent, bg, dark), ink, t);
+                assert_ne!(on.fill, old, "{press:?} tinted={tinted} dropped the accent wash");
+            }
+        }
+
+        let disabled = chrome_button_face(true, ChromePress::Hover, true, false, bg, ink, sub, accent);
+        assert_eq!(disabled.fill, bg);
+        assert_eq!(disabled.icon, blend(bg, sub, 0.45));
+        assert_ne!(disabled.icon, accent);
+
+        // The accent icon sits on the plain ground, which is further from the accent
+        // than the old wash, so the on state does not lose contrast.
+        let wash = group_tint(accent, bg, dark);
+        assert!(contrast(accent, bg) + 0.05 >= contrast(accent, wash));
+    }
+
+    #[test]
+    fn on_toggle_keeps_the_plain_ground_and_paints_only_the_icon_in_accent() {
+        assert_theme(LIGHT.bg, LIGHT.text, LIGHT.sub, 0x0A9BD6, false);
+        assert_theme(DARK.bg, DARK.text, DARK.sub, 0x0A9BD6, true);
+        assert_theme(LIGHT.bg, LIGHT.text, LIGHT.sub, 0xA65A78, false);
+        assert_theme(DARK.bg, DARK.text, DARK.sub, 0x4B4B4B, true);
     }
 }
 

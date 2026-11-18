@@ -147,13 +147,17 @@ struct KeyState {
     binds: Vec<Chord>,
     extra: Map<String, Value>,
     capture: Option<usize>,
+    /// Swap confirmation is up. The row is already cleared, but actions stay blocked.
+    block: bool,
+    /// Global hotkeys were unregistered for capture and must be registered again.
+    hot_hold: bool,
     swallow: u16,
     modal: bool,
 }
 
 impl KeyState {
     fn fresh() -> Self {
-        KeyState { binds: CMDS.iter().map(Cmd::chord).collect(), extra: Map::new(), capture: None, swallow: 0, modal: false }
+        KeyState { binds: CMDS.iter().map(Cmd::chord).collect(), extra: Map::new(), capture: None, block: false, hot_hold: false, swallow: 0, modal: false }
     }
 }
 
@@ -217,11 +221,83 @@ pub(crate) fn begin(i: usize) {
 }
 
 pub(crate) fn cancel() {
-    with(|s| s.capture = None);
+    with(|s| {
+        s.capture = None;
+        s.block = false;
+    });
 }
 
+/// True while a row is waiting for a chord, and while the swap dialog is still open.
 pub(crate) fn capturing() -> bool {
-    with(|s| s.capture.is_some())
+    with(|s| s.capture.is_some() || s.block)
+}
+
+/// The swap dialog is open. [`offer`] has already cleared the row.
+pub(crate) fn hold_block(on: bool) {
+    with(|s| s.block = on);
+}
+
+pub(crate) fn set_hot_hold(on: bool) {
+    with(|s| s.hot_hold = on);
+}
+
+/// Clears the flag. `true` when hotkeys still have to be registered again.
+pub(crate) fn take_hot_hold() -> bool {
+    with(|s| {
+        let on = s.hot_hold;
+        s.hot_hold = false;
+        on
+    })
+}
+
+/// Channels that must stay quiet while [`capturing`] is true.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct CaptureGate {
+    pub block_app: bool,
+    pub block_pane: bool,
+    pub block_f5: bool,
+    pub block_hotkey: bool,
+}
+
+pub(crate) fn capture_gate(capturing: bool) -> CaptureGate {
+    CaptureGate { block_app: capturing, block_pane: capturing, block_f5: capturing, block_hotkey: capturing }
+}
+
+/// Register a global hotkey only when capture is idle and the user still wants it.
+pub(crate) fn register_hotkey_now(capturing: bool, want: bool) -> bool {
+    want && !capturing
+}
+
+/// The key that finished a capture is still down. It must not also run a command.
+pub(crate) fn command_swallowed(armed: u16, vk: u16) -> bool {
+    vk != 0 && armed == vk
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum InputMsg {
+    Key,
+    Hotkey,
+    AppCommand,
+    Other,
+}
+
+/// `WM_KEY*` / `WM_*CHAR` (0x0100–0x0107), `WM_HOTKEY` (0x0312), `WM_APPCOMMAND` (0x0319).
+pub(crate) fn input_msg(id: u32) -> InputMsg {
+    match id {
+        0x0100 | 0x0101 | 0x0102 | 0x0103 | 0x0104 | 0x0105 | 0x0106 | 0x0107 => InputMsg::Key,
+        0x0312 => InputMsg::Hotkey,
+        0x0319 => InputMsg::AppCommand,
+        _ => InputMsg::Other,
+    }
+}
+
+/// A nested pump may forward `msg` while capturing only when it cannot run a command,
+/// or when the message belongs to the swap dialog itself.
+pub(crate) fn dispatch_input(capturing: bool, for_dialog: bool, msg: u32) -> bool {
+    if !capturing || for_dialog {
+        return true;
+    }
+    matches!(input_msg(msg), InputMsg::Other)
 }
 
 pub(crate) fn capture_row() -> Option<usize> {
@@ -241,7 +317,7 @@ pub(crate) fn swallow(vk: u16) {
 }
 
 pub(crate) fn swallows(vk: u16) -> bool {
-    vk != 0 && with(|s| s.swallow == vk)
+    command_swallowed(with(|s| s.swallow), vk)
 }
 
 pub(crate) fn clear_swallow(vk: u16) {
@@ -288,6 +364,8 @@ pub(crate) fn reset_all() {
     with(|s| {
         s.binds = CMDS.iter().map(Cmd::chord).collect();
         s.capture = None;
+        s.block = false;
+        s.hot_hold = false;
     });
 }
 
@@ -401,6 +479,8 @@ pub(crate) fn load_bindings(map: &Map<String, Value>) {
         s.binds = binds;
         s.extra = extra;
         s.capture = None;
+        s.block = false;
+        s.hot_hold = false;
     });
 }
 
@@ -900,5 +980,85 @@ mod tests {
             assert!(!w);
             false
         })); // turning it off
+    }
+
+    #[test]
+    fn capture_blocks_actions_until_the_chord_is_finished() {
+        fresh();
+        let gate = |on| capture_gate(on);
+        let blocked = gate(true);
+        assert!(blocked.block_app && blocked.block_pane && blocked.block_f5 && blocked.block_hotkey);
+        let open = gate(false);
+        assert!(!open.block_app && !open.block_pane && !open.block_f5 && !open.block_hotkey);
+        assert!(!register_hotkey_now(true, true));
+        assert!(register_hotkey_now(false, true));
+        assert!(!register_hotkey_now(false, false));
+        // A nested pump keeps paint and mouse, and drops keys, hotkeys, and app commands.
+        assert!(dispatch_input(true, false, 0x0200)); // WM_MOUSEMOVE
+        assert!(!dispatch_input(true, false, 0x0100)); // WM_KEYDOWN
+        assert!(!dispatch_input(true, false, 0x0104)); // WM_SYSKEYDOWN
+        assert!(!dispatch_input(true, false, 0x0312)); // WM_HOTKEY
+        assert!(!dispatch_input(true, false, 0x0319)); // WM_APPCOMMAND
+        assert!(dispatch_input(true, true, 0x0100)); // the swap dialog still sees Enter and Esc
+        assert!(dispatch_input(false, false, 0x0100));
+        assert_eq!(input_msg(0x0100), InputMsg::Key);
+        assert_eq!(input_msg(0x0312), InputMsg::Hotkey);
+        assert_eq!(input_msg(0x0319), InputMsg::AppCommand);
+
+        let row = index("tab.new").unwrap();
+        begin(row);
+        assert!(capturing());
+        let live = gate(capturing());
+        assert!(live.block_app && live.block_pane && live.block_f5 && live.block_hotkey);
+        assert!(matches!(offer(0x11, true, false, false, false), Offer::Ignore));
+        assert!(capturing());
+        match offer(b'N' as u16, true, true, false, false) {
+            Offer::Bind { row: got, chord, other } => {
+                assert_eq!(got, row);
+                assert_eq!(format_chord(&chord), "Ctrl+Shift+N");
+                assert_eq!(other, index("file.dir"));
+            }
+            _ => panic!("Ctrl+Shift+N should be recorded"),
+        }
+        // The row is cleared, so a second key is not recorded, and actions may run again.
+        assert!(!capturing());
+        assert!(!gate(capturing()).block_app);
+        // The swap dialog holds the block until it returns.
+        hold_block(true);
+        assert!(capturing());
+        assert!(gate(capturing()).block_hotkey);
+        assert!(matches!(offer(b'N' as u16, true, true, false, false), Offer::Ignore));
+        hold_block(false);
+        assert!(!capturing());
+
+        begin(index("app.help").unwrap());
+        match offer(0x74, false, false, false, false) {
+            Offer::Bind { chord, other, .. } => {
+                assert_eq!(format_chord(&chord), "F5");
+                assert_eq!(other, None);
+            }
+            _ => panic!("F5 should be recorded"),
+        }
+        assert!(!gate(capturing()).block_f5);
+
+        begin(row);
+        assert!(matches!(offer(0x1B, false, false, false, false), Offer::Cancel));
+        assert!(!capturing());
+        assert!(!gate(capturing()).block_pane);
+
+        begin(row);
+        cancel();
+        assert!(!capturing());
+        assert!(register_hotkey_now(capturing(), true));
+
+        // The completing key is swallowed so it is not also dispatched as the new command.
+        swallow(b'N' as u16);
+        assert!(swallows(b'N' as u16));
+        assert!(command_swallowed(b'N' as u16, b'N' as u16));
+        assert!(!command_swallowed(b'N' as u16, b'T' as u16));
+        assert!(!command_swallowed(0, b'N' as u16));
+        clear_swallow(b'N' as u16);
+        assert!(!swallows(b'N' as u16));
+        fresh();
     }
 }

@@ -501,6 +501,81 @@ pub(crate) fn header_char_budget(width_px: i32, fh: i32) -> usize {
     (width_px.max(0) / cw).max(8) as usize
 }
 
+/// Folder facts under the name, after same-fact duplicates are removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FolderFacts {
+    pub lines: Vec<String>,
+    /// Index of the async total in `lines`, when that total is shown.
+    pub total_at: Option<usize>,
+}
+
+fn norm_fact(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Attribute fields, the listing summary (`head`), and the async total, in that order.
+/// The name is already the block title, so a fact that only repeats it is dropped.
+/// Two facts are the same when their text matches aside from surrounding space.
+/// The listing summary and the walked total both stay when they only share a byte
+/// count: one is the immediate folder and file counts, the other is the walk.
+pub(crate) fn folder_fact_lines(name: &str, fields: &[String], head: &str, total: &str) -> FolderFacts {
+    let mut lines = Vec::new();
+    let mut keys = Vec::new();
+    let name_key = norm_fact(name);
+    let mut push = |s: &str| -> Option<usize> {
+        let key = norm_fact(s);
+        if key.is_empty() || (!name_key.is_empty() && key == name_key) {
+            return None;
+        }
+        if let Some(i) = keys.iter().position(|k| k == &key) {
+            return Some(i);
+        }
+        keys.push(key);
+        lines.push(s.trim().to_string());
+        Some(lines.len() - 1)
+    };
+    for field in fields {
+        let _ = push(field);
+    }
+    let _ = push(head);
+    let total_at = if norm_fact(total).is_empty() { None } else { push(total) };
+    FolderFacts { lines, total_at }
+}
+
+/// Size of the single folder block. `fact_count` is the number of lines under the name.
+/// The block is padding plus the icon or the text rows, whichever is taller.
+/// A pane that can spare `reserve` pixels keeps that strip for the file list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FolderChrome {
+    pub height: i32,
+    pub line: i32,
+    pub pad: i32,
+    pub icon: i32,
+}
+
+pub(crate) fn folder_chrome(fact_count: usize, pane_h: i32, dpi: i32, fh: i32) -> FolderChrome {
+    let dpi = dpi.max(1);
+    let s = |v: i32| v.saturating_mul(dpi) / 96;
+    let pad = s(8).max(4);
+    let icon = s(48).max(32);
+    let line = fh.max(0).saturating_add(s(2)).max(s(16)).max(1);
+    let rows = 1i32.saturating_add(fact_count.min(64) as i32);
+    let want = pad.saturating_add(line.saturating_mul(rows).max(icon)).saturating_add(pad);
+    let pane_h = pane_h.max(0);
+    let reserve = s(28);
+    let height = if pane_h == 0 {
+        0
+    } else {
+        let capped = if pane_h > reserve {
+            want.min((pane_h - reserve).max(line.saturating_add(pad)))
+        } else {
+            want
+        };
+        capped.min(pane_h).max(0)
+    };
+    FolderChrome { height, line, pad, icon }
+}
+
 pub(crate) fn exif_line(pairs: &[(String, String)]) -> String {
     pairs.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(" · ")
 }
@@ -1157,5 +1232,79 @@ mod tests {
         assert!(lines[0].ends_with('…'));
         assert!(lines.len() > 2);
         assert_eq!(header_char_budget(160, 16), (160 / 9).max(8) as usize);
+    }
+
+    #[test]
+    fn folder_facts_keep_each_meaning_once_and_keep_the_walked_total() {
+        let fields = vec![
+            "File folder".into(),
+            "2 folders, 10 files, 1.2 MB".into(),
+            "Modified 2026-11-01".into(),
+            "Created 2026-01-01".into(),
+        ];
+        let got = folder_fact_lines("Photos", &fields, "2 folders, 10 files, 1.2 MB", "Total 45 MB");
+        assert_eq!(
+            got.lines,
+            vec![
+                "File folder".to_string(),
+                "2 folders, 10 files, 1.2 MB".to_string(),
+                "Modified 2026-11-01".to_string(),
+                "Created 2026-01-01".to_string(),
+                "Total 45 MB".to_string(),
+            ]
+        );
+        assert_eq!(got.total_at, Some(4));
+        assert!(!got.lines.iter().any(|l| l == "Photos"));
+
+        // The summary's size and the async total are different facts, even when the number matches.
+        let both = folder_fact_lines("Docs", &["0 folders, 3 files, 1.2 MB".into()], "0 folders, 3 files, 1.2 MB", "Total 1.2 MB");
+        assert_eq!(both.lines, vec!["0 folders, 3 files, 1.2 MB".to_string(), "Total 1.2 MB".to_string()]);
+        assert_eq!(both.total_at, Some(1));
+
+        let spaced = folder_fact_lines("Box", &["File folder".into(), "  ".into(), "Box".into()], "  File   folder ", "");
+        assert_eq!(spaced.lines, vec!["File folder".to_string()]);
+        assert_eq!(spaced.total_at, None);
+
+        let named = folder_fact_lines("Photos", &["Photos".into(), "File folder".into()], "Photos", "Total 1 KB");
+        assert_eq!(named.lines, vec!["File folder".to_string(), "Total 1 KB".to_string()]);
+        assert_eq!(named.total_at, Some(1));
+
+        let same = folder_fact_lines("Box", &["Total 4 MB".into()], "", "Total 4 MB");
+        assert_eq!(same.lines, vec!["Total 4 MB".to_string()]);
+        assert_eq!(same.total_at, Some(0));
+
+        let only_total = folder_fact_lines("", &["".into(), "   ".into()], "  ", "Total …");
+        assert_eq!(only_total.lines, vec!["Total …".to_string()]);
+        assert_eq!(only_total.total_at, Some(0));
+
+        let empty = folder_fact_lines("", &[], "  ", "");
+        assert!(empty.lines.is_empty());
+        assert_eq!(empty.total_at, None);
+
+        let added = folder_fact_lines("Box", &["File folder".into()], "2 folders, 1 file, 3 KB", "Total 9 KB");
+        assert_eq!(added.lines, vec!["File folder".to_string(), "2 folders, 1 file, 3 KB".to_string(), "Total 9 KB".to_string()]);
+        assert_eq!(added.total_at, Some(2));
+    }
+
+    #[test]
+    fn folder_block_grows_with_facts_and_leaves_the_list_a_strip() {
+        let tall = folder_chrome(5, 640, 96, 16);
+        assert_eq!((tall.pad, tall.icon, tall.line), (8, 48, 18));
+        // name + 5 facts = 6 rows, taller than the 48px icon: 8 + 18*6 + 8.
+        assert_eq!(tall.height, 124);
+
+        // 124 already leaves more than the 28px strip, so a 200px pane does not shrink the block.
+        assert_eq!(folder_chrome(5, 200, 96, 16).height, 124);
+        let short = folder_chrome(5, 100, 96, 16);
+        assert_eq!(short.height, 72);
+        assert_eq!(100 - short.height, 28);
+
+        let tight = folder_chrome(5, 30, 96, 16);
+        assert_eq!(tight.height, 26);
+        assert_eq!(folder_chrome(5, 20, 96, 16).height, 20);
+        assert_eq!(folder_chrome(5, 0, 96, 16).height, 0);
+
+        let hi = folder_chrome(0, 800, 192, 32);
+        assert_eq!((hi.pad, hi.icon, hi.line, hi.height), (16, 96, 36, 128));
     }
 }

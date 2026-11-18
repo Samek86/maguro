@@ -2142,6 +2142,12 @@ fn key_click(g: &Geo, x: i32, y: i32) -> Option<(usize, u8)> {
     None
 }
 
+/// Start waiting for a chord and drop global hotkeys so the keys reach this window.
+unsafe fn arm_capture(i: usize) {
+    crate::keys::begin(i);
+    crate::suspend_global_hotkeys();
+}
+
 pub(crate) unsafe fn confirm_swap(chord: &str, other: &str) -> bool {
     let q = tf(crate::Key::ShortcutSwap, &[("other", other), ("chord", chord)]);
     confirm_box(hwnd(), &q)
@@ -2158,7 +2164,7 @@ unsafe fn on_click(h: HWND, x: i32, y: i32) {
     let g = geo(rc, &sn);
     if let Some((i, kind)) = key_click(&g, x, y) {
         if kind == 1 {
-            crate::keys::begin(i);
+            arm_capture(i);
             let _ = InvalidateRect(Some(h), None, false);
             return;
         }
@@ -2417,7 +2423,7 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let _ = GetClientRect(h, &mut rc);
                 let g = geo(rc, &sn);
                 if let Some((i, 0)) = key_click(&g, x, y) {
-                    crate::keys::begin(i);
+                    arm_capture(i);
                     let _ = InvalidateRect(Some(h), None, false);
                 }
             }
@@ -2606,6 +2612,8 @@ fn settings_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 crate::drop_side(h);
                 crate::everything::bind_settings(0);
                 crate::keys::cancel();
+                // Capture may have dropped Win+Shift+E. Put it back when the window goes away.
+                crate::resume_global_hotkeys();
                 // Shared faces belong to the app. Dropping the struct only releases the family list.
                 ST.with(|s| *s.borrow_mut() = St::default());
             }
@@ -2746,12 +2754,29 @@ fn about_version_label() -> String {
 }
 
 fn live_about() -> AboutCopy {
-    about_copy(
+    with_icon_credit(about_copy(
         &about_version_label(),
         tx(crate::Key::FastMultiPaneFileManagerForWindows),
         tx(crate::Key::MitLicense2026Efww),
         tx(crate::Key::MaguroIsForkOfEfwwGridsBy2),
-    )
+    ))
+}
+
+/// Appends the IconMCP credit under the product licence. The window measures this text, so the row grows.
+/// Reading the catalog here keeps the enumerable icon list in the shipping binary.
+pub(crate) fn with_icon_credit(mut copy: AboutCopy) -> AboutCopy {
+    let catalog = crate::ui::icon_catalog::icons();
+    let gear = crate::ui::icon_catalog::icon_by_key("gear");
+    if catalog.len() < 99 || gear.is_none_or(|e| e.name_ko.is_empty() || e.kind != crate::LineIcon::Gear) {
+        return copy;
+    }
+    if !copy.license.contains(crate::ICON_CREDIT) {
+        if !copy.license.is_empty() {
+            copy.license.push('\n');
+        }
+        copy.license.push_str(crate::ICON_CREDIT);
+    }
+    copy
 }
 
 unsafe fn about_line_h(text: &str, width: i32, font: HFONT, dpi: i32) -> i32 {
@@ -3050,6 +3075,9 @@ pub(crate) unsafe fn show_about(owner: HWND) {
                 let _ = SendMessageW(h, WM_COMMAND, Some(WPARAM(ABOUT_OK as usize)), Some(LPARAM(0)));
                 continue;
             }
+        }
+        if crate::eat_for_capture(&msg, mine) {
+            continue;
         }
         let _ = TranslateMessage(&msg);
         DispatchMessageW(&msg);
@@ -3411,6 +3439,9 @@ unsafe fn ask_with(owner: HWND, title: &str, initial: &str) -> Option<String> {
                 continue;
             }
         }
+        if crate::eat_for_capture(&msg, mine) {
+            continue;
+        }
         // Owner-draw buttons have no hot state. Track the pointer the way the session list does.
         if msg.message == WM_MOUSEMOVE || msg.message == WM_MOUSELEAVE {
             let on = msg.message == WM_MOUSEMOVE
@@ -3469,6 +3500,24 @@ mod tests {
         assert_eq!(about_icon_group(true), crate::ICON_GROUP_DARK);
         assert_eq!(crate::window_icon_group(false), about_icon_group(false));
         assert_eq!(crate::window_icon_group(true), about_icon_group(true));
+    }
+
+    #[test]
+    fn about_license_names_the_icon_pack() {
+        let copy = with_icon_credit(about_copy(
+            "0.3.0",
+            "Fast multi-pane file manager for Windows",
+            "MIT License · © 2026 efww, Samek86",
+            "Fork of github.com/efww/grids",
+        ));
+        let body = about_body(&copy);
+        assert!(body.contains(crate::ICON_CREDIT));
+        assert!(body.contains("Copyright (c) 2026 UI8"));
+        assert!(copy.license.ends_with(crate::ICON_CREDIT));
+        assert!(!body.contains("http"));
+        assert!(!body.contains('?'));
+        let again = with_icon_credit(copy);
+        assert_eq!(again.license.matches(crate::ICON_CREDIT).count(), 1);
     }
 
     #[test]

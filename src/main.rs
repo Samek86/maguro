@@ -19,6 +19,7 @@ mod session;
 mod shell;
 mod settings;
 mod folderview;
+mod toolbar;
 mod marks;
 mod everything;
 mod rename;
@@ -44,6 +45,12 @@ fn main() -> Result<()> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if crash::helper(&raw) || apply_helper(&raw) {
         return Ok(());
+    }
+    // Gated grid of the icon catalog. Off unless this build has the feature and the env var is set.
+    // Returns before folder-app repair, COM, and the main window.
+    #[cfg(feature = "icon-catalog-preview")]
+    if std::env::var_os("MAGURO_ICON_CATALOG").is_some_and(|v| v == "1") {
+        return ui::icon_catalog_preview::run();
     }
     // Hooks and the fast-fail watcher go in before settings, COM, or a window, so a fault
     // while a folder opens still leaves a report. Helper processes above must not install them.
@@ -236,7 +243,10 @@ fn main() -> Result<()> {
             ..Default::default()
         });
         RegisterClassW(&WNDCLASSW {
-            style: CS_DBLCLKS, // header maximises; a double-click on a picture or PDF resets zoom
+            // Double-click maximises the header, or resets zoom on a picture or PDF.
+            // A width or height change redraws the whole client. Fit content is laid out
+            // from the new size in paint; without this the old pixels stay and the new strip is blank.
+            style: CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(peek_proc),
             hInstance: hinst,
             hCursor: arrow,

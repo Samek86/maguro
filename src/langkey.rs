@@ -269,7 +269,8 @@ pub(crate) enum Key {
     InvertN,
     InvertSelection,
     ItWillGoRecycleBin,
-    #[allow(dead_code)] // Retired settings card. The index stays so the string table does not shift.
+    #[allow(dead_code)]
+    // Retired settings card. The index stays so the string table does not shift.
     ItemCountAndFreeSpaceOnDrive,
     ItemsN,
     Json,
@@ -568,7 +569,8 @@ pub(crate) enum Key {
     ShowInFolder,
     ShowLeftPanel,
     ShowPreviewPane,
-    #[allow(dead_code)] // Retired settings card. The index stays so the string table does not shift.
+    #[allow(dead_code)]
+    // Retired settings card. The index stays so the string table does not shift.
     ShowStatusBar,
     ShowToolbar,
     SingleInstance,
@@ -942,11 +944,35 @@ pub(crate) enum Key {
     CtxPreview,
     CtxConnect,
     OpenInMaguro,
+    CommandToolbar,
+    ToolbarView,
+    ToolbarOverflow,
+    ToolbarChange,
+    ToolbarEdit,
+    ToolbarEditHint,
+    ToolbarRestore,
+    ToolbarRestoreAsk,
+    ToolbarDone,
+    ToolbarSeparator,
+    ToolbarZoom,
+    ToolbarSplitRight,
+    ToolbarSplitBelow,
+    ToolbarOpen,
+    ToolbarPaneColor,
+    ToolbarTerminal,
+    ToolbarIconDefault,
+    ToolbarIconSet,
+    ToolbarCopyPath,
+    ToolbarTabColor,
+    ToolbarTerminalAdmin,
+    ToolbarOpenFolder,
+    ToolbarOpenFile,
+    ToolbarChangeTarget,
 }
 
-pub(crate) const KEY_COUNT: usize = 937;
+pub(crate) const KEY_COUNT: usize = 961;
 
-const _: () = assert!((Key::OpenInMaguro as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::ToolbarChangeTarget as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1886,6 +1912,30 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Preview",
     "Connect",
     "Open in Maguro",
+    "Command toolbar",
+    "View",
+    "More commands",
+    "Change",
+    "Customize Toolbar",
+    "Drag an icon onto the bar. Drag one off the bar to remove it.",
+    "Use Default Set",
+    "Restore the original commands?",
+    "Done",
+    "Separator",
+    "Zoom",
+    "Duplicate pane to the right",
+    "Duplicate pane below",
+    "Open",
+    "Pane colour",
+    "Open Terminal",
+    "Default",
+    "Choose",
+    "Copy path",
+    "Tab colour",
+    "Open Terminal (Administrator)",
+    "Open folder…",
+    "Open file…",
+    "Change target",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2719,7 +2769,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "fav_move_up",
     "fav_move_down",
     "recycle_bin_folder",
-
     "show_favourites_panel",
     "show_folder_tree_panel",
     "show_favourites_panel_desc",
@@ -2827,4 +2876,28 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "ctx_preview",
     "ctx_connect",
     "open_in_maguro",
+    "command_toolbar",
+    "toolbar_view",
+    "toolbar_overflow",
+    "toolbar_change",
+    "toolbar_edit",
+    "toolbar_edit_hint",
+    "toolbar_restore",
+    "toolbar_restore_ask",
+    "toolbar_done",
+    "toolbar_separator",
+    "toolbar_zoom",
+    "toolbar_split_right",
+    "toolbar_split_below",
+    "toolbar_open",
+    "toolbar_pane_color",
+    "toolbar_terminal",
+    "toolbar_icon_default",
+    "toolbar_icon_set",
+    "toolbar_copy_path",
+    "toolbar_tab_color",
+    "toolbar_terminal_admin",
+    "toolbar_open_folder",
+    "toolbar_open_file",
+    "toolbar_change_target",
 ];

@@ -176,7 +176,9 @@ pub(crate) fn drive_slots(show: bool, n: usize) -> usize {
 /// Glyph button on the main-window tool row, width in DIP.
 /// Save, load, the star, the gear, drive letters, and the tab list share it.
 /// The layout button is wider because it also shows the grid. Height is [`BTN_H_TOOL`].
-pub(crate) const TOOL_ICON_W: i32 = 32;
+pub(crate) const TOOL_ICON_W: i32 = 30;
+/// Space between neighbouring icon buttons on the tab row, in DIP.
+pub(crate) const TOOL_ICON_GAP: i32 = 2;
 
 pub(crate) fn tool_icon_px(dpi: i32) -> (i32, i32) {
     let s = |v: i32| v * dpi / 96;
@@ -220,7 +222,7 @@ fn icon_on(bar: bool) -> [bool; ICON_N] {
 /// Drive letters are not part of this: they hide before the group does.
 pub(crate) fn icon_group_min(dpi: i32, bar: bool) -> i32 {
     let s = |v: i32| v * dpi / 96;
-    let (pad, gap) = (s(8), s(4));
+    let (pad, gap) = (s(8), s(TOOL_ICON_GAP));
     let on = icon_on(bar);
     let n_on = on.iter().filter(|v| **v).count() as i32;
     let icons_w = icon_widths(dpi).iter().zip(&on).filter(|(_, v)| **v).map(|(w, _)| *w).sum::<i32>() + gap * (n_on - 1).max(0);
@@ -236,7 +238,7 @@ pub(crate) fn icon_group_min(dpi: i32, bar: bool) -> i32 {
 pub(crate) fn icon_slots(row_w: i32, top: i32, dpi: i32, drives: usize, bar: bool) -> IconLay {
     let s = |v: i32| v * dpi / 96;
     let (icon_w, bh) = tool_icon_px(dpi);
-    let (pad, gap) = (s(8), s(4));
+    let (pad, gap) = (s(8), s(TOOL_ICON_GAP));
     let specs = [ID_TB_LAYOUT, ID_TB_SAVE, ID_TB_LOAD, ID_TB_FAV, ID_TB_BASKET, ID_TB_WATCH, ID_TB_SET];
     let widths = icon_widths(dpi);
     // The gear is the mouse path to settings, so a hidden toolbar still reserves its slot.
@@ -563,17 +565,32 @@ pub(crate) fn title_clipped(text_px: i32, room: i32) -> bool {
     room < text_px
 }
 
-/// How one window tab is painted. Horizontal and vertical share the stripe rule:
-/// a colour stripe is drawn only while that coloured tab is selected.
+/// Which side marks a selected tab.
+/// A horizontal strip uses the top bar. A vertical strip uses the left bar.
+/// Colour and accent share that one edge. The other side stays plain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabEdge {
+    Top,
+    Left,
+}
+
+/// `vertical` is the window-tab strip. Pane tabs are a horizontal strip, so they pass `false`.
+pub(crate) fn selected_tab_edge(vertical: bool) -> TabEdge {
+    if vertical { TabEdge::Left } else { TabEdge::Top }
+}
+
+/// How one window tab is painted.
+/// A selected tab has one edge: the top bar when the strip is horizontal, the left bar when it is vertical.
+/// That edge is the tab colour, or the accent when the tab has none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TabFace {
     pub(crate) bg: u32,
-    /// Left colour bar. `None` draws no stripe.
-    pub(crate) stripe: Option<u32>,
+    /// Left bar of a selected vertical tab. The tab colour, or the accent when uncoloured.
+    /// `None` on a horizontal tab and on every unselected tab.
+    pub(crate) left_bar: Option<u32>,
     /// 2 DIP top edge of a selected horizontal tab. The tab colour, or the accent when uncoloured.
+    /// `None` on a vertical tab and on every unselected tab.
     pub(crate) top_bar: Option<u32>,
-    /// 3 DIP left accent of a selected vertical tab that has no colour.
-    pub(crate) accent_mark: bool,
     pub(crate) title: u32,
 }
 
@@ -588,29 +605,36 @@ pub(crate) fn tab_face(selected: bool, hover: bool, color: Option<u32>, vertical
         (_, _, Some(c)) => blend(ground.bg, c, 0.18),
         _ => ground.bg,
     };
-    let stripe = if selected { color } else { None };
-    let top_bar = if selected && !vertical { Some(color.unwrap_or(accent)) } else { None };
-    let accent_mark = selected && vertical && color.is_none();
+    let ink = color.unwrap_or(accent);
+    let (top_bar, left_bar) = if selected {
+        match selected_tab_edge(vertical) {
+            TabEdge::Top => (Some(ink), None),
+            TabEdge::Left => (None, Some(ink)),
+        }
+    } else {
+        (None, None)
+    };
     let title = if selected { ground.text } else { ground.sub };
-    TabFace { bg, stripe, top_bar, accent_mark, title }
+    TabFace { bg, left_bar, top_bar, title }
 }
 
-/// Left colour bar, 4 DIP, flush with the tab. Only a selected coloured tab fills it.
+/// Left bar, 4 DIP, flush with the tab. A selected vertical tab fills it, in the tab colour or the accent.
 pub(crate) fn tab_color_stripe_rect(body: RECT, dpi: i32) -> RECT {
     let w = 4 * dpi.max(1) / 96;
     RECT { left: body.left, top: body.top, right: body.left + w, bottom: body.bottom }
 }
 
-/// Extra left inset for a coloured tab's title, in pixels.
-/// Kept whether or not the stripe is drawn, so the title does not jump on selection.
-pub(crate) fn tab_color_label_nudge(colored: bool, dpi: i32) -> i32 {
-    if colored { 5 * dpi.max(1) / 96 } else { 0 }
+/// Extra left inset for a coloured vertical tab's title, in pixels.
+/// Horizontal tabs have no left bar, so their titles stay put.
+/// An unselected vertical tab keeps the inset too, so the title does not jump when it is selected.
+pub(crate) fn tab_color_label_nudge(colored: bool, vertical: bool, dpi: i32) -> i32 {
+    if colored && vertical { 5 * dpi.max(1) / 96 } else { 0 }
 }
 
 /// Width of the title inside one tab. The insets match the rectangle [`paint_tabs`] draws into.
-pub(crate) fn tab_label_room(body: RECT, close: Option<RECT>, dpi: i32, colored: bool) -> i32 {
+pub(crate) fn tab_label_room(body: RECT, close: Option<RECT>, dpi: i32, colored: bool, vertical: bool) -> i32 {
     let s = |v: i32| v * dpi.max(1) / 96;
-    let left = body.left + s(8) + tab_color_label_nudge(colored, dpi);
+    let left = body.left + s(8) + tab_color_label_nudge(colored, vertical, dpi);
     let right = close.map(|c| c.left).unwrap_or(body.right - s(8));
     (right - left).max(0)
 }
@@ -1572,9 +1596,8 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
             let on = i == active;
             let over = hot == Some(i);
             let col = colors.get(i).copied().flatten();
-            // Horizontal and vertical share this face. The colour stripe is only on a
-            // selected coloured tab. A selected horizontal tab also draws `top_bar`.
-            // A selected vertical tab with no colour draws the accent mark instead.
+            // One selected edge. Horizontal: the top bar. Vertical: the left bar.
+            // The edge is the tab colour, or the accent when the tab has none.
             let face = tab_face(on, over, col, vertical, pal(), accent);
             fill(dc, *r, face.bg);
             if !on {
@@ -1583,14 +1606,12 @@ pub(crate) unsafe fn paint_tabs(h: HWND) {
             if let Some(c) = face.top_bar {
                 fill(dc, RECT { bottom: r.top + s(2), ..*r }, c);
                 fill(dc, RECT { top: r.bottom - 1, bottom: r.bottom, ..*r }, pal().card);
-            } else if face.accent_mark {
-                fill(dc, RECT { right: r.left + s(3), ..*r }, accent);
             }
-            if let Some(c) = face.stripe {
+            if let Some(c) = face.left_bar {
                 fill(dc, tab_color_stripe_rect(*r, dpi), c);
             }
             let lock = lay.lock.get(i).copied().unwrap_or(false);
-            let nudge = tab_color_label_nudge(col.is_some(), dpi);
+            let nudge = tab_color_label_nudge(col.is_some(), vertical, dpi);
             let mut label = *r;
             label.left += s(8) + nudge;
             if let Some(c) = lay.close[i] {
@@ -1631,6 +1652,7 @@ pub(crate) unsafe fn refresh_tab_list_tip() {
     if main.0.is_null() {
         return;
     }
+    crate::toolbar::refresh_tips();
     let Ok(b) = GetDlgItem(Some(main), ID_TB_LIST) else { return };
     _ = SetWindowTextW(b, &HSTRING::from(tr(crate::Key::TabList)));
     tip_text(b, &tab_list_tip(), TTM_UPDATETIPTEXTW);
@@ -1680,10 +1702,10 @@ fn tab_tip_side() -> TipSide {
 
 /// The drawn title does not show every character. Measure uses the same font as the strip.
 unsafe fn tab_name_clipped(i: usize) -> bool {
-    let (name, font, dpi, colored, tabs) = app(|a| {
+    let (name, font, dpi, colored, vertical, tabs) = app(|a| {
         let name = tab_text(a, i).0;
         let colored = a.s.tabs.get(i).and_then(|t| t.color).is_some();
-        (name, a.font, a.dpi, colored, a.tabs_hwnd)
+        (name, a.font, a.dpi, colored, a.s.vertical_tabs, a.tabs_hwnd)
     });
     if name.is_empty() || tabs.0.is_null() {
         return false;
@@ -1693,7 +1715,7 @@ unsafe fn tab_name_clipped(i: usize) -> bool {
         return false;
     };
     let close = lay.close.get(i).copied().flatten();
-    let room = tab_label_room(body, close, dpi, colored);
+    let room = tab_label_room(body, close, dpi, colored, vertical);
     let dc = GetDC(Some(tabs));
     if dc.is_invalid() {
         return title_clipped(1, room);
@@ -1761,10 +1783,10 @@ unsafe fn path_tooltip(tab: Option<usize>) {
 
 /// Inline tab rename, centred in the same rectangle the title is drawn in. No-op while hidden.
 pub(crate) unsafe fn place_tab_edit() {
-    let (edit, which, dpi, color) = app(|a| {
+    let (edit, which, dpi, color, vertical) = app(|a| {
         let which = a.tab_renaming;
         let color = which.and_then(|i| a.s.tabs.get(i).and_then(|t| t.color));
-        (a.tab_edit, which, a.dpi, color)
+        (a.tab_edit, which, a.dpi, color, a.s.vertical_tabs)
     });
     let Some(i) = which else { return };
     if edit.0.is_null() || !IsWindowVisible(edit).as_bool() {
@@ -1773,7 +1795,7 @@ pub(crate) unsafe fn place_tab_edit() {
     let lay = current_tab_lay();
     let Some(r) = lay.body.get(i).copied().filter(|r| r.right > r.left) else { return };
     let s = |v: i32| v * dpi / 96;
-    let nudge = tab_color_label_nudge(color.is_some(), dpi);
+    let nudge = tab_color_label_nudge(color.is_some(), vertical, dpi);
     let left = r.left + s(8) + nudge;
     let right = lay.close.get(i).and_then(|c| *c).map(|c| c.left).unwrap_or(r.right - s(8)).max(left + 1);
     place_edit(edit, RECT { left, top: r.top, right, bottom: r.bottom }, true);
@@ -2093,26 +2115,26 @@ mod tests {
     fn icon_slots_stay_right_aligned_without_drives() {
         let lay = icon_slots(1000, 6, 96, 0, true);
         assert_eq!(lay.drive_n, 0);
-        assert_eq!(lay.tab_w, 666);
-        assert_eq!(lay.list, RECT { left: 670, top: 6, right: 702, bottom: 30 });
-        assert_eq!(lay.list.right + 4, lay.icons[0].1.left);
+        assert_eq!(lay.tab_w, 696);
+        assert_eq!(lay.list, RECT { left: 698, top: 6, right: 728, bottom: 30 });
+        assert_eq!(lay.list.right + 2, lay.icons[0].1.left);
         assert_eq!(lay.icons.map(|s| s.0), [ID_TB_LAYOUT, ID_TB_SAVE, ID_TB_LOAD, ID_TB_FAV, ID_TB_BASKET, ID_TB_WATCH, ID_TB_SET]);
-        assert_eq!(lay.icons[0].1, RECT { left: 706, top: 6, right: 776, bottom: 30 });
-        assert_eq!(lay.icons[1].1.left, 780);
+        assert_eq!(lay.icons[0].1, RECT { left: 730, top: 6, right: 800, bottom: 30 });
+        assert_eq!(lay.icons[1].1.left, 802);
         assert_eq!(lay.icons[GEAR].1.right, 992);
-        // Star, basket, watch, gear: 32px buttons, 4px gaps, one line.
+        // Star, basket, watch, gear: 30px buttons, 2px gaps, one line.
         assert_eq!(lay.icons[3].0, ID_TB_FAV);
         assert_eq!(lay.icons[4].0, ID_TB_BASKET);
         assert_eq!(lay.icons[5].0, ID_TB_WATCH);
-        assert_eq!(lay.icons[5].1.right + 4, lay.icons[GEAR].1.left);
+        assert_eq!(lay.icons[5].1.right + 2, lay.icons[GEAR].1.left);
         for i in 3..ICON_N {
-            assert_eq!(lay.icons[i].1.right - lay.icons[i].1.left, 32);
+            assert_eq!(lay.icons[i].1.right - lay.icons[i].1.left, 30);
             assert_eq!((lay.icons[i].1.top, lay.icons[i].1.bottom), (lay.icons[GEAR].1.top, lay.icons[GEAR].1.bottom));
         }
-        assert!(lay.icons.windows(2).all(|w| w[0].1.right + 4 == w[1].1.left));
+        assert!(lay.icons.windows(2).all(|w| w[0].1.right + 2 == w[1].1.left));
         assert_eq!(tab_area_width(1000, 96, true, 0), lay.tab_w);
-        // Hidden toolbar keeps the gear (right 992, 32px) and the gap in front of it.
-        assert_eq!(tab_area_width(1000, 96, false, 8), 920);
+        // Hidden toolbar keeps the gear (right 992, 30px) and the gap in front of it.
+        assert_eq!(tab_area_width(1000, 96, false, 8), 928);
     }
 
     #[test]
@@ -2135,14 +2157,14 @@ mod tests {
         let lay = icon_slots(1000, 4, 96, n, true);
         assert_eq!(lay.drive_n, n);
         assert_eq!(lay.icons, bare.icons);
-        assert_eq!(lay.drives[n - 1].right + 4, lay.icons[0].1.left);
-        assert_eq!(lay.list.right + 4, lay.drives[0].left);
-        assert_eq!(lay.tab_w, lay.list.left - 4);
+        assert_eq!(lay.drives[n - 1].right + 2, lay.icons[0].1.left);
+        assert_eq!(lay.list.right + 2, lay.drives[0].left);
+        assert_eq!(lay.tab_w, lay.list.left - 2);
         for i in 0..n {
-            assert_eq!(lay.drives[i].right - lay.drives[i].left, 32);
+            assert_eq!(lay.drives[i].right - lay.drives[i].left, 30);
             assert_eq!((lay.drives[i].top, lay.drives[i].bottom), (4, 28));
             if i > 0 {
-                assert_eq!(lay.drives[i - 1].right + 4, lay.drives[i].left);
+                assert_eq!(lay.drives[i - 1].right + 2, lay.drives[i].left);
             }
         }
         // One minimum tab, +, and ▾ (116px) stay clear of the buttons. Tabs paint only in tab_w.
@@ -2169,10 +2191,10 @@ mod tests {
         let hi = icon_slots(2000, 8, 192, n, true);
         assert_eq!(hi.drive_n, n);
         assert_eq!(hi.tab_w, lay.tab_w * 2);
-        assert_eq!(hi.drives[0].right - hi.drives[0].left, 64);
-        assert_eq!(hi.drives[n - 1].right + 8, hi.icons[0].1.left);
+        assert_eq!(hi.drives[0].right - hi.drives[0].left, 60);
+        assert_eq!(hi.drives[n - 1].right + 4, hi.icons[0].1.left);
         assert_eq!(tab_area_width(2000, 192, true, n), hi.tab_w);
-        assert_eq!(tab_area_width(2000, 192, false, n), 1840);
+        assert_eq!(tab_area_width(2000, 192, false, n), 1856);
     }
 
     #[test]
@@ -2206,8 +2228,8 @@ mod tests {
             assert_eq!(off.icons[i].1.left, off.icons[GEAR].1.left);
             assert_eq!(off.icons[i].1.right, off.icons[i].1.left);
         }
-        assert_eq!(off.list.right + 4, off.icons[GEAR].1.left);
-        assert_eq!(off.tab_w, off.list.left - 4);
+        assert_eq!(off.list.right + 2, off.icons[GEAR].1.left);
+        assert_eq!(off.tab_w, off.list.left - 2);
         assert!(off.tab_w > on.tab_w);
         assert_eq!(tab_area_width(1000, 96, false, 5), off.tab_w);
         assert_eq!(tab_area_width(1000, 96, true, 5), on.tab_w);
@@ -2215,8 +2237,8 @@ mod tests {
         let hi_on = icon_slots(2000, 8, 192, 5, true);
         let hi_off = icon_slots(2000, 8, 192, 5, false);
         assert_eq!(hi_off.icons[GEAR].1, hi_on.icons[GEAR].1);
-        assert_eq!(hi_off.list.right + 8, hi_off.icons[GEAR].1.left);
-        assert_eq!(hi_off.tab_w, hi_off.list.left - 8);
+        assert_eq!(hi_off.list.right + 4, hi_off.icons[GEAR].1.left);
+        assert_eq!(hi_off.tab_w, hi_off.list.left - 4);
         assert_eq!(tab_area_width(2000, 192, false, 5), hi_off.tab_w);
     }
 
@@ -2373,9 +2395,10 @@ mod tests {
         assert!(title_clipped(1, 0));
         let body = RECT { left: 6, top: 6, right: 174, bottom: 32 };
         let close = RECT { left: 154, top: 11, right: 170, bottom: 27 };
-        assert_eq!(tab_label_room(body, Some(close), 96, false), 140);
-        assert_eq!(tab_label_room(body, Some(close), 96, true), 135);
-        assert_eq!(tab_label_room(body, None, 96, false), 152);
+        assert_eq!(tab_label_room(body, Some(close), 96, false, false), 140);
+        assert_eq!(tab_label_room(body, Some(close), 96, true, false), 140);
+        assert_eq!(tab_label_room(body, Some(close), 96, true, true), 135);
+        assert_eq!(tab_label_room(body, None, 96, false, false), 152);
         assert_eq!(tab_hover_text("Photos", "C:\\Photos", false), "C:\\Photos");
         assert_eq!(tab_hover_text("Photos 2026 archive", "C:\\Photos", true), "Photos 2026 archive\nC:\\Photos");
         assert_eq!(tab_hover_text("Photos 2026 archive", "", true), "Photos 2026 archive");
@@ -2534,43 +2557,50 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
+    fn assert_one_edge(face: &TabFace, vertical: bool, ink: u32) {
+        match selected_tab_edge(vertical) {
+            TabEdge::Top => {
+                assert_eq!(face.top_bar, Some(ink));
+                assert_eq!(face.left_bar, None);
+            }
+            TabEdge::Left => {
+                assert_eq!(face.left_bar, Some(ink));
+                assert_eq!(face.top_bar, None);
+            }
+        }
+    }
+
     #[test]
-    fn selected_colored_tab_keeps_a_light_tint_and_the_color_stripe() {
+    fn selected_colored_tab_keeps_a_light_tint_and_one_edge() {
         let red = TAB_COLORS[0].0;
         let accent = 0x0A9BD6;
         for (name, pal) in [("light", &LIGHT), ("dark", &DARK)] {
             for vertical in [false, true] {
                 let face = tab_face(true, false, Some(red), vertical, pal, accent);
                 let plain = tab_face(true, false, None, vertical, pal, accent);
-                assert_eq!(face.stripe, Some(red), "{name} vertical={vertical}");
+                assert_one_edge(&face, vertical, red);
+                assert_one_edge(&plain, vertical, accent);
                 assert_ne!(face.bg, red, "{name} vertical={vertical}");
                 assert_ne!(face.bg, plain.bg, "{name} vertical={vertical}");
                 assert_eq!(face.bg, blend(pal.card, red, 0.18), "{name} vertical={vertical}");
                 assert_eq!(face.title, pal.text);
-                assert!(!face.accent_mark, "the colour stripe is the vertical selected mark");
-                if vertical {
-                    assert_eq!(face.top_bar, None);
-                } else {
-                    assert_eq!(face.top_bar, Some(red));
-                }
-                // Hover on the selected tab does not drop the stripe or change the wash.
+                // Hover on the selected tab does not drop the edge or change the wash.
                 let hot = tab_face(true, true, Some(red), vertical, pal, accent);
-                assert_eq!((hot.stripe, hot.bg, hot.top_bar, hot.accent_mark), (face.stripe, face.bg, face.top_bar, face.accent_mark));
+                assert_eq!((hot.left_bar, hot.bg, hot.top_bar), (face.left_bar, face.bg, face.top_bar));
             }
         }
     }
 
     #[test]
-    fn unselected_colored_tab_is_a_tint_without_a_stripe() {
+    fn unselected_colored_tab_is_a_tint_without_an_edge() {
         let red = TAB_COLORS[0].0;
         let accent = 0x0A9BD6;
         for (name, pal) in [("light", &LIGHT), ("dark", &DARK)] {
             for vertical in [false, true] {
                 let face = tab_face(false, false, Some(red), vertical, pal, accent);
                 let plain = tab_face(false, false, None, vertical, pal, accent);
-                assert_eq!(face.stripe, None, "{name} vertical={vertical}");
-                assert_eq!(face.top_bar, None);
-                assert!(!face.accent_mark);
+                assert_eq!((face.left_bar, face.top_bar), (None, None), "{name} vertical={vertical}");
+                assert_eq!((plain.left_bar, plain.top_bar), (None, None));
                 assert_ne!(face.bg, red);
                 assert_ne!(face.bg, plain.bg);
                 assert_eq!(face.bg, blend(pal.bg, red, 0.18));
@@ -2581,7 +2611,7 @@ mod tests {
     }
 
     #[test]
-    fn hovered_colored_tab_is_a_different_tint_without_a_stripe() {
+    fn hovered_colored_tab_is_a_different_tint_without_an_edge() {
         let red = TAB_COLORS[0].0;
         let accent = 0x0A9BD6;
         for (name, pal) in [("light", &LIGHT), ("dark", &DARK)] {
@@ -2590,9 +2620,8 @@ mod tests {
                 let idle = tab_face(false, false, Some(red), vertical, pal, accent);
                 let selected = tab_face(true, false, Some(red), vertical, pal, accent);
                 let plain = tab_face(false, true, None, vertical, pal, accent);
-                assert_eq!(hover.stripe, None, "{name} vertical={vertical}");
-                assert_eq!(hover.top_bar, None);
-                assert!(!hover.accent_mark);
+                assert_eq!((hover.left_bar, hover.top_bar), (None, None), "{name} vertical={vertical}");
+                assert_one_edge(&selected, vertical, red);
                 assert_ne!(hover.bg, idle.bg);
                 assert_ne!(hover.bg, selected.bg);
                 assert_ne!(hover.bg, red);
@@ -2606,29 +2635,21 @@ mod tests {
     }
 
     #[test]
-    fn uncolored_tabs_keep_their_faces_and_have_no_color_stripe() {
+    fn uncolored_tabs_keep_their_faces_and_one_selected_edge() {
         let accent = 0x0A9BD6;
         for pal in [&LIGHT, &DARK] {
             let selected_h = tab_face(true, false, None, false, pal, accent);
             let selected_v = tab_face(true, false, None, true, pal, accent);
             let hover = tab_face(false, true, None, false, pal, accent);
             let idle = tab_face(false, false, None, true, pal, accent);
-            assert_eq!(selected_h.stripe, None);
-            assert_eq!(selected_v.stripe, None);
-            assert_eq!(hover.stripe, None);
-            assert_eq!(idle.stripe, None);
+            assert_one_edge(&selected_h, false, accent);
+            assert_one_edge(&selected_v, true, accent);
+            assert_eq!((hover.left_bar, hover.top_bar), (None, None));
+            assert_eq!((idle.left_bar, idle.top_bar), (None, None));
             assert_eq!(selected_h.bg, pal.card);
             assert_eq!(selected_v.bg, pal.card);
             assert_eq!(hover.bg, blend(pal.card, pal.bg, 0.45));
             assert_eq!(idle.bg, pal.bg);
-            assert_eq!(selected_h.top_bar, Some(accent));
-            assert!(!selected_h.accent_mark);
-            assert_eq!(selected_v.top_bar, None);
-            assert!(selected_v.accent_mark);
-            assert_eq!(hover.top_bar, None);
-            assert!(!hover.accent_mark);
-            assert_eq!(idle.top_bar, None);
-            assert!(!idle.accent_mark);
             assert_eq!(selected_h.title, pal.text);
             assert_eq!(hover.title, pal.sub);
             assert_eq!(idle.title, pal.sub);
@@ -2656,14 +2677,18 @@ mod tests {
         let body = RECT { left: 10, top: 4, right: 140, bottom: 30 };
         assert_eq!(tab_color_stripe_rect(body, 96), RECT { left: 10, top: 4, right: 14, bottom: 30 });
         assert_eq!(tab_color_stripe_rect(body, 192), RECT { left: 10, top: 4, right: 18, bottom: 30 });
-        // The title inset stays on every coloured tab, selected or not, so the label does not jump.
-        assert_eq!(tab_color_label_nudge(true, 96), 5);
-        assert_eq!(tab_color_label_nudge(false, 96), 0);
-        assert_eq!(tab_color_label_nudge(true, 192), 10);
+        // The title inset is only for a coloured vertical tab, selected or not, so the label does not jump.
+        // A horizontal coloured tab has no left bar, so it is not nudged.
+        assert_eq!(tab_color_label_nudge(true, true, 96), 5);
+        assert_eq!(tab_color_label_nudge(true, false, 96), 0);
+        assert_eq!(tab_color_label_nudge(false, true, 96), 0);
+        assert_eq!(tab_color_label_nudge(false, false, 192), 0);
+        assert_eq!(tab_color_label_nudge(true, true, 192), 10);
         let close = RECT { left: 154, top: 11, right: 170, bottom: 27 };
         let labeled = RECT { left: 6, top: 6, right: 174, bottom: 32 };
-        assert_eq!(tab_label_room(labeled, Some(close), 96, true), 135);
-        assert_eq!(tab_label_room(labeled, Some(close), 96, false), 140);
+        assert_eq!(tab_label_room(labeled, Some(close), 96, true, true), 135);
+        assert_eq!(tab_label_room(labeled, Some(close), 96, true, false), 140);
+        assert_eq!(tab_label_room(labeled, Some(close), 96, false, true), 140);
     }
 }
 
