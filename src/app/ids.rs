@@ -91,15 +91,13 @@ pub(crate) const TIMER_SETTLE: usize = 4; // one width pass after a folder chang
 pub(crate) const TIMER_SAVE: usize = 5; // debounced maguro.json write
 pub(crate) const SAVE_SOON_MS: u32 = 1500;
 pub(crate) const SAVE_LATEST_MS: u128 = 30_000;
-/// Hidden tabs that still hold Explorer windows. Moving among this many tabs
+/// Hidden tabs that still hold Explorer windows. Two, so moving among three tabs
 /// does not build the browser again. Older hidden tabs keep only their saved grid.
-/// Raise or lower this to keep more or fewer tabs warm.
-pub(crate) const PARK_CACHE: usize = 8;
-/// Parked Explorer windows across every hidden tab. One tab can hold [`MAXP`]
-/// panes, so [`PARK_CACHE`] alone is not a memory cap. Three full grids.
-pub(crate) const PARK_BROWSER_CAP: usize = MAXP * 3;
-/// How long after a switch before browsers over the caps are destroyed.
-/// Long enough that destruction is not inside the switch, short enough to free them.
+/// This is the steady-state cap: a switch may park one more tab until eviction runs.
+pub(crate) const PARK_CACHE: usize = 2;
+/// How long after a switch before browsers over [`PARK_CACHE`] are destroyed.
+/// Destruction stays off the switch itself. Once the timer fires, the live set
+/// is the same size it was in v0.3.0.
 pub(crate) const PARK_EVICT_MS: u32 = 100;
 pub(crate) const TIMER_NEWF: usize = 6; // on a pane: select and rename a folder just created
 pub(crate) const TIMER_NEWFILE: usize = 7; // on a pane: select and rename a file just created
