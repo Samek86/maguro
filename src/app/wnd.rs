@@ -266,6 +266,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_TIMER if wp.0 == TIMER_DLG_WATCH || wp.0 == TIMER_DLG_JUMP || wp.0 == TIMER_DLG_RETRY => crate::dialogjump::on_timer(wp.0),
             WM_TIMER if wp.0 == TIMER_LIST => crate::shell::listsync::on_timer(h),
             WM_TIMER if wp.0 == TIMER_PARK => on_park_timer(h),
+            WM_TIMER if wp.0 == TIMER_TAB_SWITCH => on_tab_switch_timer(h),
             WM_TIMER if crate::pane::marks_overlay::on_timer(h, wp.0) => {}
             crate::pane::marks_overlay::WM_STAR => crate::pane::marks_overlay::on_snapshot(h),
             WM_SETCURSOR if wp.0 == h.0 as usize && (lp.0 & 0xffff) as u32 == HTCLIENT => {
@@ -715,10 +716,13 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_HOTKEY if wp.0 == crate::dialogjump::DIALOG_HOTKEY_ID as usize => crate::dialogjump::on_hotkey(),
             WM_HOTKEY if wp.0 == crate::cliphot::CLIP_HOTKEY_ID as usize => crate::cliphot::on_hotkey(),
             WM_CLOSE => {
+                // The file records the tab the strip shows, not a switch that is still waiting.
+                flush_pending_tab();
                 _ = KillTimer(Some(h), TIMER_SAVE);
                 _ = KillTimer(Some(h), TIMER_FVIEWS);
                 _ = KillTimer(Some(h), TIMER_WINS);
                 _ = KillTimer(Some(h), TIMER_PARK);
+                _ = KillTimer(Some(h), TIMER_TAB_SWITCH);
                 crate::shell::warmup::disarm(h);
                 crate::shell::listsync::disarm(h);
                 flush_folder_views();
@@ -761,6 +765,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 _ = KillTimer(Some(h), TIMER_SAVE);
                 _ = KillTimer(Some(h), TIMER_WINS);
                 _ = KillTimer(Some(h), TIMER_PARK);
+                _ = KillTimer(Some(h), TIMER_TAB_SWITCH);
                 crate::shell::warmup::disarm(h);
                 // A window that was not the last one already left the desk list in WM_CLOSE.
                 if bind_hwnd(h) {

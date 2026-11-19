@@ -126,6 +126,10 @@ pub(crate) const TIMER_SPIN: usize = 27; // pane: next frame of the F5 refresh s
 pub(crate) const TIMER_LIST: usize = 28; // trailing compare after a burst, plus the stale-list grace and restore polls
 /// Park eviction. Fired after a tab switch so browsers are not destroyed mid-switch.
 pub(crate) const TIMER_PARK: usize = 29;
+/// Coalesce Ctrl+Tab / Ctrl+Shift+Tab. The strip moves at once; the panes wait this long,
+/// or until Ctrl is released. Restarted on each key repeat.
+pub(crate) const TIMER_TAB_SWITCH: usize = 30;
+pub(crate) const TAB_SWITCH_MS: u32 = 70;
 pub(crate) const WM_SHELL_CHANGE: u32 = WM_APP + 88; // SHChangeNotifyRegister delivery
 pub(crate) const WM_LIST_NOW: u32 = WM_APP + 89; // a file operation finished; compare its folders
 pub(crate) const WM_FAST_NOTE: u32 = WM_APP + 94; // fast copy/move finished; the note text is queued for the status line

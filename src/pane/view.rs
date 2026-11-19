@@ -666,16 +666,14 @@ pub(crate) struct RedrawHold {
 
 impl RedrawHold {
     pub(crate) unsafe fn new(hwnd: HWND) -> Self {
-        let depth = REDRAW_HOLDS.with(|c| {
-            let d = c.get();
-            c.set(d.saturating_add(1));
-            d
-        });
-        let outer = depth == 0;
-        if outer && !hwnd.0.is_null() {
+        let depth = REDRAW_HOLDS.with(|c| c.get());
+        // Build the guard before the count goes up, so a panic in WM_SETREDRAW still drops it.
+        let hold = Self { hwnd, outer: depth == 0 };
+        REDRAW_HOLDS.with(|c| c.set(depth.saturating_add(1)));
+        if hold.outer && !hwnd.0.is_null() {
             SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(0)), None);
         }
-        Self { hwnd, outer }
+        hold
     }
 }
 

@@ -659,6 +659,7 @@ pub(crate) unsafe fn open_stashed() {
 
 /// Pull tab `i` out of the current window. The last tab is replaced by an empty one so the window can close afterwards.
 pub(crate) unsafe fn take_tab(i: usize) -> Option<Tab> {
+    flush_pending_tab();
     end_rename(true);
     let n = app(|a| a.s.tabs.len());
     if i >= n {
@@ -753,6 +754,7 @@ unsafe fn insert_tab(at: usize, tab: Tab) {
 unsafe fn undo_take(source: HWND, only: bool, i: usize, tab: Tab) {
     bind_hwnd(source);
     if only {
+        cancel_deferred_tab();
         app(|a| {
             a.s.tabs = vec![tab];
             a.s.tab = 0;

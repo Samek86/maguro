@@ -1038,6 +1038,8 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     if j >= n {
         return;
     }
+    // A click, a menu, or a flush replaces a deferred Ctrl+Tab. Do not also run the pending one.
+    cancel_deferred_tab();
     // The hold paints once on drop, including the same-tab path and any early return.
     // Busy keeps a park-evict timer that fires from a nested message pump from destroying browsers mid-switch.
     let _busy = TabSwitchBusy::enter();
@@ -1085,12 +1087,153 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     schedule_park_evict();
 }
 
+/// Strip selection versus the tab whose panes are on screen.
+/// `pending` is the tab Ctrl+Tab has highlighted and not switched to yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TabCoalesce {
+    pub live: usize,
+    pub n: usize,
+    pub pending: Option<usize>,
+}
+
+/// What one coalesced Ctrl+Tab event should do. The strip update is immediate either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabCoalesceOp {
+    /// Restart the one-shot timer. The strip shows `shown`. Panes stay on `live`.
+    Defer { shown: usize },
+    /// Stop the timer. The strip shows `live`. Panes stay.
+    Idle,
+    /// Stop the timer and switch the panes to `to`.
+    Switch { to: usize },
+}
+
+impl TabCoalesce {
+    /// Tab the strip draws as selected.
+    pub(crate) fn shown(self) -> usize {
+        match self.pending {
+            Some(i) if self.n > 0 && i < self.n => i,
+            _ => {
+                if self.n == 0 {
+                    self.live
+                } else {
+                    self.live.min(self.n - 1)
+                }
+            }
+        }
+    }
+
+    /// `tab.next` / `tab.prev`. Repeats advance from the strip, not from the panes.
+    pub(crate) fn step(self, delta: i32) -> (Self, TabCoalesceOp) {
+        if self.n == 0 {
+            return (self, TabCoalesceOp::Idle);
+        }
+        let shown = (self.shown() as i32 + delta).rem_euclid(self.n as i32) as usize;
+        if shown == self.live {
+            (Self { pending: None, ..self }, TabCoalesceOp::Idle)
+        } else {
+            (Self { pending: Some(shown), ..self }, TabCoalesceOp::Defer { shown })
+        }
+    }
+
+    /// Timer, Ctrl key-up, or a command that reads the active tab.
+    pub(crate) fn commit(self) -> (Self, TabCoalesceOp) {
+        match self.pending {
+            Some(to) if to != self.live && to < self.n => (Self { live: to, pending: None, n: self.n }, TabCoalesceOp::Switch { to }),
+            _ => (Self { pending: None, ..self }, TabCoalesceOp::Idle),
+        }
+    }
+}
+
+/// Tab the strip draws as selected. `pending` wins while a Ctrl+Tab has not landed yet.
+pub(crate) fn shown_tab(live: usize, pending: Option<usize>, n: usize) -> usize {
+    TabCoalesce { live, n, pending }.shown()
+}
+
 pub(crate) unsafe fn switch_rel(d: i32) {
-    let (i, n) = app(|a| (a.s.tab as i32, a.s.tabs.len() as i32));
-    if n <= 0 {
+    let (live, n, pending) = app(|a| (a.s.tab, a.s.tabs.len(), a.tab_pending));
+    if n == 0 {
         return;
     }
-    switch_tab((i + d).rem_euclid(n) as usize);
+    let (next, op) = TabCoalesce { live, n, pending }.step(d);
+    apply_tab_coalesce(next, op);
+}
+
+unsafe fn apply_tab_coalesce(state: TabCoalesce, op: TabCoalesceOp) {
+    match op {
+        TabCoalesceOp::Defer { shown } => {
+            let main = app(|a| {
+                a.tab_pending = state.pending;
+                a.main
+            });
+            // Reset before painting. A timer message already queued would switch at the old index.
+            if !main.0.is_null() {
+                _ = KillTimer(Some(main), TIMER_TAB_SWITCH);
+            }
+            let armed = !main.0.is_null() && SetTimer(Some(main), TIMER_TAB_SWITCH, TAB_SWITCH_MS, None) != 0;
+            if !armed {
+                // No timer: the strip must not stay ahead of the panes.
+                app(|a| a.tab_pending = None);
+                switch_tab(shown);
+                return;
+            }
+            show_tab(shown);
+            tabs_invalidate();
+        }
+        TabCoalesceOp::Idle => {
+            let had = app(|a| a.tab_pending.take().is_some());
+            if had {
+                disarm_tab_switch_timer();
+                show_active_tab();
+                tabs_invalidate();
+            }
+        }
+        TabCoalesceOp::Switch { to } => {
+            // Clear before the switch so a paint inside it does not still show the old highlight.
+            app(|a| a.tab_pending = None);
+            disarm_tab_switch_timer();
+            switch_tab(to);
+        }
+    }
+}
+
+unsafe fn disarm_tab_switch_timer() {
+    let main = app(|a| a.main);
+    if !main.0.is_null() {
+        _ = KillTimer(Some(main), TIMER_TAB_SWITCH);
+    }
+}
+
+/// Drop a deferred Ctrl+Tab without switching. A direct `switch_tab` is the switch.
+pub(crate) unsafe fn cancel_deferred_tab() {
+    let had = app(|a| a.tab_pending.take().is_some());
+    if had {
+        disarm_tab_switch_timer();
+    }
+}
+
+/// Run a deferred Ctrl+Tab now. No-op when the strip already matches the panes.
+pub(crate) unsafe fn flush_pending_tab() {
+    let (live, n, pending) = app(|a| (a.s.tab, a.s.tabs.len(), a.tab_pending));
+    if pending.is_none() {
+        return;
+    }
+    let (_state, op) = TabCoalesce { live, n, pending }.commit();
+    apply_tab_coalesce(TabCoalesce { live, n, pending }, op);
+}
+
+pub(crate) unsafe fn on_tab_switch_timer(main: HWND) {
+    _ = KillTimer(Some(main), TIMER_TAB_SWITCH);
+    // A switch already on the stack can pump this timer. Run it after that switch returns.
+    if tab_switch_busy() {
+        if IsWindow(Some(main)).as_bool() {
+            SetTimer(Some(main), TIMER_TAB_SWITCH, TAB_SWITCH_MS, None);
+        }
+        return;
+    }
+    if app(|a| a.main) != main {
+        return;
+    }
+    flush_pending_tab();
 }
 
 pub(crate) unsafe fn new_tab() {
@@ -1099,6 +1242,7 @@ pub(crate) unsafe fn new_tab() {
 
 /// A new window tab. `path` is pane 0's folder. `None` leaves every path empty, as `new_tab` does.
 pub(crate) unsafe fn new_tab_at(path: Option<&str>) {
+    flush_pending_tab();
     let _busy = TabSwitchBusy::enter();
     end_rename(true);
     remember_tabs();
@@ -1142,6 +1286,7 @@ pub(crate) unsafe fn new_tab_at(path: Option<&str>) {
 }
 
 pub(crate) unsafe fn duplicate_tab(i: usize) {
+    flush_pending_tab();
     end_rename(true);
     remember_tabs();
     let j = app(|a| {
@@ -1173,6 +1318,7 @@ pub(crate) unsafe fn open_tabs_beside(tabs: Vec<Tab>) {
     if tabs.is_empty() {
         return;
     }
+    flush_pending_tab();
     end_rename(true);
     remember_tabs();
     let at = app(|a| {
@@ -1216,6 +1362,9 @@ pub(crate) unsafe fn close_tab(i: usize) {
     if !app(|a| can_close_tab(&a.s.tabs, i)) {
         return;
     }
+    // Callers that close "the active tab" flush before they read the index.
+    // A close of a specific tab still lands the deferred switch first, so indexes stay aligned.
+    flush_pending_tab();
     let active = app(|a| a.s.tab);
     if i == active {
         remember_tabs();
@@ -1283,6 +1432,7 @@ pub(crate) unsafe fn close_all_tabs() {
 }
 
 pub(crate) unsafe fn reopen_closed_at(k: usize) {
+    flush_pending_tab();
     end_rename(true);
     let j = app(|a| {
         if k >= a.closed.len() {
@@ -1306,6 +1456,7 @@ pub(crate) unsafe fn reorder_tab(from: usize, to: usize) {
     if from == to {
         return;
     }
+    flush_pending_tab();
     app(|a| {
         if from >= a.s.tabs.len() || to >= a.s.tabs.len() {
             return;
@@ -1481,6 +1632,7 @@ pub(crate) unsafe fn tab_menu(i: usize, x: i32, y: i32) {
 }
 
 pub(crate) unsafe fn install_session(s: Session) {
+    cancel_deferred_tab();
     destroy_every_pane();
     let filters = s.tabs.get(s.tab.min(s.tabs.len().saturating_sub(1))).map(|t| t.filters.clone()).unwrap_or_default();
     let n = s.tabs.len().max(1);
@@ -1553,6 +1705,7 @@ pub(crate) fn tab_wheel(delta: i32) {
 
 /// Every window tab, by name. The current one is checked and a locked one is marked.
 pub(crate) unsafe fn open_tab_list() {
+    flush_pending_tab();
     let (hwnd, names, locked, cur) = app(|a| {
         (
             a.tabs_hwnd,
@@ -1630,7 +1783,7 @@ fn tab_text(a: &App, i: usize) -> (String, String) {
 pub(crate) unsafe fn paint_tabs(h: HWND) {
     let (active, names, colors, mut hot, mut hot_close, hot_plus, hot_over, dpi, font, icon, accent, vertical, edge_hot) = app(|a| {
         (
-            a.s.tab,
+            shown_tab(a.s.tab, a.tab_pending, a.s.tabs.len()),
             (0..a.s.tabs.len()).map(|i| tab_text(a, i).0).collect::<Vec<_>>(),
             a.s.tabs.iter().map(|t| t.color).collect::<Vec<_>>(),
             a.tab_hot,
@@ -2809,6 +2962,68 @@ mod tests {
         assert_eq!(park_evictions(counts.clone(), lru.clone(), 2, 10_000), vec![0, 1, 2, 3, 4, 5]);
         assert!(park_evictions(vec![1, 1], vec![1, 0], 8, 48).is_empty());
         assert!(park_evictions(vec![0, 0], vec![], 0, 0).is_empty());
+    }
+
+    fn coal(live: usize, n: usize, pending: Option<usize>) -> TabCoalesce {
+        TabCoalesce { live, n, pending }
+    }
+
+    #[test]
+    fn ctrl_tab_defers_and_a_repeat_moves_the_strip() {
+        assert_eq!(TAB_SWITCH_MS, 70);
+        let (s, op) = coal(0, 4, None).step(1);
+        assert_eq!(op, TabCoalesceOp::Defer { shown: 1 });
+        assert_eq!(s.pending, Some(1));
+        assert_eq!(s.live, 0);
+        assert_eq!(s.shown(), 1);
+        let (s, op) = s.step(1);
+        assert_eq!(op, TabCoalesceOp::Defer { shown: 2 });
+        assert_eq!(s.shown(), 2);
+        // A repeat steps from the strip, not from the panes still on 0.
+        let (s, op) = s.step(-1);
+        assert_eq!(op, TabCoalesceOp::Defer { shown: 1 });
+        let (s, op) = s.step(-1);
+        assert_eq!(op, TabCoalesceOp::Idle);
+        assert_eq!(s.pending, None);
+        assert_eq!(s.live, 0);
+        assert_eq!(s.shown(), 0);
+    }
+
+    #[test]
+    fn ctrl_tab_wraps_and_commit_switches_once() {
+        let (s, op) = coal(0, 4, None).step(-1);
+        assert_eq!(op, TabCoalesceOp::Defer { shown: 3 });
+        let (s, op) = s.commit();
+        assert_eq!(op, TabCoalesceOp::Switch { to: 3 });
+        assert_eq!((s.live, s.pending), (3, None));
+        // Ctrl key-up after the switch has landed does nothing.
+        let (s, op) = s.commit();
+        assert_eq!(op, TabCoalesceOp::Idle);
+        assert_eq!(s.live, 3);
+        // A pending index past the end is dropped, not switched to.
+        let (s, op) = coal(1, 3, Some(9)).commit();
+        assert_eq!(op, TabCoalesceOp::Idle);
+        assert_eq!(s.pending, None);
+        assert_eq!(s.live, 1);
+    }
+
+    #[test]
+    fn one_tab_does_not_arm_a_switch() {
+        let (s, op) = coal(0, 1, None).step(1);
+        assert_eq!(op, TabCoalesceOp::Idle);
+        assert_eq!(s.pending, None);
+        assert_eq!(s.shown(), 0);
+        let (s, op) = coal(0, 0, None).step(1);
+        assert_eq!(op, TabCoalesceOp::Idle);
+        assert_eq!(s.live, 0);
+    }
+
+    #[test]
+    fn shown_tab_ignores_a_stale_pending_index() {
+        assert_eq!(shown_tab(1, Some(3), 4), 3);
+        assert_eq!(shown_tab(1, Some(9), 4), 1);
+        assert_eq!(shown_tab(1, None, 4), 1);
+        assert_eq!(shown_tab(0, None, 0), 0);
     }
 }
 

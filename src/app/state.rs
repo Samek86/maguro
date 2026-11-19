@@ -259,6 +259,8 @@ pub(crate) struct Desk {
     pub(crate) tab_hot_plus: bool,
     pub(crate) tab_hot_over: bool, // pointer over the overflow chevron
     pub(crate) tab_scroll: usize,  // first visible window tab while the strip overflows
+    /// Ctrl+Tab has highlighted this tab. Panes stay on `s.tab` until the timer or Ctrl goes up.
+    pub(crate) tab_pending: Option<usize>,
     pub(crate) tab_drag: Option<usize>,
     pub(crate) tab_press: Option<(usize, i32, i32, bool)>, // tab, x, y, press landed on its close box
     pub(crate) tab_renaming: Option<usize>,
@@ -459,6 +461,7 @@ pub(crate) fn blank_desk() -> Desk {
         tab_hot_plus: false,
         tab_hot_over: false,
         tab_scroll: 0,
+        tab_pending: None,
         tab_drag: None,
         tab_press: None,
         tab_renaming: None,

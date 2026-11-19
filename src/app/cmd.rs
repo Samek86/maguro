@@ -788,11 +788,18 @@ unsafe fn finish_capture(vk: u16, ctrl: bool, shift: bool, alt: bool, win: bool)
 unsafe fn dispatch(id: &str, vk: u16, a: usize, list: bool, shell: impl Fn() -> bool) -> bool {
     match id {
         "tab.new" => new_tab(),
-        "tab.close" => close_tab(app(|x| x.s.tab)),
+        "tab.close" => {
+            // The index is the tab the strip shows. Read it after the deferred switch lands.
+            flush_pending_tab();
+            close_tab(app(|x| x.s.tab));
+        }
         "tab.next" => switch_rel(1),
         "tab.prev" => switch_rel(-1),
         "tab.reopen" => reopen_closed_at(0),
-        "tab.dup" => duplicate_tab(app(|x| x.s.tab)),
+        "tab.dup" => {
+            flush_pending_tab();
+            duplicate_tab(app(|x| x.s.tab));
+        }
         "tab.list" => crate::tablist::open_toggle(),
         "pane.next" => cycle(1),
         "pane.prev" => cycle(-1),
@@ -880,7 +887,10 @@ unsafe fn dispatch(id: &str, vk: u16, a: usize, list: bool, shell: impl Fn() -> 
         }
         "pane.tab.next" => step_pane_tab(a, 1),
         "pane.tab.prev" => step_pane_tab(a, -1),
-        "sess.save" => save_current(),
+        "sess.save" => {
+            flush_pending_tab();
+            save_current();
+        }
         "ws.load" => {
             if let Some(n) = workspace_digit(vk) {
                 load_workspace(n);
@@ -1251,6 +1261,10 @@ pub(crate) unsafe fn pre_translate(m: &MSG) -> bool {
             let vk = m.wParam.0 as u16;
             if vk == VK_CONTROL.0 || vk == VK_LCONTROL.0 || vk == VK_RCONTROL.0 {
                 refresh_pane_drag();
+                // Ctrl+Tab moves the strip immediately and switches on Ctrl key-up, before the timer.
+                if GetKeyState(VK_CONTROL.0 as i32) >= 0 && bind_hwnd(m.hwnd) {
+                    flush_pending_tab();
+                }
             }
             app(|a| a.held = a.held.filter(|&k| k != vk));
             crate::keys::clear_swallow(vk);
