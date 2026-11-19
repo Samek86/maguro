@@ -126,17 +126,11 @@ Open the editor from the pencil button at the bottom of the vertical command col
 
 <p align="center"><img width="560" alt="Toolbar editor" src="docs/images-v10/en/toolbar_editor.png"></p>
 
-### 6. Toggle buttons
-
-A toggle such as Show hidden files uses the same background as the other buttons. When it is on, only the icon is drawn in the accent colour.
-
-<p align="center"><img width="560" alt="Hidden-files toggle off and on" src="docs/images-v10/en/toolbar_toggle.png"></p>
-
-### 7. Pin, lock, and colour tabs
+### 6. Pin, lock, and colour tabs
 
 Double-click or right-click a tab → Rename to pin your own name. Lock a tab so it cannot be closed by accident. Pick a tab colour so related work stands out at a glance. The selected coloured tab shows a colour stripe on its left; other coloured tabs show a light tint.
 
-### 8. Drag a pane to move it — Ctrl+drag to copy
+### 7. Drag a pane to move it — Ctrl+drag to copy
 
 Drag a pane by its number badge or its header. Drop in the centre of another pane to swap the two. Drop on an edge to split that pane. Hold **Ctrl** while dragging to copy the current pane tab: an edge splits the target and leaves this pane in place, and the centre adds a pane tab in that cell.
 
@@ -146,13 +140,13 @@ Drag a pane by its number badge or its header. Drop in the centre of another pan
 </p>
 <p align="center"><img width="560" alt="Ctrl+drag duplicates a pane" src="docs/images-v10/common/panedrag_dup.png"></p>
 
-### 9. Per-pane colours
+### 8. Per-pane colours
 
 Give each pane its own accent so you always know which side is source and which is destination — useful in a busy multi-pane layout.
 
 <p align="center"><img width="760" alt="Per-pane colours" src="docs/images-v10/en/pane_colors.png"></p>
 
-### 10. Built for speed
+### 9. Built for speed
 
 Cold start measured at **607 ms** on this portable demo build. Paste and drag to or from a network folder can use robocopy (Settings → File operations; off by default). Right-click → Fast paste always uses it, with Maguro's own progress and overwrite / skip / cancel.
 
@@ -160,13 +154,13 @@ Cold start measured at **607 ms** on this portable demo build. Paste and drag to
 
 <p align="center"><img width="760" alt="Everything-powered pane search" src="docs/images-v10/en/search.png"></p>
 
-### 11. Favourites — folders and files, in groups
+### 10. Favourites — folders and files, in groups
 
 The sidebar is split evenly: favourites on top, folder tree below. Favourites hold Explorer Quick-access pins plus your own groups (nest folders and files, drag to reorder). Ctrl+B opens the quick favourites list. Drop files or folders onto the panel to pin them.
 
 <p align="center"><img width="760" alt="Favourites with groups of folders and files" src="docs/images-v10/en/favorites.png"></p>
 
-### 12. Quick preview
+### 11. Quick preview
 
 F3 opens Quick look for pictures, PDF, Office, HTML, Markdown, code, CSV, ZIP, HWP/HWPX (Hancom) and more. Space does the same when Preview with Space is on (the default). Ctrl+wheel zooms (10–800%), drag pans, the wheel scrolls, ←/→ step through files. In Quick look, **F2** renames and **Del** deletes the file on screen.
 
@@ -175,68 +169,68 @@ F3 opens Quick look for pictures, PDF, Office, HTML, Markdown, code, CSV, ZIP, H
   <img width="240" alt="Quick look" src="docs/images-v10/en/preview_peek.png">
 </p>
 
-### 13. Configurable context menu
+### 12. Configurable context menu
 
 Settings → Right-click menu items can hide Windows' own commands (the Windows commands group) as well as each Maguro command (the Maguro commands group). Both start on. Hiding a command only affects Maguro's menu, not Explorer. Properties always stays at the bottom, with Maguro's items just above it.
 
 <p align="center"><img width="560" alt="Configurable context menu settings" src="docs/images-v10/en/settings_ctxmenu.png"></p>
 
-### 14. Batch rename with live name preview
+### 13. Batch rename with live name preview
 
 Select files, press Ctrl+Shift+R. Find / replace, numbering, extensions, and presets update a live preview of every new name before you commit.
 
 <p align="center"><img width="560" alt="Batch rename with name preview" src="docs/images-v10/en/rename.png"></p>
 
-### 15. Server connections
+### 14. Server connections
 
 Right-click the favourites panel (or a group) → **Add server connection…**. SMB and WebDAV open as normal Windows folders. SFTP and FTP are mounted with rclone and WinFsp, then browse like any other folder — including preview, the context menu, and fast copy. Passwords stay in Windows Credential Manager and are never written to `maguro.json`.
 
 <p align="center"><img width="420" alt="Server connection dialog with filled fields" src="docs/images-v10/en/servers.png"></p>
 
 
-### 16. Excel read-only open & tidy to A1 · 100%
+### 15. Excel read-only open & tidy to A1 · 100%
 
 Right-click an `.xls`, `.xlsx`, `.xlsm`, or `.csv` → **Open read-only** to open Excel without locking the file for others. **Tidy to A1 · 100%** is only for `.xlsx` and `.xlsm`. It can move the selection to A1, set zoom to 100%, select the first sheet, and keep a `.bak.xlsx` backup. Each of those four options is remembered for the rest of the session.
 
 <p align="center"><img width="420" alt="Tidy Excel workbooks to A1 and 100% zoom" src="docs/images-v10/en/feature_excel_readonly_tidy.png"></p>
 
-### 17. File basket
+### 16. File basket
 
 Ctrl+Shift+B opens a small always-on-top basket. Drop files into it (or Ctrl+Alt+B for the active selection); copy or move them later into any pane. Paths stay in `maguro.json`, not in session files. Missing originals stay listed until you remove them.
 
 <p align="center"><img width="420" alt="File basket with compact Settings-style rows" src="docs/images-v10/en/feature_basket.png"></p>
 
-### 18. Folder watch
+### 17. Folder watch
 
 Ctrl+Shift+W opens folder watch. Add folders, the active pane, or **individual files**. Rows use the same tick checkbox as Settings. Maguro notifies you when something changes, but only while Maguro is running. A watched file that disappears shows as missing until you delete the row.
 
 <p align="center"><img width="560" alt="Folder watch with a folder and a file row" src="docs/images-v10/en/feature_folder_watch.png"></p>
 
-### 19. Open clipboard path (Alt+Z)
+### 18. Open clipboard path (Alt+Z)
 
 With Maguro running, **Alt+Z** opens the clipboard path even when another app is in front. A folder opens in a new tab and Maguro comes to the front. A file opens with its default app.
 
 <p align="center"><img width="760" alt="Clipboard path opened as a new tab" src="docs/images-v10/en/feature_win_shift_v.png"></p>
 
-### 20. Tab list
+### 19. Tab list
 
 **Ctrl+Shift+L**, the list button at the right end of the tab row, or **Tab list…** on the tab menu shows every tab's layout, panes, and folders. Filter by name, jump with Enter or a double-click, and rename with F2. Each tab starts as one summary row with the representative folder and a `+N` for the rest; **Right** expands, **Left** collapses. The current tab starts open. A filter expands only the tabs that match.
 
 <p align="center"><img width="560" alt="Tab list of each tab's layout, panes, and folders" src="docs/images-v10/en/tab_list.png"></p>
 
-### 21. Workspaces
+### 20. Workspaces
 
 Up to nine named layouts. **Ctrl+Alt+1…9** loads a slot; **Ctrl+Alt+Shift+1…9** saves the current tabs, panes, and folders into that slot. Gear menu → **Workspaces** can save, load, rename, or clear. Slots live in `maguro.json`.
 
 <p align="center"><img width="480" alt="Gear menu → Workspaces" src="docs/images-v10/en/workspaces.png"></p>
 
-### 22. Dialog Jump
+### 21. Dialog Jump
 
 While another app's Open or Save dialog is in front, **Ctrl+Alt+G** lists folders already open in Maguro and jumps the dialog to the one you pick. Virtual folders are skipped. The chord is registered only while such a dialog is front.
 
 <p align="center"><img width="420" alt="Dialog Jump picking a Maguro folder" src="docs/images-v10/en/dialog_jump.png"></p>
 
-### 23. Important marks
+### 22. Important marks
 
 Right-click a file or folder → **Mark as important**, or press **Ctrl+Alt+S**. The same command is **Remove important mark** when the selection is already marked. If several items are selected and any of them is unmarked, Maguro marks the selection; if every one is already marked, it clears them. **Show important-mark stars** (on by default) draws or hides a small gold star on marked files and folders in the folder pane. Hiding the stars keeps the marks. The status bar shows how many are in the open folder, such as **2 important**. Maguro draws the star itself. It is not a shell icon overlay, and nothing is written to the registry. A marked folder does not mark the files inside it.
 
