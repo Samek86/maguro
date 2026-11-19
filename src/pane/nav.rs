@@ -4688,6 +4688,10 @@ fn mark_nav_busy(i: usize, step: NavBusyStep) {
         nav_busy_after(busy, step)
     });
     set_nav_busy(i, next);
+    if !next {
+        // A tab switch may be holding the previous panes up until this browser has a folder.
+        unsafe { note_tab_cover_ready(i) };
+    }
 }
 
 fn take_nav_pending(i: usize) -> Option<String> {

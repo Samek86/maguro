@@ -261,6 +261,12 @@ pub(crate) struct Desk {
     pub(crate) tab_scroll: usize,  // first visible window tab while the strip overflows
     /// Ctrl+Tab has highlighted this tab. Panes stay on `s.tab` until the timer or Ctrl goes up.
     pub(crate) tab_pending: Option<usize>,
+    /// Panes created for this switch that have not finished navigating. While nonzero,
+    /// `cover_hwnds` stay visible on top so the new list is not shown half-drawn.
+    pub(crate) tab_cover: u32,
+    /// Outgoing pane windows kept on top until `tab_cover` clears. Not extra browsers:
+    /// they are the tab we just parked, and eviction still drops them back to two hidden tabs.
+    pub(crate) cover_hwnds: Vec<HWND>,
     pub(crate) tab_drag: Option<usize>,
     pub(crate) tab_press: Option<(usize, i32, i32, bool)>, // tab, x, y, press landed on its close box
     pub(crate) tab_renaming: Option<usize>,
@@ -462,6 +468,8 @@ pub(crate) fn blank_desk() -> Desk {
         tab_hot_over: false,
         tab_scroll: 0,
         tab_pending: None,
+        tab_cover: 0,
+        cover_hwnds: Vec::new(),
         tab_drag: None,
         tab_press: None,
         tab_renaming: None,

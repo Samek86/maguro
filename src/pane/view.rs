@@ -27,9 +27,13 @@ pub(crate) unsafe fn child(parent: HWND, class: PCWSTR, text: PCWSTR, style: u32
 
 pub(crate) unsafe fn create_pane(i: usize) -> Result<Pane> {
     let (main, font) = app(|a| (a.main, a.font));
-    // CLIPSIBLINGS: a tab switch shows the incoming panes before it hides the outgoing ones.
-    // Without it, the pane that paints last draws over the sibling that should stay on top.
-    let style = WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+    // CLIPSIBLINGS: overlapping panes must not paint over each other.
+    // Hidden while a tab switch is frozen, so the window is not born showing the pixels
+    // underneath it. relayout shows it without copying those bits.
+    let mut style = WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+    if !redraw_held() {
+        style |= WS_VISIBLE;
+    }
     let h = CreateWindowExW(WINDOW_EX_STYLE(0), w!("MaguroPane"), w!(""), style, 0, 0, 0, 0, Some(main), None, None, None)?;
     let (btn, plain) = (BS_OWNERDRAW as u32, WINDOW_EX_STYLE(0));
     let buttons = [
@@ -428,12 +432,22 @@ pub(crate) unsafe fn relayout() {
             }
         }
     }
+    // A new browser that is still navigating stays underneath the outgoing panes.
+    // Showing it on top now would paint the previous tab's pixels into the new window
+    // (ShowWindow copies the screen) and the list would keep them until Explorer felt like painting.
+    let cover = refresh_tab_cover();
     for (h, on) in &shown {
-        _ = ShowWindow(*h, if *on { SW_SHOW } else { SW_HIDE });
+        if *on {
+            show_pane_nocopy(*h, !cover);
+        } else {
+            hide_pane_nocopy(*h);
+        }
     }
-    // Incoming panes are already on top. Parked browsers from the tab we just left hide after that,
-    // so a paint that escapes the redraw hold never shows an empty grid between the two sets.
-    hide_parked_panes();
+    if cover {
+        raise_cover_panes();
+    } else {
+        hide_parked_panes();
+    }
     if !preview_h.0.is_null() && show_preview {
         _ = ShowWindow(preview_h, SW_SHOW);
         // Above the file panes, so a zoomed pane stops at the splitter instead of covering the preview.
@@ -698,15 +712,155 @@ impl Drop for RedrawHold {
     }
 }
 
+/// Panes that were missing at the start of this switch and are still navigating.
+pub(crate) fn cover_still_waiting(bits: u32, busy: &[bool]) -> u32 {
+    let mut out = 0u32;
+    for (i, &is_busy) in busy.iter().enumerate() {
+        if i >= 32 {
+            break;
+        }
+        if is_busy && bits & (1 << i) != 0 {
+            out |= 1 << i;
+        }
+    }
+    out
+}
+
+/// The incoming tab has empty slots, so its browsers will be created in `relayout`.
+/// Remember the outgoing windows; they stay on top until those browsers have navigated.
+pub(crate) fn arm_tab_cover(parked_tab: usize) {
+    app(|a| {
+        let n = a.s.panes().min(32);
+        let mut bits = 0u32;
+        for i in 0..n {
+            if a.panes.get(i).and_then(|p| p.as_ref()).is_none() {
+                bits |= 1 << i;
+            }
+        }
+        let hwnds = if bits == 0 {
+            Vec::new()
+        } else {
+            a.park.get(parked_tab).map(|set| set.iter().flatten().map(|p| p.hwnd).filter(|h| !h.0.is_null()).collect::<Vec<_>>()).unwrap_or_default()
+        };
+        a.cover_hwnds.clear();
+        a.cover_hwnds.extend(hwnds);
+        if a.cover_hwnds.is_empty() {
+            bits = 0;
+        }
+        a.tab_cover = bits;
+    });
+}
+
+/// Navigation of a pane created for this switch finished (or failed).
+/// When the last one does, uncover in one redraw.
+pub(crate) unsafe fn note_tab_cover_ready(i: usize) {
+    if i >= 32 {
+        return;
+    }
+    let uncover = app(|a| {
+        if a.tab_cover & (1 << i) == 0 {
+            return false;
+        }
+        a.tab_cover &= !(1 << i);
+        a.tab_cover == 0
+    });
+    if uncover {
+        reveal_tab_cover();
+    }
+}
+
+/// Hide the outgoing panes and paint the new ones. No-op when nothing is covering.
+pub(crate) unsafe fn reveal_tab_cover() {
+    let had = app(|a| {
+        let had = a.tab_cover != 0 || !a.cover_hwnds.is_empty();
+        a.tab_cover = 0;
+        a.cover_hwnds.clear();
+        had
+    });
+    if !had {
+        return;
+    }
+    hide_parked_panes();
+    let shown = app(|a| a.panes.iter().flatten().map(|p| p.hwnd).filter(|h| !h.0.is_null()).collect::<Vec<_>>());
+    for h in &shown {
+        show_pane_nocopy(*h, true);
+    }
+    if redraw_held() {
+        return;
+    }
+    let main = app(|a| a.main);
+    if !main.0.is_null() && IsWindow(Some(main)).as_bool() {
+        _ = RedrawWindow(Some(main), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
+}
+
+fn refresh_tab_cover() -> bool {
+    app(|a| {
+        if a.tab_cover == 0 {
+            return false;
+        }
+        let busy: Vec<bool> = (0..32).map(|i| a.panes.get(i).and_then(|p| p.as_ref()).is_some_and(|p| p.nav_busy)).collect();
+        let bits = cover_still_waiting(a.tab_cover, &busy);
+        a.tab_cover = bits;
+        if bits == 0 {
+            a.cover_hwnds.clear();
+        }
+        bits != 0
+    })
+}
+
+/// Show without copying the pixels underneath. Those pixels are the previous tab's list,
+/// and a shell view that thinks they are valid will keep displaying them.
+unsafe fn show_pane_nocopy(h: HWND, top: bool) {
+    if h.0.is_null() || !IsWindow(Some(h)).as_bool() {
+        return;
+    }
+    let z = if top { 0 } else { SWP_NOZORDER.0 };
+    let flags = SET_WINDOW_POS_FLAGS(SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_NOACTIVATE.0 | SWP_NOCOPYBITS.0 | SWP_NOREDRAW.0 | SWP_SHOWWINDOW.0 | z);
+    _ = SetWindowPos(h, if top { Some(HWND_TOP) } else { None }, 0, 0, 0, 0, flags);
+    invalidate_pane_tree(h);
+}
+
+unsafe fn hide_pane_nocopy(h: HWND) {
+    if h.0.is_null() || !IsWindow(Some(h)).as_bool() {
+        return;
+    }
+    let flags = SET_WINDOW_POS_FLAGS(SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_NOZORDER.0 | SWP_NOACTIVATE.0 | SWP_NOCOPYBITS.0 | SWP_NOREDRAW.0 | SWP_HIDEWINDOW.0);
+    _ = SetWindowPos(h, None, 0, 0, 0, 0, flags);
+}
+
+unsafe fn raise_cover_panes() {
+    let hwnds = app(|a| a.cover_hwnds.clone());
+    let flags = SET_WINDOW_POS_FLAGS(SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_NOACTIVATE.0 | SWP_NOREDRAW.0 | SWP_SHOWWINDOW.0);
+    for h in hwnds {
+        if !h.0.is_null() && IsWindow(Some(h)).as_bool() {
+            // Keep the outgoing list's own pixels. NOCOPYBITS here would throw them away.
+            _ = SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0, flags);
+        }
+    }
+}
+
+unsafe extern "system" fn invalidate_child(hwnd: HWND, _: LPARAM) -> BOOL {
+    _ = InvalidateRect(Some(hwnd), None, false);
+    TRUE
+}
+
+unsafe fn invalidate_pane_tree(h: HWND) {
+    _ = InvalidateRect(Some(h), None, false);
+    _ = EnumChildWindows(Some(h), Some(invalidate_child), LPARAM(0));
+}
+
 /// Hide Explorer windows that belong to a tab that is not on screen.
+/// Windows covering a browser that has not navigated yet stay up.
 /// The live set is left alone when a hwnd is still in both (it should not be).
 unsafe fn hide_parked_panes() {
     let parked = app(|a| {
         let live: Vec<HWND> = a.panes.iter().flatten().map(|p| p.hwnd).collect();
-        a.park.iter().flatten().flatten().map(|p| p.hwnd).filter(|h| !h.0.is_null() && !live.contains(h)).collect::<Vec<_>>()
+        let cover = if a.tab_cover == 0 { Vec::new() } else { a.cover_hwnds.clone() };
+        a.park.iter().flatten().flatten().map(|p| p.hwnd).filter(|h| !h.0.is_null() && !live.contains(h) && !cover.contains(h)).collect::<Vec<_>>()
     });
     for h in parked {
-        _ = ShowWindow(h, SW_HIDE);
+        hide_pane_nocopy(h);
     }
 }
 
