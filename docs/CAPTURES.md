@@ -127,15 +127,15 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 | favorites.ja.png | 즐겨찾기 | MaguroMain 사이드바 | light/ja | favorites 시드 | 227452 B (1206×813) | capture-main.ps1 | DWM |  |
 | favorites.ko.png | 즐겨찾기 | MaguroMain 사이드바 | light/ko | favorites 시드 | 224586 B (1206×813) | capture-main.ps1 | DWM |  |
 | favorites.png | 즐겨찾기 | MaguroMain 사이드바 | light/en | favorites 시드 | 224434 B (1206×813) | capture-main.ps1 | DWM |  |
-| feature_basket.ja.png | 파일 바구니 | MaguroBasket | light/ja | G:\Mixed 데모 5개 파일 | 18486 B (574×511) | capture-features.ps1 (WM_COMMAND 1125) | DWM | **2026-11-13 재촬영.** 이전 v8은 v7 복사(546×513, 경로 C:\WORK\pgtest\demo-253, クリア가 둘째 줄). 현재 창은 590 DIP이라 버튼 5개가 한 줄 |
-| feature_basket.ko.png | 파일 바구니 | MaguroBasket | light/ko | G:\Mixed 데모 5개 파일 | 15382 B (574×511) | capture-features.ps1 (WM_COMMAND 1125) | DWM | **2026-11-13 재촬영.** 이전 v8은 v7 복사(546×513, 경로 C:\WORK\pgtest\demo-253) |
-| feature_basket.png | 파일 바구니 | MaguroBasket | light/en | G:\Mixed demo files (5) | 14799 B (574×511) | capture-features.ps1 (WM_COMMAND 1125) | DWM | **Retaken 2026-11-13.** Previous v8 was a v7 copy (546×513, path C:\WORK\pgtest\demo-253, Clear wrapped to a second row). Current window is 590 DIP so all five footer buttons fit on one row |
+| feature_basket.ja.png | 파일 바구니 | MaguroBasket | light/ja | G:\Mixed 데모 5개 파일 | 18858 B (576×513) | capture-features.ps1 (WM_COMMAND 1125) | DWM, 1px 테두리 유지 | **2026-11-19 v0.3.1 재촬영.** `docs/images-v10/ja/feature_basket.png`. notes.docx, plan.xlsx, budget-2026.csv, samples.zip, todo.txt. 이름 검정, 경로 `G:\Mixed`, 푸터 `5 件 · 0 件選択` |
+| feature_basket.ko.png | 파일 바구니 | MaguroBasket | light/ko | G:\Mixed 데모 5개 파일 | 15787 B (576×513) | capture-features.ps1 (WM_COMMAND 1125) | DWM, 1px 테두리 유지 | **2026-11-19 v0.3.1 재촬영.** `docs/images-v10/ko/feature_basket.png`. 이름 검정, 경로 `G:\Mixed`, 푸터 `5개 항목 · 0개 선택` |
+| feature_basket.png | 파일 바구니 | MaguroBasket | light/en | G:\Mixed demo files (5) | 15179 B (576×513) | capture-features.ps1 (WM_COMMAND 1125) | DWM, 1px frame kept | **Retaken 2026-11-19 (v0.3.1).** `docs/images-v10/en/feature_basket.png`. notes.docx, plan.xlsx, budget-2026.csv, samples.zip, todo.txt. Black names, paths `G:\Mixed`, footer `5 items · 0 selected` |
 | feature_excel_readonly_tidy.ja.png | Excel 정리 | MaguroExcelTidy | light/ja | readme-excel-demo sheet.xlsx | 7672 B (422×244) | 컨텍스트 메뉴 id=0x8007 (PR #312 shared UI) | DWM | images-v4 재촬영 |
 | feature_excel_readonly_tidy.ko.png | Excel 정리 | MaguroExcelTidy | light/ko | readme-excel-demo sheet.xlsx | 5797 B (422×244) | 컨텍스트 메뉴 id=0x8007 (PR #312 shared UI) | DWM | images-v4 재촬영 |
 | feature_excel_readonly_tidy.png | Excel 정리 | MaguroExcelTidy | light/en | readme-excel-demo sheet.xlsx | 6217 B (422×244) | 컨텍스트 메뉴 id=0x8007 (PR #312 shared UI) | DWM | images-v4 재촬영 |
-| feature_folder_watch.ja.png | 폴더 감시 | MaguroWatch | light/ja | 데모 | 20342 B (746×433) | capture-features.ps1 | DWM |  |
-| feature_folder_watch.ko.png | 폴더 감시 | MaguroWatch | light/ko | 데모 | 16051 B (746×433) | capture-features.ps1 | DWM |  |
-| feature_folder_watch.png | 폴더 감시 | MaguroWatch | light/en | 데모 | 15631 B (746×433) | capture-features.ps1 | DWM |  |
+| feature_folder_watch.ja.png | 폴더 감시 | MaguroWatch | light/ja | G:\Photos 2026, 하위 폴더 포함 | 16668 B (746×433) | capture-features.ps1 | DWM, 1px 테두리 유지 | **2026-11-19 v0.3.1 재촬영.** `docs/images-v10/ja/feature_folder_watch.png`. 상태 `監視中`, 경로 `G:\`, 일시 중지 아님 |
+| feature_folder_watch.ko.png | 폴더 감시 | MaguroWatch | light/ko | G:\Photos 2026, 하위 폴더 포함 | 12910 B (746×433) | capture-features.ps1 | DWM, 1px 테두리 유지 | **2026-11-19 v0.3.1 재촬영.** `docs/images-v10/ko/feature_folder_watch.png`. 상태 `감시 중`, 경로 `G:\`, 일시 중지 아님 |
+| feature_folder_watch.png | 폴더 감시 | MaguroWatch | light/en | G:\Photos 2026, subfolders on | 12949 B (746×433) | capture-features.ps1 | DWM, 1px frame kept | **Retaken 2026-11-19 (v0.3.1).** `docs/images-v10/en/feature_folder_watch.png`. Status `Watching`, path `G:\`, not paused |
 | feature_win_shift_v.ja.png | Win+Alt+V | MaguroMain 새 탭 | light/ja | 클립보드=Photos 2026 경로 | 77961 B (1204×811) | WM_HOTKEY CLIP_HOTKEY_ID=3 | DWM | Photos 2026 새 탭. fav_panel+tree_panel 시드. 기본 핫키는 Alt+Z라 스크립트의 Win+Alt+V 대신 WM_HOTKEY id=3을 씀 |
 | feature_win_shift_v.ko.png | Win+Alt+V | MaguroMain 새 탭 | light/ko | 클립보드=Photos 2026 경로 | 74832 B (1204×811) | WM_HOTKEY CLIP_HOTKEY_ID=3 | DWM | Photos 2026 새 탭. fav_panel+tree_panel 시드. 기본 핫키는 Alt+Z라 스크립트의 Win+Alt+V 대신 WM_HOTKEY id=3을 씀 |
 | feature_win_shift_v.png | Win+Alt+V | MaguroMain 새 탭 | light/en | 클립보드=Photos 2026 경로 | 74787 B (1204×811) | WM_HOTKEY CLIP_HOTKEY_ID=3 | DWM | Photos 2026 새 탭. fav_panel+tree_panel 시드. 기본 핫키는 Alt+Z라 스크립트의 Win+Alt+V 대신 WM_HOTKEY id=3을 씀 |
@@ -247,8 +247,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 
 버튼·카드·검색 칸이 공유 토큰으로 바뀌었다. 아래 캡처는 다시 찍는다.
 
-- `feature_folder_watch.png`, `feature_folder_watch.ko.png`, `feature_folder_watch.ja.png`
-- `feature_basket.png`, `feature_basket.ko.png`, `feature_basket.ja.png` — **2026-11-13 재촬영 완료** (아래 변경 이력)
+- `feature_folder_watch.png`, `feature_folder_watch.ko.png`, `feature_folder_watch.ja.png` — **2026-11-19 v0.3.1 재촬영 완료** (아래 변경 이력)
+- `feature_basket.png`, `feature_basket.ko.png`, `feature_basket.ja.png` — **2026-11-19 v0.3.1 재촬영 완료** (아래 변경 이력)
 - `tab_list.png`
 - `rename.png`, `rename.ko.png`, `rename.ja.png`
 - `copy_progress.png`, `copy_progress.ko.png`, `copy_progress.ja.png` — 푸터 버튼이 28 DIP라 창 높이는 480×148. 위 표의 480×152는 재촬영 전 값이다.
@@ -258,6 +258,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 시스템 대화상자(IFileOperation 진행, 탐색기 메뉴, 공통 파일 대화상자)는 그대로다. 이름 묻기, 즐겨찾기 관리, 정보, Excel, 확인 창, 그리고 팝업·알림(폴더 감시 토스트, 즐겨찾기 없음, 네트워크 실패, 빠른 복사 진행·이름 충돌, 세션 목록, 단축키, 레이아웃 고르기, 선택 칸, 서버 연결의 저장/취소)은 공유 토큰으로 옮겼다. 설정 창의 토글은 모양과 동작이 이전과 같다.
 
 ## 변경 이력 (관련)
+
+- **2026-11-19 (v0.3.1):** `docs/images-v10/{en,ko,ja}/feature_basket.png`와 `feature_folder_watch.png`만 다시 찍음. 포터블 0.3.1, 시드 `readme2-cfgs-v6`의 `hero_light.json`, `G:` → `C:\WORK\pgtest\MaguroDemo`. 바구니는 `G:\Mixed`의 notes.docx, plan.xlsx, budget-2026.csv, samples.zip, todo.txt (576×513, 이름 검정, 푸터에 선택 0). 폴더 감시는 `G:\Photos 2026`, 하위 폴더 포함, 일시 중지 아님, 상태 Watching / 감시 중 / 監視中 (746×433). 바깥 검은 여백만 잘라 1px 테두리를 남김(모서리 RGB 약 108,108,108). 바이트: en basket 15179, ko basket 15787, ja basket 18858, en watch 12949, ko watch 12910, ja watch 16668. `capture-features.ps1`의 바구니·감시 시드는 `MAGURO_DEMO_ROOT`(기본 `G:\`)이고, 그 경로가 없으면 스크립트가 중단한다. 이전 v0.3.0 샷은 디스크에 없던 `demo-253`·`demo-readme-watch` 경로였다.
 
 - **2026-11-19 (v0.3.0):** README·도움말(en/ko/ja)이 가리키는 스틸을 전부 `docs/images-v10/{en,ko,ja,common}/`에 다시 찍음. 메인 창은 명령 도구 모음이 보이므로 선별하지 않음. 시드는 `readme2-cfgs-v6`, 포터블 0.3.0, `G:` → `C:\WORK\pgtest\MaguroDemo`. 메인 창은 대체로 1206×813(1px 테두리 유지, 모서리 RGB 25,25,25). 보기 메뉴는 톱니 WM_COMMAND 207로 연 두 팝업만 흰 캔버스에 붙임(en 693×437, ko 575×437, ja 738×437). 새 샷: `toolbar_vertical.png`, `toolbar_horizontal.png`, `toolbar_editor.png`(562×650), `toolbar_toggle.png`(끔·켬 아이콘 열 합성, 켬은 강조색 아이콘만). `docs/images-v8/`과 `docs/images-v9/`는 그대로 둠. 데모 GIF/MP4(`docs/demo-*.gif`)는 이 패스에서 다시 찍지 않음. 다음 재촬영은 `docs/images-v11/`.
 
