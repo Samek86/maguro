@@ -27,7 +27,9 @@ pub(crate) unsafe fn child(parent: HWND, class: PCWSTR, text: PCWSTR, style: u32
 
 pub(crate) unsafe fn create_pane(i: usize) -> Result<Pane> {
     let (main, font) = app(|a| (a.main, a.font));
-    let style = WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN;
+    // CLIPSIBLINGS: a tab switch shows the incoming panes before it hides the outgoing ones.
+    // Without it, the pane that paints last draws over the sibling that should stay on top.
+    let style = WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
     let h = CreateWindowExW(WINDOW_EX_STYLE(0), w!("MaguroPane"), w!(""), style, 0, 0, 0, 0, Some(main), None, None, None)?;
     let (btn, plain) = (BS_OWNERDRAW as u32, WINDOW_EX_STYLE(0));
     let buttons = [
@@ -429,6 +431,9 @@ pub(crate) unsafe fn relayout() {
     for (h, on) in &shown {
         _ = ShowWindow(*h, if *on { SW_SHOW } else { SW_HIDE });
     }
+    // Incoming panes are already on top. Parked browsers from the tab we just left hide after that,
+    // so a paint that escapes the redraw hold never shows an empty grid between the two sets.
+    hide_parked_panes();
     if !preview_h.0.is_null() && show_preview {
         _ = ShowWindow(preview_h, SW_SHOW);
         // Above the file panes, so a zoomed pane stops at the splitter instead of covering the preview.
@@ -440,10 +445,14 @@ pub(crate) unsafe fn relayout() {
             _ = SetWindowTextW(b, &HSTRING::from(label));
         }
     }
-    _ = InvalidateRect(Some(main), None, true);
-    // Paint now: WM_PAINT is only generated once the message queue is empty, which never happens
-    // while the mouse keeps moving, so mid-drag the views would keep showing the previous frame.
-    _ = RedrawWindow(Some(main), None, None, RDW_UPDATENOW | RDW_ALLCHILDREN);
+    // A tab switch holds WM_SETREDRAW off and paints once when that hold ends.
+    // Painting here as well is the second frame.
+    if !redraw_held() {
+        _ = InvalidateRect(Some(main), None, true);
+        // Paint now: WM_PAINT is only generated once the message queue is empty, which never happens
+        // while the mouse keeps moving, so mid-drag the views would keep showing the previous frame.
+        _ = RedrawWindow(Some(main), None, None, RDW_UPDATENOW | RDW_ALLCHILDREN);
+    }
     // A tab or a layout that needs more room grows the window. A smaller one does not shrink it.
     ensure_window_fits();
     if show_preview {
@@ -628,9 +637,78 @@ pub(crate) unsafe fn end_drag() {
 
 // Full repaint of everything once a drag/resize/layout change is over, so nothing stale survives.
 pub(crate) unsafe fn redraw_all() {
+    if redraw_held() {
+        return;
+    }
     let main = app(|a| a.main);
     if !main.0.is_null() {
         _ = RedrawWindow(Some(main), None, None, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
+}
+
+thread_local! {
+    static REDRAW_HOLDS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// True while a [`RedrawHold`] has `WM_SETREDRAW` off on the main window.
+pub(crate) fn redraw_held() -> bool {
+    REDRAW_HOLDS.with(|c| c.get() > 0)
+}
+
+/// `WM_SETREDRAW` off for the main window. Drop always turns redraw back on, then paints once.
+/// Nested holds paint only when the outermost one drops, so a re-entered switch does not
+/// enable drawing in the middle of the outer one. Not `WS_EX_COMPOSITED` and not `LockWindowUpdate`.
+#[must_use]
+pub(crate) struct RedrawHold {
+    hwnd: HWND,
+    outer: bool,
+}
+
+impl RedrawHold {
+    pub(crate) unsafe fn new(hwnd: HWND) -> Self {
+        let depth = REDRAW_HOLDS.with(|c| {
+            let d = c.get();
+            c.set(d.saturating_add(1));
+            d
+        });
+        let outer = depth == 0;
+        if outer && !hwnd.0.is_null() {
+            SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(0)), None);
+        }
+        Self { hwnd, outer }
+    }
+}
+
+impl Drop for RedrawHold {
+    fn drop(&mut self) {
+        let left = REDRAW_HOLDS.with(|c| {
+            let next = c.get().saturating_sub(1);
+            c.set(next);
+            next
+        });
+        if !self.outer || left != 0 || self.hwnd.0.is_null() {
+            return;
+        }
+        unsafe {
+            if !IsWindow(Some(self.hwnd)).as_bool() {
+                return;
+            }
+            SendMessageW(self.hwnd, WM_SETREDRAW, Some(WPARAM(1)), None);
+            // One paint, no erase. The panes and the main window already swallow WM_ERASEBKGND.
+            _ = RedrawWindow(Some(self.hwnd), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        }
+    }
+}
+
+/// Hide Explorer windows that belong to a tab that is not on screen.
+/// The live set is left alone when a hwnd is still in both (it should not be).
+unsafe fn hide_parked_panes() {
+    let parked = app(|a| {
+        let live: Vec<HWND> = a.panes.iter().flatten().map(|p| p.hwnd).collect();
+        a.park.iter().flatten().flatten().map(|p| p.hwnd).filter(|h| !h.0.is_null() && !live.contains(h)).collect::<Vec<_>>()
+    });
+    for h in parked {
+        _ = ShowWindow(h, SW_HIDE);
     }
 }
 

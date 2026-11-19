@@ -863,6 +863,12 @@ pub(crate) unsafe fn remember_tabs() {
 }
 
 pub(crate) unsafe fn detach_live() {
+    detach_live_panes(true);
+}
+
+/// Unhook the live browsers. `hide` is false for a tab switch: those panes stay up until
+/// [`relayout`] has shown the incoming set (`hide_parked_panes`).
+unsafe fn detach_live_panes(hide: bool) {
     crate::pane::marks_overlay::note_all_hidden();
     hide_addr_tip();
     for i in 0..MAXP {
@@ -880,7 +886,9 @@ pub(crate) unsafe fn detach_live() {
             _ = IUnknown_SetSite(&eb, None);
             _ = KillTimer(Some(hwnd), TIMER_SETTLE);
             _ = KillTimer(Some(hwnd), TIMER_FILTER);
-            _ = ShowWindow(hwnd, SW_HIDE);
+            if hide {
+                _ = ShowWindow(hwnd, SW_HIDE);
+            }
         }
     }
 }
@@ -961,10 +969,12 @@ pub(crate) fn tabs_invalidate() {
 }
 
 pub(crate) unsafe fn switch_tab(j: usize) {
-    let (cur, n) = app(|a| (a.s.tab, a.s.tabs.len()));
+    let (cur, n, main) = app(|a| (a.s.tab, a.s.tabs.len(), a.main));
     if j >= n {
         return;
     }
+    // The hold paints once on drop, including the same-tab path and any early return.
+    let _hold = RedrawHold::new(main);
     if j == cur {
         show_active_tab();
         tabs_invalidate();
@@ -972,7 +982,8 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     }
     end_rename(true);
     remember_tabs();
-    detach_live();
+    // Leave the outgoing panes visible until relayout has shown the incoming ones.
+    detach_live_panes(false);
     let filters = app(|a| {
         fit_park(a);
         let live = std::mem::replace(&mut a.panes, no_panes());
@@ -998,12 +1009,12 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     show_active_tab();
     relayout();
     sync_filter_edits();
-    redraw_all();
     focus_view(active_pane());
     tabs_invalidate();
-    evict_park();
     note_save();
     refresh_save_button();
+    drop(_hold);
+    evict_park();
 }
 
 pub(crate) unsafe fn switch_rel(d: i32) {
