@@ -1,5 +1,5 @@
 ﻿# Feature windows: basket, folder watch, Win+Alt+V, excel tidy; also rename, search, tab_list.
-# Env: MAGURO_PORTABLE, MAGURO_CFG_DIR, MAGURO_SHOT_DIR, MAGURO_FORCE=1
+# Env: MAGURO_PORTABLE, MAGURO_CFG_DIR, MAGURO_SHOT_DIR, MAGURO_FORCE=1, MAGURO_DEMO_ROOT (default G:\)
 # Demo paths come from cfg seeds / optional MAGURO_DEMO_* — never real servers.
 $ErrorActionPreference='Continue'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -143,8 +143,25 @@ if(-not (Test-Path $dest) -or $Force){
 
 # ---- features ----
 function SeedFeat([string]$lang){
+  $demoRoot = $env:MAGURO_DEMO_ROOT
+  if ([string]::IsNullOrWhiteSpace($demoRoot)) { $demoRoot = 'G:\' }
+  if (-not ($demoRoot.EndsWith('\') -or $demoRoot.EndsWith('/'))) { $demoRoot += '\' }
+  $basket = @(
+    (Join-Path $demoRoot 'Mixed\notes.docx'),
+    (Join-Path $demoRoot 'Mixed\plan.xlsx'),
+    (Join-Path $demoRoot 'Mixed\budget-2026.csv'),
+    (Join-Path $demoRoot 'Mixed\samples.zip'),
+    (Join-Path $demoRoot 'Mixed\todo.txt')
+  )
+  $watch = Join-Path $demoRoot 'Photos 2026'
+  $missing = @($basket + $watch) | Where-Object { -not (Test-Path -LiteralPath $_) }
+  if (@($missing).Count -gt 0) {
+    throw "capture-features aborted: seeded demo path does not exist: $(@($missing) -join '; ')"
+  }
+  $pyBasket = ($basket | ForEach-Object { "'" + ($_.Replace('\','\\')) + "'" }) -join ",`n  "
+  $pyWatch = $watch.Replace('\','\\')
   $py = @"
-import json
+import json, os, sys
 from pathlib import Path
 p=Path('$($Json.Replace('\','\\'))')
 src=Path('$($CfgDir.Replace('\','\\'))')/'hero_light.json'
@@ -155,15 +172,16 @@ base['accent']='0A9BD6'; base['accent_dark']='0A9BD6'
 root='$($Root.Replace('\','\\'))'
 excel='$($Excel.Replace('\','\\'))'
 base['file_basket']=[
-  root+'\\demo-253\\basket-src\\demo-file-01.txt',
-  root+'\\demo-253\\basket-src\\demo-file-02.txt',
-  root+'\\demo-253\\basket-src\\demo-file-03.txt',
-  root+'\\demo-253\\basket-src\\demo-file-04.txt',
-  root+'\\demo-253\\basket-src\\demo-file-05.txt',
+  $pyBasket
 ]
 base['folder_watches']=[
-  {'path': root+'\\demo-readme-watch\\photos', 'subfolders': True, 'paused': False},
+  {'path': '$pyWatch', 'subfolders': True, 'paused': False},
 ]
+seed_paths=list(base['file_basket'])+[w['path'] for w in base['folder_watches']]
+missing=[x for x in seed_paths if not os.path.exists(x)]
+if missing:
+    sys.stderr.write('capture-features aborted: seeded demo path does not exist: '+'; '.join(missing)+'\n')
+    sys.exit(1)
 pane0=root+'\\readme-demo'
 if excel:
     import os
@@ -181,6 +199,7 @@ print('seeded feat', '$lang')
   $tmp=Join-Path $env:TEMP '_maguro_seed_feat.py'
   Set-Content $tmp $py -Encoding utf8
   python $tmp | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "capture-features aborted: a seeded demo path does not exist." }
 }
 foreach($pair in @(
   @{lang='en'; basket='feature_basket.png'; watch='feature_folder_watch.png'; wsv='feature_win_shift_v.png'; excel='feature_excel_readonly_tidy.png'},
