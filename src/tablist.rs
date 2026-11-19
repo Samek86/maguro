@@ -894,6 +894,7 @@ pub(crate) unsafe fn close() {
 
 /// Shortcut and the tab-bar button: open, or close when this window already has the list.
 pub(crate) unsafe fn open_toggle() {
+    flush_pending_tab();
     let main = app(|a| a.main);
     if main.0.is_null() {
         return;
@@ -907,6 +908,7 @@ pub(crate) unsafe fn open_toggle() {
 
 /// Tab right-click: open, or focus the list when it is already this window's.
 pub(crate) unsafe fn open_menu() {
+    flush_pending_tab();
     let main = app(|a| a.main);
     if main.0.is_null() {
         return;

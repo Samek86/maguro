@@ -806,22 +806,43 @@ pub(crate) fn park_has_browsers(set: &[Option<Pane>]) -> bool {
     set.iter().any(|p| p.is_some())
 }
 
-/// Drop hidden Explorer windows past PARK_CACHE. Their folders, columns and filters stay on the tab.
+/// Oldest parked tab that should drop its browsers, or none when the tab cache holds.
+/// `counts[i]` is how many Explorer windows tab `i` still holds (0 = already dropped).
+/// The count is not a second cap: one warm tab stays warm however many panes it has.
+/// `lru` is oldest first. A tab with windows that is missing from `lru` is taken after it, in index order.
+pub(crate) fn park_victim(counts: &[usize], lru: &[usize], tab_cache: usize) -> Option<usize> {
+    let live = counts.iter().filter(|&&n| n > 0).count();
+    if live <= tab_cache {
+        return None;
+    }
+    lru.iter().copied().find(|&i| counts.get(i).copied().unwrap_or(0) > 0).or_else(|| counts.iter().position(|&n| n > 0))
+}
+
+/// Tabs to drop, oldest first, until only `tab_cache` still hold browsers.
+/// `counts` and `lru` are not the live app state.
+pub(crate) fn park_evictions(mut counts: Vec<usize>, mut lru: Vec<usize>, tab_cache: usize) -> Vec<usize> {
+    let mut dropped = Vec::new();
+    let limit = counts.len();
+    while dropped.len() < limit {
+        let Some(i) = park_victim(&counts, &lru, tab_cache) else { break };
+        dropped.push(i);
+        counts[i] = 0;
+        lru.retain(|&x| x != i);
+    }
+    dropped
+}
+
+/// Drop hidden Explorer windows past [`PARK_CACHE`].
+/// Their folders, columns and filters stay on the tab.
 pub(crate) unsafe fn evict_park() {
-    loop {
-        let victim = app(|a| {
-            let live = a.park.iter().filter(|s| park_has_browsers(s)).count();
-            if live <= PARK_CACHE {
-                return None;
-            }
-            a.park_lru.iter().copied().find(|&i| a.park.get(i).is_some_and(|s| park_has_browsers(s))).or_else(|| {
-                a.park.iter().position(|s| park_has_browsers(s))
-            })
-        });
-        let Some(i) = victim else { break };
+    let plan = app(|a| {
+        let counts: Vec<usize> = a.park.iter().map(|set| set.iter().filter(|p| p.is_some()).count()).collect();
+        park_evictions(counts, a.park_lru.clone(), PARK_CACHE)
+    });
+    for i in plan {
         let set = app(|a| {
             lru_forget(a, i);
-            if i < a.park.len() {
+            if i < a.park.len() && park_has_browsers(&a.park[i]) {
                 std::mem::replace(&mut a.park[i], no_panes())
             } else {
                 no_panes()
@@ -829,6 +850,65 @@ pub(crate) unsafe fn evict_park() {
         });
         destroy_set(set);
     }
+}
+
+thread_local! {
+    static TAB_SWITCH_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+struct TabSwitchBusy;
+
+impl TabSwitchBusy {
+    fn enter() -> Self {
+        TAB_SWITCH_DEPTH.with(|c| c.set(c.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for TabSwitchBusy {
+    fn drop(&mut self) {
+        TAB_SWITCH_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+fn tab_switch_busy() -> bool {
+    TAB_SWITCH_DEPTH.with(|c| c.get() > 0)
+}
+
+/// Arm a short timer so browser destruction runs after the switch has returned.
+/// With no window, evict now: there is no timer to defer it.
+pub(crate) unsafe fn schedule_park_evict() {
+    let main = app(|a| a.main);
+    if main.0.is_null() || !IsWindow(Some(main)).as_bool() {
+        evict_park();
+        return;
+    }
+    SetTimer(Some(main), TIMER_PARK, PARK_EVICT_MS, None);
+}
+
+pub(crate) unsafe fn on_shell_timer(main: HWND) {
+    _ = KillTimer(Some(main), TIMER_SHELL);
+    if tab_switch_busy() {
+        if IsWindow(Some(main)).as_bool() {
+            SetTimer(Some(main), TIMER_SHELL, SHELL_HOLD_MS, None);
+        }
+        return;
+    }
+    if app(|a| a.main) != main {
+        return;
+    }
+    release_shell_hold();
+}
+
+pub(crate) unsafe fn on_park_timer(main: HWND) {
+    _ = KillTimer(Some(main), TIMER_PARK);
+    if tab_switch_busy() {
+        if IsWindow(Some(main)).as_bool() {
+            SetTimer(Some(main), TIMER_PARK, PARK_EVICT_MS, None);
+        }
+        return;
+    }
+    evict_park();
 }
 
 pub(crate) unsafe fn pull_filters() -> Vec<String> {
@@ -863,6 +943,12 @@ pub(crate) unsafe fn remember_tabs() {
 }
 
 pub(crate) unsafe fn detach_live() {
+    detach_live_panes(true);
+}
+
+/// Unhook the live browsers. `hide` is false for a tab switch: those panes stay up until
+/// [`relayout`] has shown the incoming set (`hide_parked_panes`).
+unsafe fn detach_live_panes(hide: bool) {
     crate::pane::marks_overlay::note_all_hidden();
     hide_addr_tip();
     for i in 0..MAXP {
@@ -880,7 +966,9 @@ pub(crate) unsafe fn detach_live() {
             _ = IUnknown_SetSite(&eb, None);
             _ = KillTimer(Some(hwnd), TIMER_SETTLE);
             _ = KillTimer(Some(hwnd), TIMER_FILTER);
-            _ = ShowWindow(hwnd, SW_HIDE);
+            if hide {
+                _ = ShowWindow(hwnd, SW_HIDE);
+            }
         }
     }
 }
@@ -943,6 +1031,7 @@ pub(crate) unsafe fn destroy_set(set: Vec<Option<Pane>>) {
 }
 
 pub(crate) unsafe fn destroy_every_pane() {
+    clear_shell_hold();
     for i in 0..MAXP {
         destroy_pane(i);
     }
@@ -961,10 +1050,19 @@ pub(crate) fn tabs_invalidate() {
 }
 
 pub(crate) unsafe fn switch_tab(j: usize) {
-    let (cur, n) = app(|a| (a.s.tab, a.s.tabs.len()));
+    let (cur, n, main) = app(|a| (a.s.tab, a.s.tabs.len(), a.main));
     if j >= n {
         return;
     }
+    // A click, a menu, or a flush replaces a deferred Ctrl+Tab. Do not also run the pending one.
+    cancel_deferred_tab();
+    // The hold paints once on drop, including the same-tab path and any early return.
+    // Busy keeps a park-evict timer that fires from a nested message pump from destroying browsers mid-switch.
+    let _busy = TabSwitchBusy::enter();
+    let _hold = RedrawHold::new(main);
+    // A previous cold switch may still be hiding its shell view. Show that view
+    // before this switch parks the panes, so a hidden list is not what comes back.
+    release_shell_hold();
     if j == cur {
         show_active_tab();
         tabs_invalidate();
@@ -972,7 +1070,8 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     }
     end_rename(true);
     remember_tabs();
-    detach_live();
+    // Leave the outgoing panes visible until relayout has shown the incoming ones.
+    detach_live_panes(false);
     let filters = app(|a| {
         fit_park(a);
         let live = std::mem::replace(&mut a.panes, no_panes());
@@ -996,22 +1095,168 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     put_filters(&filters);
     attach_live();
     show_active_tab();
+    // Empty incoming slots are created in relayout. Their shell views stay hidden
+    // until navigation finishes. The parked windows are not kept on top.
+    arm_shell_hold();
     relayout();
     sync_filter_edits();
-    redraw_all();
     focus_view(active_pane());
     tabs_invalidate();
-    evict_park();
     note_save();
     refresh_save_button();
+    drop(_hold);
+    drop(_busy);
+    schedule_shell_hold();
+    schedule_park_evict();
+}
+
+/// Strip selection versus the tab whose panes are on screen.
+/// `pending` is the tab Ctrl+Tab has highlighted and not switched to yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TabCoalesce {
+    pub live: usize,
+    pub n: usize,
+    pub pending: Option<usize>,
+}
+
+/// What one coalesced Ctrl+Tab event should do. The strip update is immediate either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabCoalesceOp {
+    /// Restart the one-shot timer. The strip shows `shown`. Panes stay on `live`.
+    Defer { shown: usize },
+    /// Stop the timer. The strip shows `live`. Panes stay.
+    Idle,
+    /// Stop the timer and switch the panes to `to`.
+    Switch { to: usize },
+}
+
+impl TabCoalesce {
+    /// Tab the strip draws as selected.
+    pub(crate) fn shown(self) -> usize {
+        match self.pending {
+            Some(i) if self.n > 0 && i < self.n => i,
+            _ => {
+                if self.n == 0 {
+                    self.live
+                } else {
+                    self.live.min(self.n - 1)
+                }
+            }
+        }
+    }
+
+    /// `tab.next` / `tab.prev`. Repeats advance from the strip, not from the panes.
+    pub(crate) fn step(self, delta: i32) -> (Self, TabCoalesceOp) {
+        if self.n == 0 {
+            return (self, TabCoalesceOp::Idle);
+        }
+        let shown = (self.shown() as i32 + delta).rem_euclid(self.n as i32) as usize;
+        if shown == self.live {
+            (Self { pending: None, ..self }, TabCoalesceOp::Idle)
+        } else {
+            (Self { pending: Some(shown), ..self }, TabCoalesceOp::Defer { shown })
+        }
+    }
+
+    /// Timer, Ctrl key-up, or a command that reads the active tab.
+    pub(crate) fn commit(self) -> (Self, TabCoalesceOp) {
+        match self.pending {
+            Some(to) if to != self.live && to < self.n => (Self { live: to, pending: None, n: self.n }, TabCoalesceOp::Switch { to }),
+            _ => (Self { pending: None, ..self }, TabCoalesceOp::Idle),
+        }
+    }
+}
+
+/// Tab the strip draws as selected. `pending` wins while a Ctrl+Tab has not landed yet.
+pub(crate) fn shown_tab(live: usize, pending: Option<usize>, n: usize) -> usize {
+    TabCoalesce { live, n, pending }.shown()
 }
 
 pub(crate) unsafe fn switch_rel(d: i32) {
-    let (i, n) = app(|a| (a.s.tab as i32, a.s.tabs.len() as i32));
-    if n <= 0 {
+    let (live, n, pending) = app(|a| (a.s.tab, a.s.tabs.len(), a.tab_pending));
+    if n == 0 {
         return;
     }
-    switch_tab((i + d).rem_euclid(n) as usize);
+    let (next, op) = TabCoalesce { live, n, pending }.step(d);
+    apply_tab_coalesce(next, op);
+}
+
+unsafe fn apply_tab_coalesce(state: TabCoalesce, op: TabCoalesceOp) {
+    match op {
+        TabCoalesceOp::Defer { shown } => {
+            let main = app(|a| {
+                a.tab_pending = state.pending;
+                a.main
+            });
+            // Reset before painting. A timer message already queued would switch at the old index.
+            if !main.0.is_null() {
+                _ = KillTimer(Some(main), TIMER_TAB_SWITCH);
+            }
+            let armed = !main.0.is_null() && SetTimer(Some(main), TIMER_TAB_SWITCH, TAB_SWITCH_MS, None) != 0;
+            if !armed {
+                // No timer: the strip must not stay ahead of the panes.
+                app(|a| a.tab_pending = None);
+                switch_tab(shown);
+                return;
+            }
+            show_tab(shown);
+            tabs_invalidate();
+        }
+        TabCoalesceOp::Idle => {
+            let had = app(|a| a.tab_pending.take().is_some());
+            if had {
+                disarm_tab_switch_timer();
+                show_active_tab();
+                tabs_invalidate();
+            }
+        }
+        TabCoalesceOp::Switch { to } => {
+            // Clear before the switch so a paint inside it does not still show the old highlight.
+            app(|a| a.tab_pending = None);
+            disarm_tab_switch_timer();
+            switch_tab(to);
+        }
+    }
+}
+
+unsafe fn disarm_tab_switch_timer() {
+    let main = app(|a| a.main);
+    if !main.0.is_null() {
+        _ = KillTimer(Some(main), TIMER_TAB_SWITCH);
+    }
+}
+
+/// Drop a deferred Ctrl+Tab without switching. A direct `switch_tab` is the switch.
+pub(crate) unsafe fn cancel_deferred_tab() {
+    let had = app(|a| a.tab_pending.take().is_some());
+    if had {
+        disarm_tab_switch_timer();
+    }
+}
+
+/// Run a deferred Ctrl+Tab now. No-op when the strip already matches the panes.
+pub(crate) unsafe fn flush_pending_tab() {
+    let (live, n, pending) = app(|a| (a.s.tab, a.s.tabs.len(), a.tab_pending));
+    if pending.is_none() {
+        return;
+    }
+    let (_state, op) = TabCoalesce { live, n, pending }.commit();
+    apply_tab_coalesce(TabCoalesce { live, n, pending }, op);
+}
+
+pub(crate) unsafe fn on_tab_switch_timer(main: HWND) {
+    _ = KillTimer(Some(main), TIMER_TAB_SWITCH);
+    // A switch already on the stack can pump this timer. Run it after that switch returns.
+    if tab_switch_busy() {
+        if IsWindow(Some(main)).as_bool() {
+            SetTimer(Some(main), TIMER_TAB_SWITCH, TAB_SWITCH_MS, None);
+        }
+        return;
+    }
+    if app(|a| a.main) != main {
+        return;
+    }
+    flush_pending_tab();
 }
 
 pub(crate) unsafe fn new_tab() {
@@ -1020,6 +1265,8 @@ pub(crate) unsafe fn new_tab() {
 
 /// A new window tab. `path` is pane 0's folder. `None` leaves every path empty, as `new_tab` does.
 pub(crate) unsafe fn new_tab_at(path: Option<&str>) {
+    flush_pending_tab();
+    let _busy = TabSwitchBusy::enter();
     end_rename(true);
     remember_tabs();
     detach_live();
@@ -1055,12 +1302,14 @@ pub(crate) unsafe fn new_tab_at(path: Option<&str>) {
     redraw_all();
     focus_view(active_pane());
     tabs_invalidate();
-    evict_park();
     note_save();
     refresh_save_button();
+    drop(_busy);
+    schedule_park_evict();
 }
 
 pub(crate) unsafe fn duplicate_tab(i: usize) {
+    flush_pending_tab();
     end_rename(true);
     remember_tabs();
     let j = app(|a| {
@@ -1092,6 +1341,7 @@ pub(crate) unsafe fn open_tabs_beside(tabs: Vec<Tab>) {
     if tabs.is_empty() {
         return;
     }
+    flush_pending_tab();
     end_rename(true);
     remember_tabs();
     let at = app(|a| {
@@ -1135,6 +1385,9 @@ pub(crate) unsafe fn close_tab(i: usize) {
     if !app(|a| can_close_tab(&a.s.tabs, i)) {
         return;
     }
+    // Callers that close "the active tab" flush before they read the index.
+    // A close of a specific tab still lands the deferred switch first, so indexes stay aligned.
+    flush_pending_tab();
     let active = app(|a| a.s.tab);
     if i == active {
         remember_tabs();
@@ -1202,6 +1455,7 @@ pub(crate) unsafe fn close_all_tabs() {
 }
 
 pub(crate) unsafe fn reopen_closed_at(k: usize) {
+    flush_pending_tab();
     end_rename(true);
     let j = app(|a| {
         if k >= a.closed.len() {
@@ -1225,6 +1479,7 @@ pub(crate) unsafe fn reorder_tab(from: usize, to: usize) {
     if from == to {
         return;
     }
+    flush_pending_tab();
     app(|a| {
         if from >= a.s.tabs.len() || to >= a.s.tabs.len() {
             return;
@@ -1400,6 +1655,8 @@ pub(crate) unsafe fn tab_menu(i: usize, x: i32, y: i32) {
 }
 
 pub(crate) unsafe fn install_session(s: Session) {
+    cancel_deferred_tab();
+    clear_shell_hold();
     destroy_every_pane();
     let filters = s.tabs.get(s.tab.min(s.tabs.len().saturating_sub(1))).map(|t| t.filters.clone()).unwrap_or_default();
     let n = s.tabs.len().max(1);
@@ -1472,6 +1729,7 @@ pub(crate) fn tab_wheel(delta: i32) {
 
 /// Every window tab, by name. The current one is checked and a locked one is marked.
 pub(crate) unsafe fn open_tab_list() {
+    flush_pending_tab();
     let (hwnd, names, locked, cur) = app(|a| {
         (
             a.tabs_hwnd,
@@ -1549,7 +1807,7 @@ fn tab_text(a: &App, i: usize) -> (String, String) {
 pub(crate) unsafe fn paint_tabs(h: HWND) {
     let (active, names, colors, mut hot, mut hot_close, hot_plus, hot_over, dpi, font, icon, accent, vertical, edge_hot) = app(|a| {
         (
-            a.s.tab,
+            shown_tab(a.s.tab, a.tab_pending, a.s.tabs.len()),
             (0..a.s.tabs.len()).map(|i| tab_text(a, i).0).collect::<Vec<_>>(),
             a.s.tabs.iter().map(|t| t.color).collect::<Vec<_>>(),
             a.tab_hot,
@@ -2689,6 +2947,143 @@ mod tests {
         assert_eq!(tab_label_room(labeled, Some(close), 96, true, true), 135);
         assert_eq!(tab_label_room(labeled, Some(close), 96, true, false), 140);
         assert_eq!(tab_label_room(labeled, Some(close), 96, false, true), 140);
+    }
+
+    #[test]
+    fn park_cache_matches_v0_3_0() {
+        assert_eq!(PARK_CACHE, 2);
+        assert_eq!(PARK_EVICT_MS, 100);
+    }
+
+    #[test]
+    fn park_victim_keeps_two_tabs_and_drops_the_oldest() {
+        let counts = vec![0, 2, 0, 4];
+        // Two warm tabs fit. A full grid of panes is still one tab.
+        assert_eq!(park_victim(&counts, &[3, 1], PARK_CACHE), None);
+        assert_eq!(park_victim(&[16, 16], &[0, 1], PARK_CACHE), None);
+        assert_eq!(park_victim(&counts, &[3, 1], 1), Some(3));
+        // An lru entry with no browsers is skipped. A stale index is ignored.
+        assert_eq!(park_victim(&counts, &[0, 9, 1], 1), Some(1));
+        assert_eq!(park_victim(&counts, &[], 0), Some(1));
+    }
+
+    #[test]
+    fn park_evictions_stop_at_the_tab_cache() {
+        let counts = vec![1, 4, 16, 2];
+        let lru = vec![0, 1, 2, 3];
+        // Four warm tabs, cache of two: drop the two oldest. Pane count does not matter.
+        assert_eq!(park_evictions(counts, lru, PARK_CACHE), vec![0, 1]);
+        assert!(park_evictions(vec![16, 16], vec![1, 0], PARK_CACHE).is_empty());
+        assert!(park_evictions(vec![0, 0], vec![], 0).is_empty());
+    }
+
+    #[test]
+    fn navigating_slots_stay_tracked_until_they_finish() {
+        // Bits 0 and 2 were created for this switch and are still browsing.
+        assert_eq!(slots_still_busy(0b101, &[true, false, true]), 0b101);
+        // Pane 0 finished. Only pane 2 is still browsing.
+        assert_eq!(slots_still_busy(0b101, &[false, false, true]), 0b100);
+        assert_eq!(slots_still_busy(0b101, &[false, false, false]), 0);
+        // A busy pane this switch did not create is not held.
+        assert_eq!(slots_still_busy(0b001, &[true, true]), 0b001);
+        assert_eq!(slots_still_busy(0, &[true, true, true]), 0);
+    }
+
+    #[test]
+    fn cold_switch_shows_the_new_chrome_not_the_outgoing_tab() {
+        assert_eq!(SHELL_HOLD_MS, 50);
+        // Still browsing, under the cap: new address bar, neutral list. Not the old tab.
+        assert_eq!(cold_face(true, 0, SHELL_HOLD_MS), ColdFace::Neutral);
+        assert_eq!(cold_face(true, 49, SHELL_HOLD_MS), ColdFace::Neutral);
+        // Cap elapsed, or the folder is ready: show the new shell view (the list may be empty).
+        assert_eq!(cold_face(true, 50, SHELL_HOLD_MS), ColdFace::Shell);
+        assert_eq!(cold_face(false, 0, SHELL_HOLD_MS), ColdFace::Shell);
+        assert_eq!(shell_still_held(0b101, &[true, false, true], 0, SHELL_HOLD_MS), 0b101);
+        assert_eq!(shell_still_held(0b101, &[false, false, true], 10, SHELL_HOLD_MS), 0b100);
+        assert_eq!(shell_still_held(0b101, &[true, false, true], SHELL_HOLD_MS, SHELL_HOLD_MS), 0);
+        assert_eq!(shell_still_held(0b101, &[false, false, false], 0, SHELL_HOLD_MS), 0);
+    }
+
+    #[test]
+    fn three_tabs_keep_both_parked_browsers() {
+        // Counts are hidden tabs only. The tab on screen is not in the list.
+        // Cache of two hidden tabs: cycling 0→1→2→0 never drops the one we return to.
+        let steps = [
+            (vec![1, 0, 0], vec![0]),
+            (vec![1, 1, 0], vec![0, 1]),
+            (vec![0, 1, 1], vec![1, 2]),
+            (vec![1, 0, 1], vec![2, 0]),
+        ];
+        for (counts, lru) in steps {
+            assert!(
+                park_evictions(counts.clone(), lru.clone(), PARK_CACHE).is_empty(),
+                "dropped a warm tab {counts:?} lru={lru:?}"
+            );
+        }
+        // A fourth warm hidden tab is the oldest, not the one just parked.
+        assert_eq!(park_evictions(vec![1, 1, 1], vec![0, 1, 2], PARK_CACHE), vec![0]);
+    }
+
+    fn coal(live: usize, n: usize, pending: Option<usize>) -> TabCoalesce {
+        TabCoalesce { live, n, pending }
+    }
+
+    #[test]
+    fn ctrl_tab_defers_and_a_repeat_moves_the_strip() {
+        assert_eq!(TAB_SWITCH_MS, 70);
+        let (s, op) = coal(0, 4, None).step(1);
+        assert_eq!(op, TabCoalesceOp::Defer { shown: 1 });
+        assert_eq!(s.pending, Some(1));
+        assert_eq!(s.live, 0);
+        assert_eq!(s.shown(), 1);
+        let (s, op) = s.step(1);
+        assert_eq!(op, TabCoalesceOp::Defer { shown: 2 });
+        assert_eq!(s.shown(), 2);
+        // A repeat steps from the strip, not from the panes still on 0.
+        let (s, op) = s.step(-1);
+        assert_eq!(op, TabCoalesceOp::Defer { shown: 1 });
+        let (s, op) = s.step(-1);
+        assert_eq!(op, TabCoalesceOp::Idle);
+        assert_eq!(s.pending, None);
+        assert_eq!(s.live, 0);
+        assert_eq!(s.shown(), 0);
+    }
+
+    #[test]
+    fn ctrl_tab_wraps_and_commit_switches_once() {
+        let (s, op) = coal(0, 4, None).step(-1);
+        assert_eq!(op, TabCoalesceOp::Defer { shown: 3 });
+        let (s, op) = s.commit();
+        assert_eq!(op, TabCoalesceOp::Switch { to: 3 });
+        assert_eq!((s.live, s.pending), (3, None));
+        // Ctrl key-up after the switch has landed does nothing.
+        let (s, op) = s.commit();
+        assert_eq!(op, TabCoalesceOp::Idle);
+        assert_eq!(s.live, 3);
+        // A pending index past the end is dropped, not switched to.
+        let (s, op) = coal(1, 3, Some(9)).commit();
+        assert_eq!(op, TabCoalesceOp::Idle);
+        assert_eq!(s.pending, None);
+        assert_eq!(s.live, 1);
+    }
+
+    #[test]
+    fn one_tab_does_not_arm_a_switch() {
+        let (s, op) = coal(0, 1, None).step(1);
+        assert_eq!(op, TabCoalesceOp::Idle);
+        assert_eq!(s.pending, None);
+        assert_eq!(s.shown(), 0);
+        let (s, op) = coal(0, 0, None).step(1);
+        assert_eq!(op, TabCoalesceOp::Idle);
+        assert_eq!(s.live, 0);
+    }
+
+    #[test]
+    fn shown_tab_ignores_a_stale_pending_index() {
+        assert_eq!(shown_tab(1, Some(3), 4), 3);
+        assert_eq!(shown_tab(1, Some(9), 4), 1);
+        assert_eq!(shown_tab(1, None, 4), 1);
+        assert_eq!(shown_tab(0, None, 0), 0);
     }
 }
 

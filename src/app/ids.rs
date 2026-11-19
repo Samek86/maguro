@@ -93,7 +93,16 @@ pub(crate) const SAVE_SOON_MS: u32 = 1500;
 pub(crate) const SAVE_LATEST_MS: u128 = 30_000;
 /// Hidden tabs that still hold Explorer windows. Two, so moving among three tabs
 /// does not build the browser again. Older hidden tabs keep only their saved grid.
+/// This is the steady-state cap: a switch may park one more tab until eviction runs.
 pub(crate) const PARK_CACHE: usize = 2;
+/// How long after a switch before browsers over [`PARK_CACHE`] are destroyed.
+/// Destruction stays off the switch itself. Once the timer fires, the live set
+/// is the same size it was in v0.3.0.
+pub(crate) const PARK_EVICT_MS: u32 = 100;
+/// A cold tab shows its own chrome at once. The shell view stays hidden at most
+/// this long, then it is shown even if the list is still empty. The outgoing
+/// tab is never left on top of that chrome.
+pub(crate) const SHELL_HOLD_MS: u32 = 50;
 pub(crate) const TIMER_NEWF: usize = 6; // on a pane: select and rename a folder just created
 pub(crate) const TIMER_NEWFILE: usize = 7; // on a pane: select and rename a file just created
 pub(crate) const TIMER_WINS: usize = 8; // after the first window is shown, open the other saved windows
@@ -117,6 +126,14 @@ pub(crate) const TIMER_TAB_HOVER: usize = 25; // file drag resting on a window t
 pub(crate) const TIMER_DLG_RETRY: usize = 26; // file dialog has no filename box yet; look again
 pub(crate) const TIMER_SPIN: usize = 27; // pane: next frame of the F5 refresh spin
 pub(crate) const TIMER_LIST: usize = 28; // trailing compare after a burst, plus the stale-list grace and restore polls
+/// Park eviction. Fired after a tab switch so browsers are not destroyed mid-switch.
+pub(crate) const TIMER_PARK: usize = 29;
+/// Show a cold tab's shell view if navigation has not finished.
+pub(crate) const TIMER_SHELL: usize = 31;
+/// Coalesce Ctrl+Tab / Ctrl+Shift+Tab. The strip moves at once; the panes wait this long,
+/// or until Ctrl is released. Restarted on each key repeat.
+pub(crate) const TIMER_TAB_SWITCH: usize = 30;
+pub(crate) const TAB_SWITCH_MS: u32 = 70;
 pub(crate) const WM_SHELL_CHANGE: u32 = WM_APP + 88; // SHChangeNotifyRegister delivery
 pub(crate) const WM_LIST_NOW: u32 = WM_APP + 89; // a file operation finished; compare its folders
 pub(crate) const WM_FAST_NOTE: u32 = WM_APP + 94; // fast copy/move finished; the note text is queued for the status line

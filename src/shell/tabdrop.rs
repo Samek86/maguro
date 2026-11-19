@@ -49,12 +49,13 @@ struct Live {
     obj: usize,
     hover: Option<Hover>,
     /// `switch_tab` hides panes. A drag-leave from that hide must not drop the hover.
-    switching: bool,
+    /// A count, so a flush and the switch it causes can nest.
+    switching: u32,
 }
 
 impl Live {
     fn new() -> Live {
-        Live { files: false, srcs: Vec::new(), allowed: 0, obj: 0, hover: None, switching: false }
+        Live { files: false, srcs: Vec::new(), allowed: 0, obj: 0, hover: None, switching: 0 }
     }
 }
 
@@ -66,14 +67,20 @@ struct Switching;
 
 impl Switching {
     fn arm() -> Switching {
-        LIVE.with(|l| l.borrow_mut().switching = true);
+        LIVE.with(|l| {
+            let mut g = l.borrow_mut();
+            g.switching = g.switching.saturating_add(1);
+        });
         Switching
     }
 }
 
 impl Drop for Switching {
     fn drop(&mut self) {
-        LIVE.with(|l| l.borrow_mut().switching = false);
+        LIVE.with(|l| {
+            let mut g = l.borrow_mut();
+            g.switching = g.switching.saturating_sub(1);
+        });
     }
 }
 
@@ -330,7 +337,7 @@ fn arm_hover(hwnd: HWND, hit: Hit) {
 }
 
 fn clear_hover() {
-    if LIVE.with(|l| l.borrow().switching) {
+    if LIVE.with(|l| l.borrow().switching > 0) {
         return;
     }
     let prev = LIVE.with(|l| l.borrow_mut().hover.take());
@@ -343,7 +350,7 @@ fn clear_hover() {
 fn wipe() {
     let prev = LIVE.with(|l| {
         let mut g = l.borrow_mut();
-        if g.switching {
+        if g.switching > 0 {
             return None;
         }
         g.files = false;
@@ -364,10 +371,13 @@ fn activate(hit: Hit) {
     if app(|a| a.tab_drag.is_some() || a.pane_drag.is_some() || a.pane_tab_drag.is_some()) {
         return;
     }
+    // The strip may be ahead of the panes. Land that switch before deciding which tab is current.
+    // The guard stays up so hiding panes does not look like the drag left the tab.
+    let _hold = Switching::arm();
+    unsafe { flush_pending_tab() };
     if already(&hit) {
         return;
     }
-    let _hold = Switching::arm();
     match hit {
         Hit::Window(i) => {
             let (n, cur) = app(|a| (a.s.tabs.len(), a.s.tab));
@@ -492,6 +502,8 @@ fn perform(d: &Ref<IDataObject>, srcs: Vec<String>, dst: String, mut mv: bool) -
 }
 
 fn commit(d: &Ref<IDataObject>, key: MODIFIERKEYS_FLAGS, effect: *mut DROPEFFECT, hit: Hit) {
+    let _hold = Switching::arm();
+    unsafe { flush_pending_tab() };
     note_allowed(read_effect(effect));
     refresh_srcs(d);
     let (ctrl, shift) = mods(key);
@@ -532,7 +544,7 @@ pub(crate) unsafe fn pane_tab_drag_over(hwnd: HWND, key: MODIFIERKEYS_FLAGS, pt:
 
 pub(crate) unsafe fn pane_tab_drag_leave(hwnd: HWND) {
     bind_hwnd(hwnd);
-    if LIVE.with(|l| l.borrow().switching) {
+    if LIVE.with(|l| l.borrow().switching > 0) {
         return;
     }
     if let Some(hit) = release_hit(hwnd, false) {
@@ -659,7 +671,7 @@ impl IDropTarget_Impl for StripDrop_Impl {
     fn DragLeave(&self) -> Result<()> {
         unsafe {
             bind_hwnd(self.hwnd);
-            if !LIVE.with(|l| l.borrow().switching) {
+            if !LIVE.with(|l| l.borrow().switching > 0) {
                 if let Some(hit) = release_hit(self.hwnd, true) {
                     activate(hit);
                     wipe();

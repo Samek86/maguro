@@ -1962,8 +1962,14 @@ unsafe fn run_command(owner: HWND, action: Action, doc: &Doc, lay: &BarLay, from
         Action::BatchRename => crate::rename::open_pane(pane),
         Action::InvertSelection => crate::invert_selection(pane),
         Action::NewTab => crate::new_tab(),
-        Action::CloseTab => crate::close_tab(app(|x| x.s.tab)),
-        Action::DuplicateTab => crate::duplicate_tab(app(|x| x.s.tab)),
+        Action::CloseTab => {
+            crate::flush_pending_tab();
+            crate::close_tab(app(|x| x.s.tab));
+        }
+        Action::DuplicateTab => {
+            crate::flush_pending_tab();
+            crate::duplicate_tab(app(|x| x.s.tab));
+        }
         Action::ShowHidden => crate::toggle_hidden(),
         Action::Zoom => crate::toggle_zoom(),
         Action::QuickLook => crate::open_peek(pane),
@@ -2012,6 +2018,7 @@ unsafe fn open_saved_file(owner: HWND, path: &str) {
 }
 
 unsafe fn popup_tab_color(owner: HWND, from: i32) {
+    crate::flush_pending_tab();
     let Ok(menu) = CreatePopupMenu() else { return };
     let _ = AppendMenuW(menu, MF_STRING, 1, &HSTRING::from(crate::tr(crate::Key::None)));
     for (k, &(_, label)) in crate::TAB_COLORS.iter().enumerate() {

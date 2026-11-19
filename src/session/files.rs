@@ -74,6 +74,8 @@ pub(crate) unsafe fn note_save() {
 
 // Save button / Ctrl+S: overwrite the active tab's session file. A tab with none asks for a name.
 pub(crate) unsafe fn save_current() {
+    // Save the tab the strip shows. A deferred Ctrl+Tab has not moved `s.tab` yet.
+    flush_pending_tab();
     remember_tabs();
     let (i, path) = app(|a| {
         let i = a.s.tab;
