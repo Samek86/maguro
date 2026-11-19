@@ -3681,6 +3681,13 @@ impl IExplorerBrowserEvents_Impl for Events_Impl {
             forget_pane_list(i);
             schedule_pane_drop(i);
             super::marks_overlay::on_view_mode(i);
+            // Born hidden when this switch created the browser, so the view cannot
+            // copy the previous tab's list. `note_shell_ready` shows it.
+            if let Some(sv) = sv.as_ref() {
+                if let Ok(h) = sv.GetWindow() {
+                    hold_new_shell(i, h);
+                }
+            }
         }
         Ok(())
     }
@@ -4689,8 +4696,8 @@ fn mark_nav_busy(i: usize, step: NavBusyStep) {
     });
     set_nav_busy(i, next);
     if !next {
-        // A tab switch may be holding the previous panes up until this browser has a folder.
-        unsafe { note_tab_cover_ready(i) };
+        // The new chrome is already up. Show this shell view now that the folder has landed.
+        unsafe { note_shell_ready(i) };
     }
 }
 

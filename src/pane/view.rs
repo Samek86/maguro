@@ -432,22 +432,20 @@ pub(crate) unsafe fn relayout() {
             }
         }
     }
-    // A new browser that is still navigating stays underneath the outgoing panes.
-    // Showing it on top now would paint the previous tab's pixels into the new window
-    // (ShowWindow copies the screen) and the list would keep them until Explorer felt like painting.
-    let cover = refresh_tab_cover();
+    // New panes go on top, then the parked ones hide. A paint that escapes the redraw
+    // hold therefore shows the new chrome, never the tab we just left.
+    // A shell view that is still browsing stays hidden (see `conceal_held_shells`)
+    // so it cannot keep the previous list's pixels. The pane fill is the neutral card.
+    refresh_shell_hold();
     for (h, on) in &shown {
         if *on {
-            show_pane_nocopy(*h, !cover);
+            show_pane_nocopy(*h, true);
         } else {
             hide_pane_nocopy(*h);
         }
     }
-    if cover {
-        raise_cover_panes();
-    } else {
-        hide_parked_panes();
-    }
+    hide_parked_panes();
+    conceal_held_shells();
     if !preview_h.0.is_null() && show_preview {
         _ = ShowWindow(preview_h, SW_SHOW);
         // Above the file panes, so a zoomed pane stops at the splitter instead of covering the preview.
@@ -712,8 +710,24 @@ impl Drop for RedrawHold {
     }
 }
 
-/// Panes that were missing at the start of this switch and are still navigating.
-pub(crate) fn cover_still_waiting(bits: u32, busy: &[bool]) -> u32 {
+/// What a pane created for this switch shows while its browser is still navigating.
+/// The outgoing tab is not a choice: its address bar would disagree with the strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ColdFace {
+    /// New address bar and breadcrumbs. The list area is the pane background.
+    Neutral,
+    /// New chrome plus the shell view. The list may still be empty past the cap.
+    Shell,
+}
+
+/// `navigating` is the slot this switch created and that has not finished.
+/// `waited_ms` is how long the chrome has been up. At `cap_ms` the shell view is shown.
+pub(crate) fn cold_face(navigating: bool, waited_ms: u32, cap_ms: u32) -> ColdFace {
+    if navigating && waited_ms < cap_ms { ColdFace::Neutral } else { ColdFace::Shell }
+}
+
+/// Slots in `bits` that are still browsing. A busy slot this switch did not create is ignored.
+pub(crate) fn slots_still_busy(bits: u32, busy: &[bool]) -> u32 {
     let mut out = 0u32;
     for (i, &is_busy) in busy.iter().enumerate() {
         if i >= 32 {
@@ -726,9 +740,40 @@ pub(crate) fn cover_still_waiting(bits: u32, busy: &[bool]) -> u32 {
     out
 }
 
-/// The incoming tab has empty slots, so its browsers will be created in `relayout`.
-/// Remember the outgoing windows; they stay on top until those browsers have navigated.
-pub(crate) fn arm_tab_cover(parked_tab: usize) {
+/// Shell views to keep hidden. Past `cap_ms` every bit drops, so a slow folder still
+/// shows the new pane rather than the one we left.
+pub(crate) fn shell_still_held(bits: u32, busy: &[bool], waited_ms: u32, cap_ms: u32) -> u32 {
+    if waited_ms >= cap_ms {
+        return 0;
+    }
+    slots_still_busy(bits, busy)
+}
+
+const SHELL_HOLD_SUB: usize = 9;
+
+thread_local! {
+    static SHELL_HOLD_BITS: Cell<u32> = const { Cell::new(0) };
+}
+
+fn store_shell_bits(bits: u32) {
+    SHELL_HOLD_BITS.with(|c| c.set(bits));
+}
+
+fn shell_bit(i: usize) -> bool {
+    i < 32 && SHELL_HOLD_BITS.with(|c| c.get() & (1 << i) != 0)
+}
+
+fn write_shell_hold(a: &mut App, bits: u32) {
+    a.shell_hold = bits;
+    if bits == 0 {
+        a.shell_hold_at = None;
+    }
+    store_shell_bits(bits);
+}
+
+/// The incoming tab has empty slots, so `relayout` will create those browsers.
+/// Their shell views stay hidden until navigation finishes. The outgoing windows do not.
+pub(crate) fn arm_shell_hold() {
     app(|a| {
         let n = a.s.panes().min(32);
         let mut bits = 0u32;
@@ -737,53 +782,74 @@ pub(crate) fn arm_tab_cover(parked_tab: usize) {
                 bits |= 1 << i;
             }
         }
-        let hwnds = if bits == 0 {
-            Vec::new()
-        } else {
-            a.park.get(parked_tab).map(|set| set.iter().flatten().map(|p| p.hwnd).filter(|h| !h.0.is_null()).collect::<Vec<_>>()).unwrap_or_default()
-        };
-        a.cover_hwnds.clear();
-        a.cover_hwnds.extend(hwnds);
-        if a.cover_hwnds.is_empty() {
-            bits = 0;
+        a.shell_hold_at = if bits == 0 { None } else { Some(Instant::now()) };
+        write_shell_hold(a, bits);
+    });
+}
+
+fn refresh_shell_hold() {
+    app(|a| {
+        if a.shell_hold == 0 {
+            store_shell_bits(0);
+            return;
         }
-        a.tab_cover = bits;
+        let waited = a.shell_hold_at.map(|t| t.elapsed().as_millis().min(u128::from(u32::MAX)) as u32).unwrap_or(0);
+        // Do not drop a slot just because `nav_busy` has not flipped yet. Clearing the
+        // bit here would leave a view hidden in `OnViewCreated` with nobody to show it.
+        // `note_shell_ready` drops a slot when its navigation finishes. The cap drops the rest.
+        let still = vec![true; 32];
+        let bits = shell_still_held(a.shell_hold, &still, waited, SHELL_HOLD_MS);
+        write_shell_hold(a, bits);
     });
 }
 
 /// Navigation of a pane created for this switch finished (or failed).
-/// When the last one does, uncover in one redraw.
-pub(crate) unsafe fn note_tab_cover_ready(i: usize) {
+/// Show that shell view. The outgoing tab was never covering it.
+pub(crate) unsafe fn note_shell_ready(i: usize) {
     if i >= 32 {
         return;
     }
-    let uncover = app(|a| {
-        if a.tab_cover & (1 << i) == 0 {
-            return false;
+    let pane = app(|a| {
+        if a.shell_hold & (1 << i) == 0 {
+            return None;
         }
-        a.tab_cover &= !(1 << i);
-        a.tab_cover == 0
+        let hwnd = a.panes.get(i).and_then(|p| p.as_ref()).map(|p| p.hwnd).unwrap_or_default();
+        write_shell_hold(a, a.shell_hold & !(1 << i));
+        Some(hwnd)
     });
-    if uncover {
-        reveal_tab_cover();
+    let Some(pane) = pane else { return };
+    if app(|a| a.shell_hold) == 0 {
+        disarm_shell_timer();
+    }
+    reveal_shell_on(i, pane);
+    if redraw_held() {
+        return;
+    }
+    if !pane.0.is_null() && IsWindow(Some(pane)).as_bool() {
+        _ = RedrawWindow(Some(pane), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    }
+    if app(|a| a.s.active) == i {
+        focus_view(i);
     }
 }
 
-/// Hide the outgoing panes and paint the new ones. No-op when nothing is covering.
-pub(crate) unsafe fn reveal_tab_cover() {
-    let had = app(|a| {
-        let had = a.tab_cover != 0 || !a.cover_hwnds.is_empty();
-        a.tab_cover = 0;
-        a.cover_hwnds.clear();
-        had
+/// Show every shell view this switch was still hiding, then paint once.
+pub(crate) unsafe fn release_shell_hold() {
+    let panes = app(|a| {
+        let bits = a.shell_hold;
+        let panes: Vec<(usize, HWND)> = (0..32)
+            .filter(|i| bits & (1 << i) != 0)
+            .filter_map(|i| a.panes.get(i).and_then(|p| p.as_ref()).map(|p| (i, p.hwnd)))
+            .collect();
+        write_shell_hold(a, 0);
+        panes
     });
-    if !had {
+    disarm_shell_timer();
+    if panes.is_empty() {
         return;
     }
-    hide_parked_panes();
-    let shown = app(|a| a.panes.iter().flatten().map(|p| p.hwnd).filter(|h| !h.0.is_null()).collect::<Vec<_>>());
-    for h in &shown {
-        show_pane_nocopy(*h, true);
+    for (i, pane) in panes {
+        reveal_shell_on(i, pane);
     }
     if redraw_held() {
         return;
@@ -792,21 +858,34 @@ pub(crate) unsafe fn reveal_tab_cover() {
     if !main.0.is_null() && IsWindow(Some(main)).as_bool() {
         _ = RedrawWindow(Some(main), None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
+    focus_view(active_pane());
 }
 
-fn refresh_tab_cover() -> bool {
-    app(|a| {
-        if a.tab_cover == 0 {
-            return false;
-        }
-        let busy: Vec<bool> = (0..32).map(|i| a.panes.get(i).and_then(|p| p.as_ref()).is_some_and(|p| p.nav_busy)).collect();
-        let bits = cover_still_waiting(a.tab_cover, &busy);
-        a.tab_cover = bits;
-        if bits == 0 {
-            a.cover_hwnds.clear();
-        }
-        bits != 0
-    })
+pub(crate) unsafe fn clear_shell_hold() {
+    app(|a| write_shell_hold(a, 0));
+    disarm_shell_timer();
+}
+
+unsafe fn disarm_shell_timer() {
+    let main = app(|a| a.main);
+    if !main.0.is_null() && IsWindow(Some(main)).as_bool() {
+        _ = KillTimer(Some(main), TIMER_SHELL);
+    }
+}
+
+/// Arm the cap. No-op when every new shell view is already showing.
+pub(crate) unsafe fn schedule_shell_hold() {
+    let pending = app(|a| a.shell_hold != 0);
+    if !pending {
+        disarm_shell_timer();
+        return;
+    }
+    let main = app(|a| a.main);
+    if main.0.is_null() || !IsWindow(Some(main)).as_bool() {
+        release_shell_hold();
+        return;
+    }
+    SetTimer(Some(main), TIMER_SHELL, SHELL_HOLD_MS, None);
 }
 
 /// Show without copying the pixels underneath. Those pixels are the previous tab's list,
@@ -829,13 +908,65 @@ unsafe fn hide_pane_nocopy(h: HWND) {
     _ = SetWindowPos(h, None, 0, 0, 0, 0, flags);
 }
 
-unsafe fn raise_cover_panes() {
-    let hwnds = app(|a| a.cover_hwnds.clone());
-    let flags = SET_WINDOW_POS_FLAGS(SWP_NOMOVE.0 | SWP_NOSIZE.0 | SWP_NOACTIVATE.0 | SWP_NOREDRAW.0 | SWP_SHOWWINDOW.0);
-    for h in hwnds {
-        if !h.0.is_null() && IsWindow(Some(h)).as_bool() {
-            // Keep the outgoing list's own pixels. NOCOPYBITS here would throw them away.
-            _ = SetWindowPos(h, Some(HWND_TOP), 0, 0, 0, 0, flags);
+/// Block a show while this pane's shell view is held. The pane chrome is already visible.
+unsafe extern "system" fn hold_shell_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, pane: usize) -> LRESULT {
+    if msg == WM_WINDOWPOSCHANGING && shell_bit(pane) {
+        let pos = &mut *(lp.0 as *mut WINDOWPOS);
+        pos.flags.0 |= SWP_HIDEWINDOW.0;
+        pos.flags.0 &= !SWP_SHOWWINDOW.0;
+    }
+    DefSubclassProc(hwnd, msg, wp, lp)
+}
+
+/// A shell view born during this switch. Hidden until navigation finishes, so it
+/// cannot copy the previous tab's list into itself.
+pub(crate) unsafe fn hold_new_shell(i: usize, hwnd: HWND) {
+    if !shell_bit(i) || hwnd.0.is_null() || !IsWindow(Some(hwnd)).as_bool() {
+        return;
+    }
+    _ = SetWindowSubclass(hwnd, Some(hold_shell_proc), SHELL_HOLD_SUB, i);
+    hide_pane_nocopy(hwnd);
+}
+
+unsafe fn shell_hosts(i: usize, pane: HWND) -> Vec<HWND> {
+    let mut hosts = Vec::new();
+    if !pane.0.is_null() && IsWindow(Some(pane)).as_bool() {
+        for (class, hwnd) in shell_children(pane) {
+            if class == "SHELLDLL_DefView" {
+                hosts.push(hwnd);
+            }
+        }
+    }
+    if hosts.is_empty() {
+        if let Some(sv) = view_of::<IShellView>(i) {
+            if let Ok(h) = sv.GetWindow() {
+                if !h.0.is_null() {
+                    hosts.push(h);
+                }
+            }
+        }
+    }
+    hosts
+}
+
+unsafe fn reveal_shell_on(i: usize, pane: HWND) {
+    for h in shell_hosts(i, pane) {
+        if IsWindow(Some(h)).as_bool() {
+            _ = RemoveWindowSubclass(h, Some(hold_shell_proc), SHELL_HOLD_SUB);
+            show_pane_nocopy(h, false);
+        }
+    }
+}
+
+/// Hide shell views that are still browsing. The pane window itself stays up.
+unsafe fn conceal_held_shells() {
+    let panes = app(|a| {
+        let bits = a.shell_hold;
+        (0..32).filter(|i| bits & (1 << i) != 0).filter_map(|i| a.panes.get(i).and_then(|p| p.as_ref()).map(|p| (i, p.hwnd))).collect::<Vec<_>>()
+    });
+    for (i, pane) in panes {
+        for h in shell_hosts(i, pane) {
+            hold_new_shell(i, h);
         }
     }
 }
@@ -851,13 +982,11 @@ unsafe fn invalidate_pane_tree(h: HWND) {
 }
 
 /// Hide Explorer windows that belong to a tab that is not on screen.
-/// Windows covering a browser that has not navigated yet stay up.
 /// The live set is left alone when a hwnd is still in both (it should not be).
 unsafe fn hide_parked_panes() {
     let parked = app(|a| {
         let live: Vec<HWND> = a.panes.iter().flatten().map(|p| p.hwnd).collect();
-        let cover = if a.tab_cover == 0 { Vec::new() } else { a.cover_hwnds.clone() };
-        a.park.iter().flatten().flatten().map(|p| p.hwnd).filter(|h| !h.0.is_null() && !live.contains(h) && !cover.contains(h)).collect::<Vec<_>>()
+        a.park.iter().flatten().flatten().map(|p| p.hwnd).filter(|h| !h.0.is_null() && !live.contains(h)).collect::<Vec<_>>()
     });
     for h in parked {
         hide_pane_nocopy(h);

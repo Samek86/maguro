@@ -99,6 +99,10 @@ pub(crate) const PARK_CACHE: usize = 2;
 /// Destruction stays off the switch itself. Once the timer fires, the live set
 /// is the same size it was in v0.3.0.
 pub(crate) const PARK_EVICT_MS: u32 = 100;
+/// A cold tab shows its own chrome at once. The shell view stays hidden at most
+/// this long, then it is shown even if the list is still empty. The outgoing
+/// tab is never left on top of that chrome.
+pub(crate) const SHELL_HOLD_MS: u32 = 50;
 pub(crate) const TIMER_NEWF: usize = 6; // on a pane: select and rename a folder just created
 pub(crate) const TIMER_NEWFILE: usize = 7; // on a pane: select and rename a file just created
 pub(crate) const TIMER_WINS: usize = 8; // after the first window is shown, open the other saved windows
@@ -124,6 +128,8 @@ pub(crate) const TIMER_SPIN: usize = 27; // pane: next frame of the F5 refresh s
 pub(crate) const TIMER_LIST: usize = 28; // trailing compare after a burst, plus the stale-list grace and restore polls
 /// Park eviction. Fired after a tab switch so browsers are not destroyed mid-switch.
 pub(crate) const TIMER_PARK: usize = 29;
+/// Show a cold tab's shell view if navigation has not finished.
+pub(crate) const TIMER_SHELL: usize = 31;
 /// Coalesce Ctrl+Tab / Ctrl+Shift+Tab. The strip moves at once; the panes wait this long,
 /// or until Ctrl is released. Restarted on each key repeat.
 pub(crate) const TIMER_TAB_SWITCH: usize = 30;

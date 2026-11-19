@@ -886,6 +886,20 @@ pub(crate) unsafe fn schedule_park_evict() {
     SetTimer(Some(main), TIMER_PARK, PARK_EVICT_MS, None);
 }
 
+pub(crate) unsafe fn on_shell_timer(main: HWND) {
+    _ = KillTimer(Some(main), TIMER_SHELL);
+    if tab_switch_busy() {
+        if IsWindow(Some(main)).as_bool() {
+            SetTimer(Some(main), TIMER_SHELL, SHELL_HOLD_MS, None);
+        }
+        return;
+    }
+    if app(|a| a.main) != main {
+        return;
+    }
+    release_shell_hold();
+}
+
 pub(crate) unsafe fn on_park_timer(main: HWND) {
     _ = KillTimer(Some(main), TIMER_PARK);
     if tab_switch_busy() {
@@ -894,8 +908,6 @@ pub(crate) unsafe fn on_park_timer(main: HWND) {
         }
         return;
     }
-    // A cold tab that has not navigated yet uncovers here, then the cache drops to two.
-    reveal_tab_cover();
     evict_park();
 }
 
@@ -1019,10 +1031,7 @@ pub(crate) unsafe fn destroy_set(set: Vec<Option<Pane>>) {
 }
 
 pub(crate) unsafe fn destroy_every_pane() {
-    app(|a| {
-        a.tab_cover = 0;
-        a.cover_hwnds.clear();
-    });
+    clear_shell_hold();
     for i in 0..MAXP {
         destroy_pane(i);
     }
@@ -1051,9 +1060,9 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     // Busy keeps a park-evict timer that fires from a nested message pump from destroying browsers mid-switch.
     let _busy = TabSwitchBusy::enter();
     let _hold = RedrawHold::new(main);
-    // A previous cold switch may still be covering with the outgoing panes. Drop that
-    // before this switch parks a new set, so two tabs are not left on screen together.
-    reveal_tab_cover();
+    // A previous cold switch may still be hiding its shell view. Show that view
+    // before this switch parks the panes, so a hidden list is not what comes back.
+    release_shell_hold();
     if j == cur {
         show_active_tab();
         tabs_invalidate();
@@ -1086,9 +1095,9 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     put_filters(&filters);
     attach_live();
     show_active_tab();
-    // `cur` is the tab just parked. Empty incoming slots are created in relayout;
-    // those outgoing windows stay up until the new browsers have navigated.
-    arm_tab_cover(cur);
+    // Empty incoming slots are created in relayout. Their shell views stay hidden
+    // until navigation finishes. The parked windows are not kept on top.
+    arm_shell_hold();
     relayout();
     sync_filter_edits();
     focus_view(active_pane());
@@ -1097,6 +1106,7 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     refresh_save_button();
     drop(_hold);
     drop(_busy);
+    schedule_shell_hold();
     schedule_park_evict();
 }
 
@@ -1646,10 +1656,7 @@ pub(crate) unsafe fn tab_menu(i: usize, x: i32, y: i32) {
 
 pub(crate) unsafe fn install_session(s: Session) {
     cancel_deferred_tab();
-    app(|a| {
-        a.tab_cover = 0;
-        a.cover_hwnds.clear();
-    });
+    clear_shell_hold();
     destroy_every_pane();
     let filters = s.tabs.get(s.tab.min(s.tabs.len().saturating_sub(1))).map(|t| t.filters.clone()).unwrap_or_default();
     let n = s.tabs.len().max(1);
@@ -2971,15 +2978,50 @@ mod tests {
     }
 
     #[test]
-    fn cover_waits_only_for_panes_still_navigating() {
-        // Bits 0 and 2 were created for this switch. Both still busy: keep the old panes up.
-        assert_eq!(cover_still_waiting(0b101, &[true, false, true]), 0b101);
-        // Pane 0 finished. Only pane 2 still covers.
-        assert_eq!(cover_still_waiting(0b101, &[false, false, true]), 0b100);
-        assert_eq!(cover_still_waiting(0b101, &[false, false, false]), 0);
-        // A busy pane this switch did not create does not keep the old list on screen.
-        assert_eq!(cover_still_waiting(0b001, &[true, true]), 0b001);
-        assert_eq!(cover_still_waiting(0, &[true, true, true]), 0);
+    fn navigating_slots_stay_tracked_until_they_finish() {
+        // Bits 0 and 2 were created for this switch and are still browsing.
+        assert_eq!(slots_still_busy(0b101, &[true, false, true]), 0b101);
+        // Pane 0 finished. Only pane 2 is still browsing.
+        assert_eq!(slots_still_busy(0b101, &[false, false, true]), 0b100);
+        assert_eq!(slots_still_busy(0b101, &[false, false, false]), 0);
+        // A busy pane this switch did not create is not held.
+        assert_eq!(slots_still_busy(0b001, &[true, true]), 0b001);
+        assert_eq!(slots_still_busy(0, &[true, true, true]), 0);
+    }
+
+    #[test]
+    fn cold_switch_shows_the_new_chrome_not_the_outgoing_tab() {
+        assert_eq!(SHELL_HOLD_MS, 50);
+        // Still browsing, under the cap: new address bar, neutral list. Not the old tab.
+        assert_eq!(cold_face(true, 0, SHELL_HOLD_MS), ColdFace::Neutral);
+        assert_eq!(cold_face(true, 49, SHELL_HOLD_MS), ColdFace::Neutral);
+        // Cap elapsed, or the folder is ready: show the new shell view (the list may be empty).
+        assert_eq!(cold_face(true, 50, SHELL_HOLD_MS), ColdFace::Shell);
+        assert_eq!(cold_face(false, 0, SHELL_HOLD_MS), ColdFace::Shell);
+        assert_eq!(shell_still_held(0b101, &[true, false, true], 0, SHELL_HOLD_MS), 0b101);
+        assert_eq!(shell_still_held(0b101, &[false, false, true], 10, SHELL_HOLD_MS), 0b100);
+        assert_eq!(shell_still_held(0b101, &[true, false, true], SHELL_HOLD_MS, SHELL_HOLD_MS), 0);
+        assert_eq!(shell_still_held(0b101, &[false, false, false], 0, SHELL_HOLD_MS), 0);
+    }
+
+    #[test]
+    fn three_tabs_keep_both_parked_browsers() {
+        // Counts are hidden tabs only. The tab on screen is not in the list.
+        // Cache of two hidden tabs: cycling 0→1→2→0 never drops the one we return to.
+        let steps = [
+            (vec![1, 0, 0], vec![0]),
+            (vec![1, 1, 0], vec![0, 1]),
+            (vec![0, 1, 1], vec![1, 2]),
+            (vec![1, 0, 1], vec![2, 0]),
+        ];
+        for (counts, lru) in steps {
+            assert!(
+                park_evictions(counts.clone(), lru.clone(), PARK_CACHE).is_empty(),
+                "dropped a warm tab {counts:?} lru={lru:?}"
+            );
+        }
+        // A fourth warm hidden tab is the oldest, not the one just parked.
+        assert_eq!(park_evictions(vec![1, 1, 1], vec![0, 1, 2], PARK_CACHE), vec![0]);
     }
 
     fn coal(live: usize, n: usize, pending: Option<usize>) -> TabCoalesce {
