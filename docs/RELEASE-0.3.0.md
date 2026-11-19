@@ -1,6 +1,6 @@
 # Maguro 0.3.0 release notes
 
-This is the first release that includes the customizable command toolbar. It is a documentation draft for the GitHub release; do not publish a tag or a GitHub release until Jun gives a final OK.
+This is the first release that includes the customizable command toolbar.
 
 ## Highlights
 
