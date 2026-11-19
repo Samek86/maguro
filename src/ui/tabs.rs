@@ -806,22 +806,42 @@ pub(crate) fn park_has_browsers(set: &[Option<Pane>]) -> bool {
     set.iter().any(|p| p.is_some())
 }
 
-/// Drop hidden Explorer windows past PARK_CACHE. Their folders, columns and filters stay on the tab.
+/// Oldest parked tab that should drop its browsers, or none when both caps hold.
+/// `counts[i]` is how many Explorer windows tab `i` still holds (0 = already dropped).
+/// `lru` is oldest first. A tab with windows that is missing from `lru` is taken after it, in index order.
+pub(crate) fn park_victim(counts: &[usize], lru: &[usize], tab_cache: usize, browser_cap: usize) -> Option<usize> {
+    let live = counts.iter().filter(|&&n| n > 0).count();
+    let browsers: usize = counts.iter().sum();
+    if live <= tab_cache && browsers <= browser_cap {
+        return None;
+    }
+    lru.iter().copied().find(|&i| counts.get(i).copied().unwrap_or(0) > 0).or_else(|| counts.iter().position(|&n| n > 0))
+}
+
+/// Tabs to drop, oldest first, until both caps hold. `counts` and `lru` are not the live app state.
+pub(crate) fn park_evictions(mut counts: Vec<usize>, mut lru: Vec<usize>, tab_cache: usize, browser_cap: usize) -> Vec<usize> {
+    let mut dropped = Vec::new();
+    let limit = counts.len();
+    while dropped.len() < limit {
+        let Some(i) = park_victim(&counts, &lru, tab_cache, browser_cap) else { break };
+        dropped.push(i);
+        counts[i] = 0;
+        lru.retain(|&x| x != i);
+    }
+    dropped
+}
+
+/// Drop hidden Explorer windows past [`PARK_CACHE`] or [`PARK_BROWSER_CAP`].
+/// Their folders, columns and filters stay on the tab.
 pub(crate) unsafe fn evict_park() {
-    loop {
-        let victim = app(|a| {
-            let live = a.park.iter().filter(|s| park_has_browsers(s)).count();
-            if live <= PARK_CACHE {
-                return None;
-            }
-            a.park_lru.iter().copied().find(|&i| a.park.get(i).is_some_and(|s| park_has_browsers(s))).or_else(|| {
-                a.park.iter().position(|s| park_has_browsers(s))
-            })
-        });
-        let Some(i) = victim else { break };
+    let plan = app(|a| {
+        let counts: Vec<usize> = a.park.iter().map(|set| set.iter().filter(|p| p.is_some()).count()).collect();
+        park_evictions(counts, a.park_lru.clone(), PARK_CACHE, PARK_BROWSER_CAP)
+    });
+    for i in plan {
         let set = app(|a| {
             lru_forget(a, i);
-            if i < a.park.len() {
+            if i < a.park.len() && park_has_browsers(&a.park[i]) {
                 std::mem::replace(&mut a.park[i], no_panes())
             } else {
                 no_panes()
@@ -829,6 +849,51 @@ pub(crate) unsafe fn evict_park() {
         });
         destroy_set(set);
     }
+}
+
+thread_local! {
+    static TAB_SWITCH_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+struct TabSwitchBusy;
+
+impl TabSwitchBusy {
+    fn enter() -> Self {
+        TAB_SWITCH_DEPTH.with(|c| c.set(c.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for TabSwitchBusy {
+    fn drop(&mut self) {
+        TAB_SWITCH_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+fn tab_switch_busy() -> bool {
+    TAB_SWITCH_DEPTH.with(|c| c.get() > 0)
+}
+
+/// Arm a short timer so browser destruction runs after the switch has returned.
+/// With no window, evict now: there is no timer to defer it.
+pub(crate) unsafe fn schedule_park_evict() {
+    let main = app(|a| a.main);
+    if main.0.is_null() || !IsWindow(Some(main)).as_bool() {
+        evict_park();
+        return;
+    }
+    SetTimer(Some(main), TIMER_PARK, PARK_EVICT_MS, None);
+}
+
+pub(crate) unsafe fn on_park_timer(main: HWND) {
+    _ = KillTimer(Some(main), TIMER_PARK);
+    if tab_switch_busy() {
+        if IsWindow(Some(main)).as_bool() {
+            SetTimer(Some(main), TIMER_PARK, PARK_EVICT_MS, None);
+        }
+        return;
+    }
+    evict_park();
 }
 
 pub(crate) unsafe fn pull_filters() -> Vec<String> {
@@ -974,6 +1039,8 @@ pub(crate) unsafe fn switch_tab(j: usize) {
         return;
     }
     // The hold paints once on drop, including the same-tab path and any early return.
+    // Busy keeps a park-evict timer that fires from a nested message pump from destroying browsers mid-switch.
+    let _busy = TabSwitchBusy::enter();
     let _hold = RedrawHold::new(main);
     if j == cur {
         show_active_tab();
@@ -1014,7 +1081,8 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     note_save();
     refresh_save_button();
     drop(_hold);
-    evict_park();
+    drop(_busy);
+    schedule_park_evict();
 }
 
 pub(crate) unsafe fn switch_rel(d: i32) {
@@ -1031,6 +1099,7 @@ pub(crate) unsafe fn new_tab() {
 
 /// A new window tab. `path` is pane 0's folder. `None` leaves every path empty, as `new_tab` does.
 pub(crate) unsafe fn new_tab_at(path: Option<&str>) {
+    let _busy = TabSwitchBusy::enter();
     end_rename(true);
     remember_tabs();
     detach_live();
@@ -1066,9 +1135,10 @@ pub(crate) unsafe fn new_tab_at(path: Option<&str>) {
     redraw_all();
     focus_view(active_pane());
     tabs_invalidate();
-    evict_park();
     note_save();
     refresh_save_button();
+    drop(_busy);
+    schedule_park_evict();
 }
 
 pub(crate) unsafe fn duplicate_tab(i: usize) {
@@ -2700,6 +2770,45 @@ mod tests {
         assert_eq!(tab_label_room(labeled, Some(close), 96, true, true), 135);
         assert_eq!(tab_label_room(labeled, Some(close), 96, true, false), 140);
         assert_eq!(tab_label_room(labeled, Some(close), 96, false, true), 140);
+    }
+
+    #[test]
+    fn park_caps_are_the_tunable_limits() {
+        assert_eq!(PARK_CACHE, 8);
+        assert_eq!(PARK_BROWSER_CAP, MAXP * 3);
+        assert_eq!(PARK_EVICT_MS, 100);
+    }
+
+    #[test]
+    fn park_victim_keeps_the_cache_and_drops_the_oldest() {
+        let counts = vec![0, 2, 0, 4];
+        assert_eq!(park_victim(&counts, &[3, 1], 2, 100), None);
+        assert_eq!(park_victim(&counts, &[3, 1], 1, 100), Some(3));
+        // An lru entry with no browsers is skipped. A stale index is ignored.
+        assert_eq!(park_victim(&counts, &[0, 9, 1], 1, 100), Some(1));
+        assert_eq!(park_victim(&counts, &[], 0, 100), Some(1));
+    }
+
+    #[test]
+    fn park_victim_caps_total_browsers_not_only_tabs() {
+        // Under the tab cap, still over the browser cap: a full grid is 16 panes.
+        let counts = vec![16, 16, 16, 8];
+        assert_eq!(park_victim(&counts, &[0, 1, 2, 3], 8, 48), Some(0));
+        assert_eq!(park_victim(&counts, &[2, 0], 8, 40), Some(2));
+        assert_eq!(park_victim(&[16], &[0], 8, 48), None);
+        assert_eq!(park_victim(&[16], &[0], 8, 15), Some(0));
+    }
+
+    #[test]
+    fn park_evictions_stop_when_both_caps_hold() {
+        let counts = vec![16; 8];
+        let lru: Vec<usize> = (0..8).collect();
+        // 8 tabs of 16 browsers. Tab cap 8, browser cap 48: drop the five oldest.
+        assert_eq!(park_evictions(counts.clone(), lru.clone(), 8, 48), vec![0, 1, 2, 3, 4]);
+        // Tab cap wins when the browser cap is loose.
+        assert_eq!(park_evictions(counts.clone(), lru.clone(), 2, 10_000), vec![0, 1, 2, 3, 4, 5]);
+        assert!(park_evictions(vec![1, 1], vec![1, 0], 8, 48).is_empty());
+        assert!(park_evictions(vec![0, 0], vec![], 0, 0).is_empty());
     }
 }
 

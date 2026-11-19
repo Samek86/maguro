@@ -91,9 +91,16 @@ pub(crate) const TIMER_SETTLE: usize = 4; // one width pass after a folder chang
 pub(crate) const TIMER_SAVE: usize = 5; // debounced maguro.json write
 pub(crate) const SAVE_SOON_MS: u32 = 1500;
 pub(crate) const SAVE_LATEST_MS: u128 = 30_000;
-/// Hidden tabs that still hold Explorer windows. Two, so moving among three tabs
+/// Hidden tabs that still hold Explorer windows. Moving among this many tabs
 /// does not build the browser again. Older hidden tabs keep only their saved grid.
-pub(crate) const PARK_CACHE: usize = 2;
+/// Raise or lower this to keep more or fewer tabs warm.
+pub(crate) const PARK_CACHE: usize = 8;
+/// Parked Explorer windows across every hidden tab. One tab can hold [`MAXP`]
+/// panes, so [`PARK_CACHE`] alone is not a memory cap. Three full grids.
+pub(crate) const PARK_BROWSER_CAP: usize = MAXP * 3;
+/// How long after a switch before browsers over the caps are destroyed.
+/// Long enough that destruction is not inside the switch, short enough to free them.
+pub(crate) const PARK_EVICT_MS: u32 = 100;
 pub(crate) const TIMER_NEWF: usize = 6; // on a pane: select and rename a folder just created
 pub(crate) const TIMER_NEWFILE: usize = 7; // on a pane: select and rename a file just created
 pub(crate) const TIMER_WINS: usize = 8; // after the first window is shown, open the other saved windows
@@ -117,6 +124,8 @@ pub(crate) const TIMER_TAB_HOVER: usize = 25; // file drag resting on a window t
 pub(crate) const TIMER_DLG_RETRY: usize = 26; // file dialog has no filename box yet; look again
 pub(crate) const TIMER_SPIN: usize = 27; // pane: next frame of the F5 refresh spin
 pub(crate) const TIMER_LIST: usize = 28; // trailing compare after a burst, plus the stale-list grace and restore polls
+/// Park eviction. Fired after a tab switch so browsers are not destroyed mid-switch.
+pub(crate) const TIMER_PARK: usize = 29;
 pub(crate) const WM_SHELL_CHANGE: u32 = WM_APP + 88; // SHChangeNotifyRegister delivery
 pub(crate) const WM_LIST_NOW: u32 = WM_APP + 89; // a file operation finished; compare its folders
 pub(crate) const WM_FAST_NOTE: u32 = WM_APP + 94; // fast copy/move finished; the note text is queued for the status line
