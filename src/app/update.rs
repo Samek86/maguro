@@ -888,7 +888,7 @@ unsafe fn show_fail_dialog(h: HWND, reason: &str) {
 /// Every top-level Maguro window of this process gets WM_CLOSE.
 /// The last main window saves, then `WM_DESTROY` posts quit, so Settings and the other
 /// Maguro windows do not keep the process (and the mapped exe) alive.
-unsafe fn close_all_windows() {
+pub(crate) unsafe fn close_all_windows() {
     unsafe extern "system" fn each(h: HWND, _a1: LPARAM) -> BOOL {
         crate::crash::catch_bool(std::panic::AssertUnwindSafe(|| unsafe { each_inner(h) }))
     }

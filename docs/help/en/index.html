@@ -281,7 +281,8 @@ body.lb-open { overflow: hidden; }
     <h2>Use Maguro as your default folder app (recommended)</h2>
     <p>Turn this on, and double-clicking a folder or a drive opens it in Maguro. You don’t have to start Maguro first. Win+E, the taskbar, and virtual folders such as <code>shell:</code> still open in File Explorer.</p>
     <p>This option is <strong>off by default</strong>. You turn it on yourself: <strong>Settings → General → Use as default folder app</strong>, or the gear menu → <strong>Behavior</strong>.</p>
-    <p><strong>If you want to remove Maguro completely, turn this switch off first, then delete it.</strong></p>
+    <p><strong>Settings → About → Uninstall</strong> removes Maguro. It asks you to confirm, and the default button is No. No leaves everything in place. Yes turns off <strong>Use as default folder app</strong>, deletes the settings folder <code>%APPDATA%\Maguro</code> (when <code>portable.txt</code> is next to the exe, only the files Maguro keeps in that folder), deletes <code>maguro.exe</code>, and closes Maguro.</p>
+    <p><strong>If you remove the program by hand, turn this switch off first, then delete it.</strong></p>
     <ol>
       <li>Open Settings → General, or the gear menu → <strong>Behavior</strong>, and turn off <strong>Use as default folder app</strong>.</li>
       <li>Check that a folder opens in File Explorer.</li>
@@ -505,7 +506,7 @@ body.lb-open { overflow: hidden; }
     <p><strong>Sessions.</strong> The session folder, save on exit (off by default) and the green unsaved-changes dot (on by default).</p>
     <p><strong>Advanced.</strong> Check GitHub for a newer release on startup. The updater downloads only <code>maguro.exe</code> and <code>maguro.exe.sha256</code>, and doesn’t extract releases that are only available as a zip. The settings file location, and export and import in Maguro JSON or Maguro ini format. Reset all settings restores your preferences to their defaults but keeps your layout, folders and favourites. The names of shell-extension DLLs to block.</p>
     <p><strong>Right-click menu items.</strong> Windows commands, Maguro commands, third-party handlers, menu style, packaged commands and WinMerge. Properties stays last. See <a href="#ctxmenu">Right-click menu</a>.</p>
-    <p><strong>About.</strong> The version number and credits: Maguro is a fork of efww/grids by efww.</p>
+    <p><strong>About.</strong> The version number and credits: Maguro is a fork of efww/grids by efww. <strong>Uninstall</strong> turns off the default folder app, deletes the settings folder and <code>maguro.exe</code>, and closes Maguro. Cancel, or No, leaves everything in place.</p>
     <div class="shot-grid"><figure class="shot"><img src="../../images-v10/en/settings_panes.png" alt="Settings, Panes and view" loading="lazy"><figcaption>Panes &amp; view</figcaption></figure></div>
   </section>
 
@@ -619,7 +620,7 @@ body.lb-open { overflow: hidden; }
     <p>Don’t run Maguro as administrator. Tools such as PowerToys Mouse Crosshairs can’t follow the cursor over an elevated window (UIPI). Run Maguro normally, or run both programs as administrator.</p>
     <p>Because the exe isn’t code-signed, SmartScreen shows a warning the first time you run it. Choose More info → Run anyway.</p>
     <p>Old <code>.grids</code>, <code>.qdr</code> and <code>grids.ini</code> files can’t be opened. Save a new <code>.maguro</code> session from the current window instead.</p>
-    <p>If Maguro was already deleted and folders no longer open, <strong>Use as default folder app</strong> may still have been on. Download and run Maguro again, turn the switch off under Settings → General, then delete it.</p>
+    <p>To remove Maguro, use <strong>Settings → About → Uninstall</strong>. If Maguro was already deleted and folders no longer open, <strong>Use as default folder app</strong> may still have been on. Download and run Maguro again, turn the switch off under Settings → General, then delete it.</p>
   </section>
 </main>
 </div>

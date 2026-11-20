@@ -281,7 +281,8 @@ body.lb-open { overflow: hidden; }
     <h2>既定のフォルダーアプリとして使う（おすすめ）</h2>
     <p>このオプションをオンにすると、フォルダーやドライブをダブルクリックしたときに Maguro が開きます。先に Maguro を起動しておく必要はありません。Win+E、タスク バー、<code>shell:</code> のような仮想フォルダーは、これまでどおりエクスプローラーで開きます。</p>
     <p>このオプションは <strong>既定ではオフ</strong> です。自分で <strong>設定 → 一般 → 既定のフォルダーアプリとして使用</strong>、または歯車メニューの <strong>動作</strong> からオンにします。</p>
-    <p><strong>Maguroを完全に削除したいときは、このスイッチをオフにしてから削除してください。</strong></p>
+    <p><strong>設定 → 情報 → アンインストール</strong> が Maguro を削除します。先に確認し、既定のボタンは「いいえ」です。「いいえ」では何も変わりません。「はい」は <strong>既定のフォルダーアプリとして使用</strong> をオフにし、設定フォルダー <code>%APPDATA%\Maguro</code> を削除します（<code>portable.txt</code> が exe の隣にあるときは、そのフォルダーの中で Maguro 自身が作ったファイルだけを削除します）。そのあと <code>maguro.exe</code> を削除して Maguro を終了します。</p>
+    <p><strong>自分で削除するときは、このスイッチをオフにしてから削除してください。</strong></p>
     <ol>
       <li><strong>設定 → 一般</strong>、または歯車メニューの <strong>動作</strong> で <strong>既定のフォルダーアプリとして使用</strong> をオフにします。</li>
       <li>フォルダーがエクスプローラーで開くことを確認します。</li>
@@ -505,7 +506,7 @@ body.lb-open { overflow: hidden; }
     <p><strong>セッション。</strong> セッション フォルダー、終了時に自動保存（既定はオフ）、未保存を示す緑の点（既定はオン）。</p>
     <p><strong>詳細。</strong> 起動時に GitHub で新しいリリースを確認します。更新時にダウンロードするのは <code>maguro.exe</code> と <code>maguro.exe.sha256</code> だけで、zip だけのリリースは展開しません。設定ファイルの場所、Maguro の JSON 形式と ini 形式でのエクスポートとインポートもここにあります。「すべての設定を初期化」は環境設定だけを既定に戻し、レイアウト、フォルダー、お気に入りは残します。ブロックするシェル拡張 DLL の名前もここで指定します。</p>
     <p><strong>右クリックメニュー項目。</strong> Windows のコマンド、Maguro のコマンド、他社製のハンドラー、メニューの形式、パッケージ コマンド、WinMerge。プロパティは常に一番下です。詳しくは<a href="#ctxmenu">右クリックメニュー</a>を参照してください。</p>
-    <p><strong>情報。</strong> バージョンとクレジットを表示します。Maguro は、efww 氏による efww/grids のフォークです。</p>
+    <p><strong>情報。</strong> バージョンとクレジットを表示します。Maguro は、efww 氏による efww/grids のフォークです。<strong>アンインストール</strong> は既定のフォルダーアプリの登録を外し、設定フォルダーと <code>maguro.exe</code> を削除して Maguro を終了します。キャンセル、または「いいえ」では何も変わりません。</p>
     <div class="shot-grid"><figure class="shot"><img src="../../images-v10/ja/settings_panes.png" alt="設定のペインと表示" loading="lazy"><figcaption>ペインと表示</figcaption></figure></div>
   </section>
 
@@ -619,7 +620,7 @@ body.lb-open { overflow: hidden; }
     <p>Maguro を管理者として実行しないでください。PowerToys のマウス十字線のようなツールは、昇格したウィンドウの上ではカーソルを追跡できません（UIPI）。Maguro を通常の権限で実行するか、両方を管理者として実行してください。</p>
     <p>exe にコード署名がないため、初回起動時に SmartScreen の警告が表示されます。「詳細情報」→「実行」を選んでください。</p>
     <p>古い <code>.grids</code>、<code>.qdr</code>、<code>grids.ini</code> は開けません。現在のウィンドウから新しい <code>.maguro</code> セッションを保存してください。</p>
-    <p>すでに Maguro を削除してしまい、フォルダーが開かないときは、<strong>既定のフォルダーアプリとして使用</strong>がオンのままだった可能性があります。Maguro を再ダウンロードして実行し、設定 → 一般でスイッチをオフにしてから削除してください。</p>
+    <p>Maguro を削除するときは <strong>設定 → 情報 → アンインストール</strong> を使います。すでに Maguro を削除してしまい、フォルダーが開かないときは、<strong>既定のフォルダーアプリとして使用</strong>がオンのままだった可能性があります。Maguro を再ダウンロードして実行し、設定 → 一般でスイッチをオフにしてから削除してください。</p>
   </section>
 </main>
 </div>

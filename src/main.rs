@@ -27,6 +27,7 @@ mod winmerge;
 mod excel;
 mod folderapp;
 mod crash;
+mod uninstall;
 mod winpath;
 mod remote;
 mod watch;

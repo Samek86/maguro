@@ -1132,11 +1132,11 @@ pub(crate) fn exe_dir() -> PathBuf {
     std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn portable_mode() -> bool {
+pub(crate) fn portable_mode() -> bool {
     exe_dir().join("portable.txt").is_file()
 }
 
-fn roaming_appdata() -> Option<PathBuf> {
+pub(crate) fn roaming_appdata() -> Option<PathBuf> {
     unsafe {
         let p = SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None).ok()?;
         let path = p.to_string().unwrap_or_default();
@@ -1259,8 +1259,33 @@ fn save_queue() -> &'static (std::sync::Mutex<SaveQueue>, std::sync::Condvar) {
     })
 }
 
+static SUPPRESS_SAVES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn saves_suppressed() -> bool {
+    SUPPRESS_SAVES.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Uninstall sets this before exit so a closing window cannot recreate maguro.json.
+/// Queued writes are dropped. An in-flight write is allowed to finish first.
+pub(crate) fn suppress_saves() {
+    SUPPRESS_SAVES.store(true, std::sync::atomic::Ordering::SeqCst);
+    let Some((lock, cv)) = save_slot().get() else { return };
+    let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    g.jobs.clear();
+    while g.busy {
+        g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+    }
+}
+
+pub(crate) fn allow_saves() {
+    SUPPRESS_SAVES.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Keep the latest bytes for `path`. An older queued write of the same file is dropped.
 pub(crate) fn enqueue_write(path: &Path, bytes: Vec<u8>) {
+    if saves_suppressed() {
+        return;
+    }
     let (lock, cv) = save_queue();
     {
         let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -1302,6 +1327,9 @@ pub(crate) fn flush_writes() {
 /// Write `bytes` next to `path` and swap it in. A failed swap leaves the previous file in place.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    if saves_suppressed() {
+        return Ok(());
+    }
     if path.is_dir() {
         return Err(std::io::Error::other("settings path is a directory"));
     }

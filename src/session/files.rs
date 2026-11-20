@@ -14,7 +14,7 @@ thread_local! {
 /// Writes every tab (name, lock, order, folders, filters, columns) and the window.
 /// The startup mode is stored beside that list; it does not gate the write.
 pub(crate) unsafe fn save_session() {
-    if window_count() == 0 {
+    if crate::store::saves_suppressed() || window_count() == 0 {
         return;
     }
     publish_shared();
@@ -116,7 +116,7 @@ pub(crate) unsafe fn write_session(path: &Path) {
 
 /// Each tab that already has a session file. Tabs without one are left for Save to name.
 pub(crate) unsafe fn autosave_associated_tabs() {
-    if !app(|a| a.s.autosave) {
+    if crate::store::saves_suppressed() || !app(|a| a.s.autosave) {
         return;
     }
     remember_tabs();
