@@ -320,11 +320,12 @@ unsafe fn build_children(h: HWND) {
     child_at(h, w!("EDIT"), "", 0x80 | tab, S_WM, font);
     btn(S_WM_BROWSE, tx(crate::Key::Browse), true);
     btn(S_UPDATE, update_button_label(), true);
+    btn(S_UNINSTALL, tx(crate::Key::Uninstall), true);
     btn(S_FAV_RESTORE, tx(crate::Key::RestoreDefaultFolders), true);
 }
 
 fn each_child(h: HWND, mut f: impl FnMut(HWND)) {
-    let ids = [S_SEARCH, S_CLOSE, S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE, S_UPDATE, S_FAV_RESTORE];
+    let ids = [S_SEARCH, S_CLOSE, S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE, S_UPDATE, S_UNINSTALL, S_FAV_RESTORE];
     for id in ids {
         let c = unsafe { GetDlgItem(Some(h), id).unwrap_or_default() };
         if !c.0.is_null() {
@@ -390,6 +391,7 @@ unsafe fn fill_strings(h: HWND) {
         (S_CTX_REFRESH, tx(CTX_REFRESH_L)),
         (S_WM_BROWSE, tx(crate::Key::Browse)),
         (S_UPDATE, update_button_label()),
+        (S_UNINSTALL, tx(crate::Key::Uninstall)),
         (S_FAV_RESTORE, tx(crate::Key::RestoreDefaultFolders)),
     ];
     BUSY.with(|b| b.set(true));
@@ -723,6 +725,9 @@ unsafe fn place(h: HWND, g: &Geo, sn: &Snap) {
                     }
                 }
                 if c.spec.ctl == Ctl::About {
+                    let show_u = intersects(c.adv[0], content);
+                    put!(S_UNINSTALL, ctl(h, S_UNINSTALL), c.adv[0], show_u, true);
+                    let _ = SetWindowTextW(ctl(h, S_UNINSTALL), &HSTRING::from(tx(crate::Key::Uninstall)));
                     sync_update_button(h);
                 }
                 if c.spec.ctl == Ctl::WmPath {
@@ -773,7 +778,7 @@ unsafe fn place(h: HWND, g: &Geo, sn: &Snap) {
         }
     }
     // Other page, scrolled off without a row, or a favourite button this page did not use.
-    for id in [S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE, S_UPDATE, S_FAV_RESTORE] {
+    for id in [S_KEYQ, S_RESET, S_LANG, S_FACE, S_START, S_THEME, S_VIEW, S_DIR, S_DEL, S_NEW, S_DROP, S_LAYOUT, S_SIDE, S_SESS, S_ACCENT, S_ADV_OPEN, S_ADV_EX, S_ADV_IM, S_ADV_RESET, S_EV, S_FV_DEF, S_FV_RESET, S_FV_CLEAR, S_CTX_RESET, S_CTX_REFRESH, S_WM, S_WM_BROWSE, S_UPDATE, S_UNINSTALL, S_FAV_RESTORE] {
         if !kept.contains(&id) {
             put!(id, ctl(h, id), RECT::default(), false, false);
         }
@@ -1098,6 +1103,14 @@ pub(crate) unsafe fn key_row_heights(labels: &[String], row: RECT, dpi: i32, fon
     heights
 }
 
+/// About card lines. Each card line is one row, so a licence with a line break becomes separate rows.
+fn about_stack(desc: String, license: &str, repo: String) -> Vec<String> {
+    let mut out = vec![desc];
+    out.extend(license.split('\n').map(str::trim).filter(|s| !s.is_empty()).map(String::from));
+    out.push(repo);
+    out
+}
+
 /// Strings `draw_card` paints. Live status replaces the description; the card box does not grow.
 fn card_text(c: &CardItem) -> CardText {
     let title = tx(c.spec.title).to_string();
@@ -1109,7 +1122,7 @@ fn card_text(c: &CardItem) -> CardText {
                 title: format!("{} v{}", copy.title, copy.version),
                 desc: String::new(),
                 more: String::new(),
-                stack: vec![copy.desc, copy.license, copy.repo],
+                stack: about_stack(copy.desc, &copy.license, copy.repo),
             }
         }
         Ctl::WmStatus => {
@@ -1377,7 +1390,7 @@ pub(crate) unsafe fn draw_btn(d: &DRAWITEMSTRUCT) {
         if id == 1 { crate::ButtonKind::Primary } else { crate::ButtonKind::Secondary }
     } else if id == S_CLOSE {
         crate::ButtonKind::Primary
-    } else if id == S_ADV_RESET {
+    } else if id == S_ADV_RESET || id == S_UNINSTALL {
         crate::ButtonKind::Danger
     } else {
         crate::ButtonKind::Secondary
@@ -1865,6 +1878,7 @@ unsafe fn on_command(h: HWND, id: i32, code: u32) {
             crate::check_now(target);
             sync_update_button(h);
         }
+        S_UNINSTALL => crate::uninstall::from_settings(h),
         S_WM_BROWSE => {
             let cur = app(|a| a.s.winmerge_path.clone());
             let Some(path) = crate::winmerge::pick_exe(h, &cur) else { return };
@@ -3500,6 +3514,12 @@ mod tests {
         assert_eq!(about_icon_group(true), crate::ICON_GROUP_DARK);
         assert_eq!(crate::window_icon_group(false), about_icon_group(false));
         assert_eq!(crate::window_icon_group(true), about_icon_group(true));
+    }
+
+    #[test]
+    fn about_stack_puts_the_icon_credit_on_its_own_row() {
+        let rows = about_stack("d".into(), "MIT License · © 2026 efww, Samek86\nLine icons redrawn", "r".into());
+        assert_eq!(rows, vec!["d", "MIT License · © 2026 efww, Samek86", "Line icons redrawn", "r"]);
     }
 
     #[test]

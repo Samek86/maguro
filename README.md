@@ -16,7 +16,7 @@
   <a href="https://github.com/Samek86/maguro"><img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <a href="https://github.com/Samek86/maguro"><img alt="Language: Rust" src="https://img.shields.io/badge/language-Rust-000000?logo=rust&logoColor=white"></a>
-  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="Release 0.3.1" src="https://img.shields.io/badge/release-0.3.1-0A9BD6"></a>
+  <a href="https://github.com/Samek86/maguro/releases/latest"><img alt="Release 0.3.2" src="https://img.shields.io/badge/release-0.3.2-0A9BD6"></a>
 </p>
 
 <p align="center">
@@ -57,7 +57,9 @@ Turn this on, and double-clicking a folder or a drive opens it in Maguro. You do
 
 This option is **off by default**. You turn it on yourself: **Settings → General → Use as default folder app**, or the gear menu → **Behavior**.
 
-**If you want to remove Maguro completely, turn this switch off first, then delete it.**
+**Settings → About → Uninstall** removes Maguro. It asks first, and the default button is No. No leaves everything in place. Yes turns off **Use as default folder app**, deletes the settings folder `%APPDATA%\Maguro` (when `portable.txt` is next to the exe, only the files Maguro keeps in that folder), deletes `maguro.exe`, and closes Maguro.
+
+If you remove the program by hand, turn this switch off first, then delete it.
 
 1. Open **Settings → General**, or the gear menu → **Behavior**, and turn off **Use as default folder app**.
 2. Check that a folder opens in File Explorer.
@@ -267,7 +269,7 @@ Settings live in `%APPDATA%\Maguro\maguro.json`. Put a file named `portable.txt`
 
 To build from source, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-**If you want to remove Maguro completely, turn this switch off first, then delete it.** The steps are under [Use Maguro as your default folder app (recommended)](#use-maguro-as-your-default-folder-app-recommended).
+**Settings → About → Uninstall** removes Maguro: it turns off the default folder app, deletes the settings folder and `maguro.exe`, and closes. The manual steps are under [Use Maguro as your default folder app (recommended)](#use-maguro-as-your-default-folder-app-recommended).
 
 ## Keyboard shortcuts
 

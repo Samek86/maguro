@@ -968,11 +968,17 @@ pub(crate) enum Key {
     ToolbarOpenFolder,
     ToolbarOpenFile,
     ToolbarChangeTarget,
+    Uninstall,
+    UninstallMaguro,
+    UninstallConfirm,
+    UninstallConfirmPortable,
+    UninstallCouldNotStart,
+    UninstallRefused,
 }
 
-pub(crate) const KEY_COUNT: usize = 961;
+pub(crate) const KEY_COUNT: usize = 967;
 
-const _: () = assert!((Key::ToolbarChangeTarget as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::UninstallRefused as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1936,6 +1942,12 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Open folder…",
     "Open file…",
     "Change target",
+    "Uninstall",
+    "Uninstall Maguro",
+    "This deletes the settings folder %APPDATA%\\Maguro ({folder}), removes the use-as-default-folder-app registration, and deletes maguro.exe ({exe}).\n\nMaguro will close.",
+    "This deletes Maguro's settings files in {folder}, removes the use-as-default-folder-app registration, and deletes maguro.exe ({exe}). Other files in that folder are left as they are.\n\nMaguro will close.",
+    "Could not start uninstall.",
+    "Uninstall was cancelled. The settings folder is not %APPDATA%\\Maguro.",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2900,4 +2912,10 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "toolbar_open_folder",
     "toolbar_open_file",
     "toolbar_change_target",
+    "uninstall",
+    "uninstall_maguro",
+    "uninstall_confirm",
+    "uninstall_confirm_portable",
+    "uninstall_could_not_start",
+    "uninstall_refused",
 ];

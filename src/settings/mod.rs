@@ -37,6 +37,7 @@ const S_SIDE: i32 = 37;
 const S_WM: i32 = 30;
 const S_WM_BROWSE: i32 = 31;
 const S_UPDATE: i32 = 39;
+const S_UNINSTALL: i32 = 41;
 /// Favourites page. Adds default places that are not already in the tree.
 const S_FAV_RESTORE: i32 = 40;
 const S_FAV0: i32 = 20000;
@@ -329,7 +330,9 @@ fn page_match(q: &str, page: usize) -> bool {
             || has("Maguro", q)
             || has(env!("CARGO_PKG_VERSION"), q)
             || has("github.com/Samek86/maguro", q)
-            || has(tx(crate::Key::MaguroIsForkOfEfwwGridsBy2), q);
+            || has(tx(crate::Key::MaguroIsForkOfEfwwGridsBy2), q)
+            || has(tx(crate::Key::Uninstall), q)
+            || has(tx(crate::Key::UninstallMaguro), q);
     }
     if page == 4 {
         let rows = fav_tree_rows();
@@ -1027,7 +1030,17 @@ fn card_item(rect: RECT, spec: Spec, dpi: i32) -> CardItem {
             right_box(rect, sc(dpi, 230), sc(dpi, 32), pad)
         }
         Ctl::Sess => right_box(rect, sc(dpi, 108), sc(dpi, crate::BTN_H_FOOTER), pad),
-        Ctl::About => right_box(rect, sc(dpi, 240), sc(dpi, crate::BTN_H_FOOTER), pad),
+        Ctl::About => {
+            let bw = sc(dpi, 240);
+            let btn_h = sc(dpi, crate::BTN_H_FOOTER);
+            let gap = sc(dpi, 6);
+            let total = btn_h * 2 + gap;
+            let top = rect.top + ((rect.bottom - rect.top) - total) / 2;
+            let right = rect.right - pad;
+            let left = right - bw;
+            adv[0] = RECT { left, top: top + btn_h + gap, right, bottom: top + total };
+            RECT { left, top, right, bottom: top + btn_h }
+        }
         Ctl::Accent => {
             let btn = right_box(rect, sc(dpi, 108), sc(dpi, crate::BTN_H_FOOTER), pad);
             let mut x = btn.left - sc(dpi, 10) - sc(dpi, 22);
@@ -1526,6 +1539,12 @@ mod tests {
         let item = card_item(card, ABOUT[0], 96);
         assert_eq!(item.ctl.bottom - item.ctl.top, crate::BTN_H_FOOTER);
         assert_eq!(item.ctl.right, card.right - 16);
+        assert_eq!(item.adv[0].left, item.ctl.left);
+        assert_eq!(item.adv[0].right, item.ctl.right);
+        assert!(item.adv[0].top >= item.ctl.bottom);
+        assert_eq!(item.adv[0].bottom - item.adv[0].top, crate::BTN_H_FOOTER);
+        assert!(page_match("Uninstall", 9));
+        assert_eq!(tx(crate::Key::Uninstall), "Uninstall");
         assert!(item.ctl.left > card.left + 16, "{:?}", item.ctl);
         assert!(page_match("check for updates", 9));
         assert!(page_match("check for updates", 7));

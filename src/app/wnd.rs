@@ -672,9 +672,11 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             // Restart or sign-out does not send WM_CLOSE. Saving here keeps the last folders.
             WM_ENDSESSION if wp.0 != 0 => {
                 crate::remote::unmount_all();
-                flush_folder_views();
-                save_session();
-                crate::store::flush_writes();
+                if !crate::store::saves_suppressed() {
+                    flush_folder_views();
+                    save_session();
+                    crate::store::flush_writes();
+                }
             }
             // Windows light/dark changed. Queued so nothing is drawn inside the broadcast.
             WM_SETTINGCHANGE => {
@@ -727,24 +729,32 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 _ = KillTimer(Some(h), TIMER_TAB_SWITCH);
                 crate::shell::warmup::disarm(h);
                 crate::shell::listsync::disarm(h);
-                flush_folder_views();
-                if app(|a| a.s.autosave) {
-                    autosave_associated_tabs();
+                // Uninstall sets this so exit cannot recreate the settings folder after it is deleted.
+                let skip_save = crate::store::saves_suppressed();
+                if !skip_save {
+                    flush_folder_views();
+                    if app(|a| a.s.autosave) {
+                        autosave_associated_tabs();
+                    }
                 }
                 publish_shared();
                 let last = window_count() <= 1;
                 if last {
                     // The last window stays in the file, so the next launch restores every window that was open.
                     crate::remote::unmount_all();
-                    save_session();
-                    crate::store::flush_writes();
+                    if !skip_save {
+                        save_session();
+                        crate::store::flush_writes();
+                    }
                     _ = DestroyWindow(h);
                 } else {
                     destroy_every_pane();
                     app(|a| a.tree = None);
                     let handles = drop_current_desk();
-                    save_session();
-                    crate::store::flush_writes();
+                    if !skip_save {
+                        save_session();
+                        crate::store::flush_writes();
+                    }
                     _ = DestroyWindow(h);
                     release_desk_handles(handles.0, handles.1, handles.2, handles.3, handles.4);
                 }
@@ -1840,9 +1850,11 @@ mod gear_menu_tests {
         let want = ["set_registered", "(want)"].concat();
         let off = ["set_registered", "(false)"].concat();
         let on = ["set_registered", "(true)"].concat();
-        assert_eq!(regs.len(), 2, "{regs:?}");
+        // The two user switches, plus Uninstall which only turns the registration off.
+        assert_eq!(regs.len(), 3, "{regs:?}");
         assert!(regs.iter().any(|l| l.contains("win.rs") && l.contains(&want)));
         assert!(regs.iter().any(|l| l.contains("fileop.rs") && l.contains(&off)));
+        assert!(regs.iter().any(|l| l.contains("uninstall.rs") && l.contains(&off)));
         assert!(regs.iter().all(|l| !l.contains(&on)));
         let lang_fn_at = prod.find("fn set_language").expect("set_language");
         let lang_tail = &prod[lang_fn_at..];
