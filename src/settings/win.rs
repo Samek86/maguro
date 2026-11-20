@@ -1103,6 +1103,14 @@ pub(crate) unsafe fn key_row_heights(labels: &[String], row: RECT, dpi: i32, fon
     heights
 }
 
+/// About card lines. Each card line is one row, so a licence with a line break becomes separate rows.
+fn about_stack(desc: String, license: &str, repo: String) -> Vec<String> {
+    let mut out = vec![desc];
+    out.extend(license.split('\n').map(str::trim).filter(|s| !s.is_empty()).map(String::from));
+    out.push(repo);
+    out
+}
+
 /// Strings `draw_card` paints. Live status replaces the description; the card box does not grow.
 fn card_text(c: &CardItem) -> CardText {
     let title = tx(c.spec.title).to_string();
@@ -1114,7 +1122,7 @@ fn card_text(c: &CardItem) -> CardText {
                 title: format!("{} v{}", copy.title, copy.version),
                 desc: String::new(),
                 more: String::new(),
-                stack: vec![copy.desc, copy.license, copy.repo],
+                stack: about_stack(copy.desc, &copy.license, copy.repo),
             }
         }
         Ctl::WmStatus => {
@@ -3506,6 +3514,12 @@ mod tests {
         assert_eq!(about_icon_group(true), crate::ICON_GROUP_DARK);
         assert_eq!(crate::window_icon_group(false), about_icon_group(false));
         assert_eq!(crate::window_icon_group(true), about_icon_group(true));
+    }
+
+    #[test]
+    fn about_stack_puts_the_icon_credit_on_its_own_row() {
+        let rows = about_stack("d".into(), "MIT License · © 2026 efww, Samek86\nLine icons redrawn", "r".into());
+        assert_eq!(rows, vec!["d", "MIT License · © 2026 efww, Samek86", "Line icons redrawn", "r"]);
     }
 
     #[test]
