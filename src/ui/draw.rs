@@ -284,6 +284,32 @@ unsafe fn digit_black_box(dc: HDC, words: &[u16], ascent: i32) -> Option<(i32, i
     (bot > top).then_some((top, bot - top))
 }
 
+/// Black-box rows below the em top. `to` is one past the last row, matching
+/// `ascent - gmptGlyphOrigin.y` plus `gmBlackBoxY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InkSpan {
+    pub from: i32,
+    pub to: i32,
+}
+
+/// Em top that puts `ink` on the same visual center as `reference` drawn at `ref_top`.
+///
+/// An odd leftover pixel stays below that center, so a CJK run is never placed
+/// above the ASCII caps. An empty ink span keeps `ref_top`.
+pub(crate) fn shared_ink_top(ref_top: i32, reference: InkSpan, ink: InkSpan) -> i32 {
+    if ink.to <= ink.from {
+        return ref_top;
+    }
+    let ref_x2 = ref_top * 2 + reference.from + reference.to - 1;
+    let span = ink.from + ink.to - 1;
+    div_ceil_2(ref_x2 - span)
+}
+
+/// `ceil(n / 2)` for the half-pixel leftover in [`shared_ink_top`].
+fn div_ceil_2(n: i32) -> i32 {
+    if n >= 0 { (n + 1) / 2 } else { n / 2 }
+}
+
 /// Half of `descent / 2`, kept only when the tm box is off by more than that.
 /// The centered gap error is 0 or 1, so this is 0 whenever the line fits.
 fn cjk_nudge(descent: i32, cell_h: i32, tm_h: i32) -> i32 {
@@ -293,6 +319,79 @@ fn cjk_nudge(descent: i32, cell_h: i32, tm_h: i32) -> i32 {
     let bottom = slack - top;
     let error = (bottom - top).abs();
     if error > half { half } else { 0 }
+}
+
+/// One glyph's black box. The font is already selected. `None` when GDI has no outline.
+unsafe fn glyph_span(dc: HDC, ch: char, ascent: i32) -> Option<InkSpan> {
+    if ascent <= 0 {
+        return None;
+    }
+    let mat = outline_matrix();
+    let mut gm = GLYPHMETRICS::default();
+    if GetGlyphOutlineW(dc, ch as u32, GGO_METRICS, &mut gm, 0, None, &mat) == u32::MAX || gm.gmBlackBoxY == 0 {
+        return None;
+    }
+    let from = ascent - gm.gmptGlyphOrigin.y;
+    Some(InkSpan { from, to: from + gm.gmBlackBoxY as i32 })
+}
+
+/// Union of the black boxes in `s`. Missing glyphs are skipped.
+unsafe fn run_span(dc: HDC, s: &str, ascent: i32) -> Option<InkSpan> {
+    let mut from = i32::MAX;
+    let mut to = i32::MIN;
+    for ch in s.chars() {
+        if let Some(span) = glyph_span(dc, ch, ascent) {
+            from = from.min(span.from);
+            to = to.max(span.to);
+        }
+    }
+    (to > from).then_some(InkSpan { from, to })
+}
+
+/// Cap black box used as the address bar's ASCII center. `H`, then `A`, then `0`.
+unsafe fn cap_span(dc: HDC, ascent: i32) -> Option<InkSpan> {
+    for ch in ['H', 'A', '0'] {
+        if let Some(span) = glyph_span(dc, ch, ascent) {
+            return Some(span);
+        }
+    }
+    None
+}
+
+/// Breadcrumb label that contains CJK. Latin labels stay on [`text`].
+///
+/// `ink_line_top` lifts caps by half the internal leading and leaves ideographs
+/// on the em box, so a Japanese segment sits lower than `C:` or `WORK` in the
+/// same bar. The run is moved until its black box shares that cap center. A
+/// failed measure uses the cap em top, which is the ASCII baseline. `pill` is
+/// the address bar: the field is inset, and the ink may use that padding. The
+/// label width is unchanged, so the ellipsis still ends in the same place.
+unsafe fn paint_crumb_cjk(dc: HDC, r: RECT, pill: RECT, s: &str, font: HFONT, rgb: u32) {
+    let mut w: Vec<u16> = s.encode_utf16().collect();
+    if w.is_empty() || r.bottom <= r.top {
+        return;
+    }
+    let m = line_metrics(dc, font);
+    let old = SelectObject(dc, font.into());
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, cref(rgb));
+    let ref_top = if m.ascent <= 0 { r.top } else { ink_line_top(r.top, r.bottom - r.top, m, InkKind::Latin) };
+    let top = match (cap_span(dc, m.ascent), run_span(dc, s, m.ascent)) {
+        (Some(caps), Some(ink)) => shared_ink_top(ref_top, caps, ink),
+        _ => ref_top,
+    };
+    let mut placed = RECT { top, bottom: top.saturating_add(m.height().max(1)), ..r };
+    let saved = SaveDC(dc);
+    if saved != 0 {
+        IntersectClipRect(dc, r.left, pill.top.min(r.top), r.right, pill.bottom.max(r.bottom));
+    }
+    DrawTextW(dc, &mut w, &mut placed, DT_LEFT | DT_END_ELLIPSIS | DT_SINGLELINE | DT_NOPREFIX | DT_TOP);
+    if saved != 0 {
+        let _ = RestoreDC(dc, saved);
+    }
+    if !old.is_invalid() {
+        SelectObject(dc, old);
+    }
 }
 
 /// How far `ink_line_top` moves a line whose cell is exactly the font height.
@@ -1800,7 +1899,13 @@ pub(crate) unsafe fn paint_pane(h: HWND) {
                     continue;
                 }
                 let ink = if c == Crumb::Here { pal().text } else { pal().sub };
-                text(dc, RECT { left: r.left + s(4), right: r.right - s(4), ..r }, &label, font, ink, DT_LEFT);
+                let label_r = RECT { left: r.left + s(4), right: r.right - s(4), ..r };
+                // Japanese (and mixed) names share the ASCII cap center. Chevrons stay on `text`.
+                if ink_kind(&label) == InkKind::Cjk {
+                    paint_crumb_cjk(dc, label_r, pg.addr, &label, font, ink);
+                } else {
+                    text(dc, label_r, &label, font, ink, DT_LEFT);
+                }
             }
         }
         if pg.tabs.bottom > pg.tabs.top {
@@ -1893,8 +1998,45 @@ mod kids_tests {
 
 #[cfg(test)]
 mod ink_tests {
-    use super::{chip_ink_top, ink_kind, ink_line_top, visible_ink_top, InkKind};
+    use super::{chip_ink_top, ink_kind, ink_line_top, shared_ink_top, visible_ink_top, InkKind, InkSpan};
     use crate::LineMetrics;
+
+    fn span(from: i32, to: i32) -> InkSpan {
+        InkSpan { from, to }
+    }
+
+    /// Twice the ink center, so a half pixel is one unit.
+    fn center_x2(top: i32, ink: InkSpan) -> i32 {
+        top * 2 + ink.from + ink.to - 1
+    }
+
+    #[test]
+    fn cjk_black_box_shares_the_ascii_cap_center() {
+        // Yu Gothic UI and Segoe UI at the address-bar size. Caps are 5..14.
+        // `ink_line_top` places them at -2 in the 16px crumb cell. 答え is 3..15.
+        let caps = span(5, 14);
+        assert_eq!(shared_ink_top(-2, caps, caps), -2);
+        let kana = span(3, 15);
+        let top = shared_ink_top(-2, caps, kana);
+        assert_eq!(top, -1);
+        let ascii = center_x2(-2, caps);
+        let now = center_x2(top, kana);
+        assert!(now >= ascii && now - ascii <= 1, "ascii {ascii} now {now}");
+        // Malgun Gothic message font: caps 4..13, 答え 2..14. The old em top (0)
+        // leaves that ink 3 units (1.5px) below the caps.
+        let malgun = span(4, 13);
+        let malgun_kana = span(2, 14);
+        let moved = shared_ink_top(-2, malgun, malgun_kana);
+        assert_eq!(moved, -1);
+        assert!(center_x2(0, malgun_kana) - center_x2(-2, malgun) > 1);
+        assert_eq!(center_x2(moved, malgun_kana) - center_x2(-2, malgun), 1);
+        // 図 fills 0..15 and lands on the cap center exactly.
+        let kanji = span(0, 15);
+        let exact = shared_ink_top(-2, malgun, kanji);
+        assert_eq!(exact, -1);
+        assert_eq!(center_x2(exact, kanji), center_x2(-2, malgun));
+        assert_eq!(shared_ink_top(-2, caps, span(0, 0)), -2);
+    }
 
     fn m(ascent: i32, descent: i32, internal_leading: i32) -> LineMetrics {
         LineMetrics { ascent, descent, internal_leading }
@@ -2043,6 +2185,94 @@ mod ink_tests {
         assert_eq!(gaps(24, at_150, InkKind::Cjk), (2, 2));
         assert_eq!(gaps(32, at_200, InkKind::Cjk), (3, 3));
         assert_ne!(latin(16, at_100), latin(32, at_200));
+    }
+}
+
+#[cfg(test)]
+mod crumb_cjk_center_tests {
+    use super::*;
+    use crate::{delete_font, logfont};
+
+    /// Ink center in the 22px address pill. `cjk` uses the breadcrumb placer.
+    unsafe fn ink_center(font: HFONT, s: &str, cjk: bool) -> (i32, i32) {
+        let (w, h) = (240, 22);
+        let cell = RECT { left: 4, top: 3, right: w - 4, bottom: 19 };
+        let pill = RECT { left: 0, top: 0, right: w, bottom: h };
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let screen = GetDC(None);
+        let mut bits_ptr = std::ptr::null_mut();
+        let bmp = CreateDIBSection(Some(screen), &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0).expect("dib");
+        let mem = CreateCompatibleDC(Some(screen));
+        ReleaseDC(None, screen);
+        let old = SelectObject(mem, bmp.into());
+        fill(mem, pill, 0xFFFFFF);
+        if cjk {
+            paint_crumb_cjk(mem, cell, pill, s, font, 0);
+        } else {
+            text(mem, cell, s, font, 0, DT_LEFT);
+        }
+        _ = GdiFlush();
+        let bits = std::slice::from_raw_parts(bits_ptr as *const u8, (w * h * 4) as usize);
+        let mut first = None;
+        let mut last = 0;
+        for y in 0..h {
+            let row = (y * w * 4) as usize;
+            let hit = (0..w).any(|x| {
+                let i = row + (x * 4) as usize;
+                (bits[i] as i32 - 255).abs() + (bits[i + 1] as i32 - 255).abs() + (bits[i + 2] as i32 - 255).abs() > 40
+            });
+            if hit {
+                if first.is_none() {
+                    first = Some(y);
+                }
+                last = y;
+            }
+        }
+        SelectObject(mem, old);
+        _ = DeleteDC(mem);
+        _ = DeleteObject(bmp.into());
+        (first.expect("ink"), last)
+    }
+
+    #[test]
+    fn japanese_crumbs_share_the_ascii_center() {
+        unsafe {
+            for face in ["Segoe UI", "Yu Gothic UI", "Malgun Gothic"] {
+                let font = CreateFontIndirectW(&logfont(face, 13));
+                assert!(!font.is_invalid(), "{face}");
+                let center = |s: &str, cjk: bool| {
+                    let (top, bot) = ink_center(font, s, cjk);
+                    (top + bot) as f32 / 2.0
+                };
+                let ascii = center("WORK", false);
+                let mut saw_low = false;
+                for sample in ["\u{7b54}\u{3048}", "\u{96e3}\u{3057}\u{3044}", "\u{81ea}\u{52d5}\u{898b}\u{7a4d}", "20261005_\u{56f3}\u{9762}\u{8a8d}\u{8b58}"] {
+                    let old = center(sample, false);
+                    let new = center(sample, true);
+                    // The em-box place sits on the caps or below them. The black-box
+                    // place stays within a pixel of the caps and does not rise past them.
+                    if old > ascii + 0.4 {
+                        saw_low = true;
+                        assert!((new - ascii).abs() <= (old - ascii).abs(), "{face} {sample} new {new} old {old} ascii {ascii}");
+                    }
+                    assert!((new - ascii).abs() <= 1.0, "{face} {sample} new {new} ascii {ascii} old {old}");
+                    assert!(new + 0.51 >= ascii, "{face} {sample} raised past the caps: new {new} ascii {ascii}");
+                }
+                assert!(saw_low, "{face} had no low CJK sample");
+                delete_font(font);
+            }
+        }
     }
 }
 
