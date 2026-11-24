@@ -655,8 +655,8 @@ pub(crate) struct MsgParts {
 }
 
 /// Property streams named `__substg1.0_PPPPTTTT`. The last four hex digits are the property type:
-/// `001F` is PT_UNICODE (UTF-16LE) and `001E` is PT_STRING8 (the message code page).
-/// Attachments live under `__attach_version1.0_*`.
+/// `001F` is UTF-16LE, `001E` is the message code page, `0102` is binary (HTML or compressed RTF).
+/// Attachments live under `__attach_version1.0_*`, recipients under `__recip_version1.0_*`.
 pub(crate) fn msg_parts(streams: &[(String, Vec<u8>)]) -> MsgParts {
     let cp = msg_codepage(streams);
     let text = |id: u16| prop_text(streams, id, cp);
@@ -669,33 +669,178 @@ pub(crate) fn msg_parts(streams: &[(String, Vec<u8>)]) -> MsgParts {
             from = format!("{from} <{email}>");
         }
     }
+    let mut to = text(0x0E04);
+    if to.is_empty() {
+        to = recipient_line(streams, cp, 1);
+    }
+    let mut cc = text(0x0E03);
+    if cc.is_empty() {
+        cc = recipient_line(streams, cp, 2);
+    }
     let mut body = text(0x1000);
     if body.trim().is_empty() {
-        let html = text(0x1013);
-        if !html.is_empty() {
+        let html = prop_html(streams, cp);
+        if !html.trim().is_empty() {
             body = html_text(&html);
         }
     }
-    let mut files = Vec::new();
-    for (name, bytes) in streams {
-        if !name.to_ascii_lowercase().contains("__attach") {
-            continue;
-        }
-        let Some((id, _)) = prop_id(name) else { continue };
-        if matches!(id, 0x3707 | 0x3704 | 0x3001) {
-            let s = prop_bytes(name, bytes, cp);
-            if !s.is_empty() && !files.contains(&s) {
-                files.push(s);
-            }
+    if body.trim().is_empty() {
+        let rtf = prop_rtf(streams);
+        if !rtf.trim().is_empty() {
+            body = rtf;
         }
     }
-    let date = streams.iter().find_map(|(n, b)| {
+    let date = streams.iter().filter(|(n, _)| at_root(n)).find_map(|(n, b)| {
         let (id, ty) = prop_id(n)?;
         (matches!(id, 0x0039 | 0x0E06 | 0x0040) && ty == 0x0040 && b.len() >= 8).then(|| {
             filetime_when(u64::from_le_bytes(b[..8].try_into().unwrap()))
         })
     }).unwrap_or_default();
-    MsgParts { subject: text(0x0037), from, to: text(0x0E04), cc: text(0x0E03), date, files, body: body.trim().to_string() }
+    MsgParts { subject: text(0x0037), from, to, cc, date, files: attachment_names(streams, cp), body: body.trim().to_string() }
+}
+
+/// One name per attachment storage. Long filename (`3707`) wins over `3704`, then the display name (`3001`).
+fn attachment_names(streams: &[(String, Vec<u8>)], cp: u32) -> Vec<String> {
+    let mut groups: Vec<(String, u8, String)> = Vec::new();
+    for (name, bytes) in streams {
+        if !name.to_ascii_lowercase().contains("__attach") {
+            continue;
+        }
+        let Some((id, _)) = prop_id(name) else { continue };
+        let rank = match id {
+            0x3707 => 3,
+            0x3704 => 2,
+            0x3001 => 1,
+            _ => continue,
+        };
+        let s = prop_bytes(name, bytes, cp);
+        if s.is_empty() {
+            continue;
+        }
+        let key = name.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+        if let Some(g) = groups.iter_mut().find(|g| g.0 == key) {
+            if rank > g.1 {
+                *g = (key, rank, s);
+            }
+        } else {
+            groups.push((key, rank, s));
+        }
+    }
+    groups.into_iter().map(|g| g.2).collect()
+}
+
+/// `kind` 1 is To, 2 is Cc. Display name is `3001`; the address is SMTP `39FE`, else `3003`.
+fn recipient_line(streams: &[(String, Vec<u8>)], cp: u32, kind: u32) -> String {
+    let mut keys: Vec<String> = Vec::new();
+    for (name, _) in streams {
+        if !name.to_ascii_lowercase().contains("__recip") {
+            continue;
+        }
+        let key = name.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_else(|| name.clone());
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    let mut lines = Vec::new();
+    for key in keys {
+        let got = |id: u16| -> String {
+            let mut ansi = None;
+            for (n, b) in streams {
+                if !n.starts_with(&key) {
+                    continue;
+                }
+                let Some((pid, ty)) = prop_id(n) else { continue };
+                if pid != id {
+                    continue;
+                }
+                if ty == 0x001F {
+                    let s = prop_bytes(n, b, cp);
+                    if !s.is_empty() {
+                        return s;
+                    }
+                } else if ty == 0x001E && ansi.is_none() {
+                    let s = prop_bytes(n, b, cp);
+                    if !s.is_empty() {
+                        ansi = Some(s);
+                    }
+                }
+            }
+            ansi.unwrap_or_default()
+        };
+        let rk = streams.iter().find_map(|(n, b)| {
+            if !n.starts_with(&key) {
+                return None;
+            }
+            let (pid, ty) = prop_id(n)?;
+            (pid == 0x0C15 && ty == 0x0003 && b.len() >= 4).then(|| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        }).unwrap_or(1);
+        if rk != kind {
+            continue;
+        }
+        let name = got(0x3001);
+        let email = {
+            let smtp = got(0x39FE);
+            if smtp.is_empty() { got(0x3003) } else { smtp }
+        };
+        let line = match (name.is_empty(), email.is_empty()) {
+            (false, false) => format!("{name} <{email}>"),
+            (false, true) => name,
+            (true, false) => email,
+            _ => continue,
+        };
+        lines.push(line);
+    }
+    lines.join(", ")
+}
+
+fn prop_html(streams: &[(String, Vec<u8>)], cp: u32) -> String {
+    let mut ansi_hit = None;
+    let mut bin_hit = None;
+    for (name, bytes) in streams {
+        if !at_root(name) {
+            continue;
+        }
+        let Some((pid, ty)) = prop_id(name) else { continue };
+        if pid != 0x1013 {
+            continue;
+        }
+        if ty == 0x001F {
+            return utf16_z(bytes);
+        }
+        if ty == 0x001E {
+            ansi_hit = Some(prop_bytes(name, bytes, cp));
+        } else if ty == 0x0102 {
+            bin_hit = Some(bin_text(bytes, cp));
+        }
+    }
+    ansi_hit.or(bin_hit).unwrap_or_default()
+}
+
+fn prop_rtf(streams: &[(String, Vec<u8>)]) -> String {
+    for (name, bytes) in streams {
+        if !at_root(name) {
+            continue;
+        }
+        let Some((pid, ty)) = prop_id(name) else { continue };
+        if pid == 0x1009 && ty == 0x0102 {
+            if let Some(raw) = rtf_inflate(bytes) {
+                return rtf_text(&raw);
+            }
+        }
+    }
+    String::new()
+}
+
+fn bin_text(bytes: &[u8], cp: u32) -> String {
+    let end = bytes.iter().rposition(|&c| c != 0).map(|i| i + 1).unwrap_or(0);
+    let b = &bytes[..end];
+    if b.starts_with(&[0xFF, 0xFE]) {
+        return utf16_z(&b[2..]);
+    }
+    if std::str::from_utf8(b).is_ok() {
+        return String::from_utf8_lossy(b).into_owned();
+    }
+    ansi(b, cp)
 }
 
 /// PT_STRING8 uses PidTagMessageCodepage (`3FFD`). PidTagInternetCodepage (`3FDE`) is the fallback
@@ -703,11 +848,18 @@ pub(crate) fn msg_parts(streams: &[(String, Vec<u8>)]) -> MsgParts {
 fn msg_codepage(streams: &[(String, Vec<u8>)]) -> u32 {
     let read = |id: u16| -> Option<u32> {
         streams.iter().find_map(|(n, b)| {
+            if !at_root(n) {
+                return None;
+            }
             let (pid, ty) = prop_id(n)?;
             (pid == id && ty == 0x0003 && b.len() >= 4).then(|| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).filter(|&cp| cp != 0)
         })
     };
     read(0x3FFD).or_else(|| read(0x3FDE)).unwrap_or(1252)
+}
+
+fn at_root(name: &str) -> bool {
+    !name.contains('/') && !name.contains('\\')
 }
 
 fn prop_id(name: &str) -> Option<(u16, u16)> {
@@ -723,7 +875,7 @@ fn prop_id(name: &str) -> Option<(u16, u16)> {
 fn prop_text(streams: &[(String, Vec<u8>)], id: u16, cp: u32) -> String {
     let mut ansi_hit = None;
     for (name, bytes) in streams {
-        if name.to_ascii_lowercase().contains("__attach") {
+        if !at_root(name) {
             continue;
         }
         let Some((pid, ty)) = prop_id(name) else { continue };
@@ -755,6 +907,327 @@ fn prop_bytes(name: &str, bytes: &[u8], cp: u32) -> String {
 fn utf16_z(b: &[u8]) -> String {
     let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
     String::from_utf16_lossy(&u).trim().to_string()
+}
+
+// MS-OXRTFCP dictionary. The write cursor starts at its length (207).
+const RTF_DICT: &[u8] = b"{\\rtf1\\ansi\\mac\\deff0\\deftab720{\\fonttbl;}{\\f0\\fnil \\froman \\fswiss \\fmodern \\fscript \\fdecor MS Sans SerifSymbolArialTimes New RomanCourier{\\colortbl\\red0\\green0\\blue0\r\n\\par \\pard\\plain\\f0\\fs20\\b\\i\\u\\tab\\tx";
+
+/// `PidTagRtfCompressed` (`0x1009`, `0102`). `MELA` is stored raw; `LZFu` is the dictionary codec.
+fn rtf_inflate(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 16 {
+        return None;
+    }
+    let raw_size = u32::from_le_bytes(data.get(4..8)?.try_into().ok()?) as usize;
+    let kind = u32::from_le_bytes(data.get(8..12)?.try_into().ok()?);
+    if raw_size > 2 << 20 {
+        return None;
+    }
+    let rest = &data[16..];
+    const MELA: u32 = 0x414C_454D;
+    const LZFU: u32 = 0x7546_5A4C;
+    if kind == MELA {
+        let n = raw_size.min(rest.len());
+        return Some(rest[..n].to_vec());
+    }
+    if kind != LZFU {
+        return None;
+    }
+    let mut dict = [0u8; 4096];
+    if RTF_DICT.len() > dict.len() {
+        return None;
+    }
+    dict[..RTF_DICT.len()].copy_from_slice(RTF_DICT);
+    let mut w = RTF_DICT.len();
+    let mut out = Vec::with_capacity(raw_size.min(64 * 1024));
+    let mut i = 0usize;
+    while i < rest.len() && out.len() < raw_size {
+        let flags = rest[i];
+        i += 1;
+        for bit in 0..8 {
+            if i >= rest.len() || out.len() >= raw_size {
+                break;
+            }
+            if flags & (1 << bit) == 0 {
+                let b = rest[i];
+                i += 1;
+                out.push(b);
+                dict[w] = b;
+                w = (w + 1) % 4096;
+            } else {
+                if i + 1 >= rest.len() {
+                    return Some(out);
+                }
+                let refer = ((rest[i] as usize) << 8) | rest[i + 1] as usize;
+                i += 2;
+                let mut src = refer >> 4;
+                let len = (refer & 0x0F) + 2;
+                if src == w {
+                    return Some(out);
+                }
+                for _ in 0..len {
+                    if out.len() >= raw_size {
+                        break;
+                    }
+                    let b = dict[src];
+                    out.push(b);
+                    dict[w] = b;
+                    w = (w + 1) % 4096;
+                    src = (src + 1) % 4096;
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+// ---------- Compound File Binary (Outlook .msg) ----------
+
+const CFB_END: u32 = 0xFFFF_FFF0;
+
+/// Streams of a compound file. Sector chains come from the FAT. A stream smaller than the mini
+/// cutoff (4096) is read through the mini FAT and the root's mini stream. Directory entries are
+/// a tree: left sibling, node, right sibling, and a storage's child.
+pub(crate) fn cfb_streams(data: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+    if data.len() < 512 || data[..8] != [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1] {
+        return None;
+    }
+    let major = u16::from_le_bytes(data.get(0x1A..0x1C)?.try_into().ok()?);
+    let shift = u16::from_le_bytes(data.get(0x1E..0x20)?.try_into().ok()?) as u32;
+    let mini_shift = u16::from_le_bytes(data.get(0x20..0x22)?.try_into().ok()?) as u32;
+    if !(9..=12).contains(&shift) || mini_shift != 6 {
+        return None;
+    }
+    let sec = 1usize << shift;
+    let mut cutoff = u32::from_le_bytes(data.get(0x38..0x3C)?.try_into().ok()?) as u64;
+    if cutoff < 64 {
+        cutoff = 4096;
+    }
+    let fat = cfb_fat(data, sec)?;
+    let entries = cfb_dir(data, &fat, sec, major)?;
+    let root = entries.iter().position(|e| e.kind == 5)?;
+    let mini = if entries[root].size == 0 {
+        Vec::new()
+    } else {
+        cfb_chain(data, &fat, sec, entries[root].start, entries[root].size)?
+    };
+    let mini_fat = cfb_mini_fat(data, &fat, sec);
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    cfb_walk(data, &fat, &mini, &mini_fat, sec, cutoff, &entries, root as u32, "", 0, &mut seen, &mut out);
+    (!out.is_empty()).then_some(out)
+}
+
+struct CfbEnt {
+    name: String,
+    kind: u8,
+    left: u32,
+    right: u32,
+    child: u32,
+    start: u32,
+    size: u64,
+}
+
+fn cfb_u32(data: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
+}
+
+fn cfb_sector<'a>(data: &'a [u8], index: u32, sec: usize) -> Option<&'a [u8]> {
+    if index >= CFB_END {
+        return None;
+    }
+    let start = 512usize.checked_add((index as usize).checked_mul(sec)?)?;
+    data.get(start..start.checked_add(sec)?)
+}
+
+fn cfb_fat(data: &[u8], sec: usize) -> Option<Vec<u32>> {
+    let mut secs = Vec::new();
+    for i in 0..109 {
+        let v = cfb_u32(data, 0x4C + i * 4)?;
+        if v < CFB_END {
+            secs.push(v);
+        }
+    }
+    let mut next = cfb_u32(data, 0x44)?;
+    let mut guard = 0u32;
+    while next < CFB_END && guard < 4096 {
+        guard += 1;
+        let chunk = cfb_sector(data, next, sec)?;
+        let n = sec / 4;
+        if n == 0 {
+            break;
+        }
+        for i in 0..n - 1 {
+            let v = u32::from_le_bytes(chunk.get(i * 4..i * 4 + 4)?.try_into().ok()?);
+            if v < CFB_END {
+                secs.push(v);
+            }
+        }
+        next = u32::from_le_bytes(chunk.get((n - 1) * 4..n * 4)?.try_into().ok()?);
+    }
+    let mut fat = Vec::new();
+    for s in secs {
+        let chunk = cfb_sector(data, s, sec)?;
+        for i in 0..sec / 4 {
+            fat.push(u32::from_le_bytes(chunk.get(i * 4..i * 4 + 4)?.try_into().ok()?));
+        }
+    }
+    (!fat.is_empty()).then_some(fat)
+}
+
+fn cfb_chain(data: &[u8], fat: &[u32], sec: usize, start: u32, size: u64) -> Option<Vec<u8>> {
+    let size = size.min(2 << 20) as usize;
+    if size == 0 || start >= CFB_END {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::with_capacity(size);
+    let mut s = start;
+    let mut seen = Vec::new();
+    while s < CFB_END && out.len() < size && seen.len() < 100_000 {
+        if seen.contains(&s) {
+            break;
+        }
+        seen.push(s);
+        let chunk = cfb_sector(data, s, sec)?;
+        let need = size - out.len();
+        if need >= chunk.len() {
+            out.extend_from_slice(chunk);
+        } else {
+            out.extend_from_slice(&chunk[..need]);
+        }
+        s = fat.get(s as usize).copied().unwrap_or(0xFFFF_FFFE);
+    }
+    (out.len() == size).then_some(out)
+}
+
+fn cfb_dir(data: &[u8], fat: &[u32], sec: usize, major: u16) -> Option<Vec<CfbEnt>> {
+    let start = cfb_u32(data, 0x30)?;
+    let raw = cfb_chain_all(data, fat, sec, start, 1024 * 128)?;
+    let mut entries = Vec::new();
+    for e in raw.chunks_exact(128) {
+        let nlen = u16::from_le_bytes([e[64], e[65]]) as usize & !1;
+        let name = if (2..=64).contains(&nlen) {
+            let u: Vec<u16> = e[..nlen - 2].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            String::from_utf16_lossy(&u)
+        } else {
+            String::new()
+        };
+        let size = if major >= 4 {
+            u64::from_le_bytes(e[120..128].try_into().ok()?)
+        } else {
+            u32::from_le_bytes(e[120..124].try_into().ok()?) as u64
+        };
+        entries.push(CfbEnt {
+            name,
+            kind: e[66],
+            left: u32::from_le_bytes(e[68..72].try_into().ok()?),
+            right: u32::from_le_bytes(e[72..76].try_into().ok()?),
+            child: u32::from_le_bytes(e[76..80].try_into().ok()?),
+            start: u32::from_le_bytes(e[116..120].try_into().ok()?),
+            size,
+        });
+    }
+    (!entries.is_empty()).then_some(entries)
+}
+
+fn cfb_chain_all(data: &[u8], fat: &[u32], sec: usize, start: u32, cap: usize) -> Option<Vec<u8>> {
+    if start >= CFB_END {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut s = start;
+    let mut seen = Vec::new();
+    while s < CFB_END && out.len() < cap && seen.len() < 100_000 {
+        if seen.contains(&s) {
+            break;
+        }
+        seen.push(s);
+        let chunk = cfb_sector(data, s, sec)?;
+        let room = cap - out.len();
+        if room >= chunk.len() {
+            out.extend_from_slice(chunk);
+        } else {
+            out.extend_from_slice(&chunk[..room]);
+        }
+        s = fat.get(s as usize).copied().unwrap_or(0xFFFF_FFFE);
+    }
+    Some(out)
+}
+
+fn cfb_mini_fat(data: &[u8], fat: &[u32], sec: usize) -> Vec<u32> {
+    let start = cfb_u32(data, 0x3C).unwrap_or(0xFFFF_FFFE);
+    let raw = cfb_chain_all(data, fat, sec, start, 256 * sec).unwrap_or_default();
+    raw.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+}
+
+fn cfb_mini(mini: &[u8], mini_fat: &[u32], start: u32, size: usize) -> Option<Vec<u8>> {
+    if size == 0 || start >= CFB_END {
+        return None;
+    }
+    let mut out = Vec::with_capacity(size);
+    let mut s = start;
+    let mut seen = Vec::new();
+    while s < CFB_END && out.len() < size && seen.len() < 100_000 {
+        if seen.contains(&s) {
+            break;
+        }
+        seen.push(s);
+        let off = (s as usize).checked_mul(64)?;
+        let Some(chunk) = mini.get(off..off.saturating_add(64).min(mini.len())) else { break };
+        if chunk.is_empty() {
+            break;
+        }
+        let need = size - out.len();
+        if need >= chunk.len() {
+            out.extend_from_slice(chunk);
+        } else {
+            out.extend_from_slice(&chunk[..need]);
+        }
+        s = mini_fat.get(s as usize).copied().unwrap_or(0xFFFF_FFFE);
+    }
+    (out.len() == size).then_some(out)
+}
+
+fn cfb_walk(
+    data: &[u8],
+    fat: &[u32],
+    mini: &[u8],
+    mini_fat: &[u32],
+    sec: usize,
+    cutoff: u64,
+    entries: &[CfbEnt],
+    idx: u32,
+    prefix: &str,
+    depth: u32,
+    seen: &mut Vec<u32>,
+    out: &mut Vec<(String, Vec<u8>)>,
+) {
+    if depth > 16 || out.len() >= 400 || idx >= CFB_END {
+        return;
+    }
+    let Some(e) = entries.get(idx as usize) else { return };
+    if seen.contains(&idx) {
+        return;
+    }
+    seen.push(idx);
+    let (left, right, child, kind, name, start, size) = (e.left, e.right, e.child, e.kind, e.name.clone(), e.start, e.size);
+    cfb_walk(data, fat, mini, mini_fat, sec, cutoff, entries, left, prefix, depth, seen, out);
+    if kind == 2 && size > 0 && size <= 2 << 20 && !name.is_empty() {
+        let bytes = if size < cutoff { cfb_mini(mini, mini_fat, start, size as usize) } else { cfb_chain(data, fat, sec, start, size) };
+        if let Some(bytes) = bytes {
+            let path = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+            out.push((path, bytes));
+        }
+    } else if kind == 1 || kind == 5 {
+        let child_prefix = if kind == 5 {
+            String::new()
+        } else if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        cfb_walk(data, fat, mini, mini_fat, sec, cutoff, entries, child, &child_prefix, depth + 1, seen, out);
+    }
+    cfb_walk(data, fat, mini, mini_fat, sec, cutoff, entries, right, prefix, depth, seen, out);
 }
 
 // ---------- tar and gzip ----------
@@ -1187,9 +1660,10 @@ pub(crate) fn decode_dds(bytes: &[u8]) -> Option<(i32, i32, Vec<u8>)> {
     }
     let fourcc = &bytes[84..88];
     if fourcc == b"DX10" {
-        return None;
+        return decode_dx10(bytes, w, h);
     }
     let flags = u32::from_le_bytes(bytes[80..84].try_into().ok()?);
+    // DXT1 is BC1, DXT3 is BC2, DXT5 is BC3. DX10 uses the DXGI format instead of these names.
     let pixels = if fourcc == b"DXT1" || fourcc == b"DXT3" || fourcc == b"DXT5" {
         decode_dxt(bytes.get(128..)?, w, h, fourcc)?
     } else if flags & 0x40 != 0 {
@@ -1197,6 +1671,20 @@ pub(crate) fn decode_dds(bytes: &[u8]) -> Option<(i32, i32, Vec<u8>)> {
     } else {
         return None;
     };
+    Some(sample_down(w, h, pixels))
+}
+
+/// DX10 header: BC1 (71/72), BC2 (74/75), BC3 (77/78). Pixel data starts 20 bytes after the DDS header.
+fn decode_dx10(bytes: &[u8], w: usize, h: usize) -> Option<(i32, i32, Vec<u8>)> {
+    let dx = bytes.get(128..148)?;
+    let fmt = u32::from_le_bytes(dx[0..4].try_into().ok()?);
+    let fourcc: &[u8] = match fmt {
+        71 | 72 => b"DXT1",
+        74 | 75 => b"DXT3",
+        77 | 78 => b"DXT5",
+        _ => return None,
+    };
+    let pixels = decode_dxt(bytes.get(148..)?, w, h, fourcc)?;
     Some(sample_down(w, h, pixels))
 }
 
@@ -1827,6 +2315,53 @@ mod tests {
         let (w, h, px) = decode_dds(&dxt).unwrap();
         assert_eq!((w, h), (4, 4));
         assert_eq!(&px[0..4], &[0, 0, 255, 255]);
+
+        // DX10 BC1: same 4×4 block, pixel data 20 bytes after the DDS header.
+        let mut dx10 = vec![0u8; 148];
+        dx10[..4].copy_from_slice(b"DDS ");
+        dx10[4..8].copy_from_slice(&124u32.to_le_bytes());
+        dx10[12..16].copy_from_slice(&4u32.to_le_bytes());
+        dx10[16..20].copy_from_slice(&4u32.to_le_bytes());
+        dx10[84..88].copy_from_slice(b"DX10");
+        dx10[128..132].copy_from_slice(&71u32.to_le_bytes()); // DXGI_FORMAT_BC1_UNORM
+        dx10.extend(red.to_le_bytes());
+        dx10.extend(red.to_le_bytes());
+        dx10.extend([0, 0, 0, 0]);
+        let (w, h, px) = decode_dds(&dx10).unwrap();
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(&px[0..4], &[0, 0, 255, 255]);
+    }
+
+    fn sample_image(name: &str) -> Vec<u8> {
+        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/images").join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    /// gradient.dds is 32×24, so a fit that refuses to scale up leaves it a speck. The 256² files must decode whole.
+    #[test]
+    fn dds_samples_keep_their_size_and_a_known_pixel() {
+        let g = sample_image("gradient.dds");
+        let (w, h, px) = decode_dds(&g).unwrap();
+        assert_eq!((w, h), (32, 24));
+        assert!(px.len() == 32 * 24 * 4);
+        assert_ne!(&px[0..4], &px[(23 * 32 + 31) * 4..][..4], "gradient is not flat");
+
+        let bc1 = sample_image("gradient-256-bc1.dds");
+        let (w, h, px) = decode_dds(&bc1).unwrap();
+        assert_eq!((w, h), (256, 256));
+        assert_eq!(&px[0..4], &[0, 0, 255, 255], "block (0,0) red");
+        assert_eq!(&px[(4 * 4)..][..4], &[0, 255, 0, 255], "block (1,0) green");
+
+        let bc3 = sample_image("gradient-256-bc3.dds");
+        let (w, h, px) = decode_dds(&bc3).unwrap();
+        assert_eq!((w, h), (256, 256));
+        assert_eq!(&px[0..4], &[0, 0, 255, 255]);
+        assert_eq!(px[3], 255);
+
+        let raw = sample_image("gradient-256.dds");
+        let (w, h, px) = decode_dds(&raw).unwrap();
+        assert_eq!((w, h), (256, 256));
+        assert_eq!(&px[0..4], &[0, 0, 40, 255]);
+        assert_eq!(&px[(255 * 256 + 255) * 4..][..4], &[255, 255, 40, 255]);
     }
 
     fn ico_bmp(w: usize, h: usize, bgra: [u8; 4]) -> Vec<u8> {
@@ -1883,5 +2418,369 @@ mod tests {
         assert_eq!(rows[0].len(), 64);
         assert_eq!(rows[0][0], "0");
         assert_eq!(rows[0][63], "63");
+    }
+
+    fn sample_mail(name: &str) -> Vec<u8> {
+        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/mail").join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    #[test]
+    fn msg_samples_round_trip_through_the_compound_file() {
+        let harbor = msg_parts(&cfb_streams(&sample_mail("harbor.msg")).unwrap());
+        assert_eq!(harbor.subject, "Harbor invoice");
+        assert_eq!(harbor.from, "Kim <kim@example.com>");
+        assert_eq!(harbor.to, "Lee");
+        assert_eq!(harbor.date, "2023-11-14 22:13 UTC");
+        assert_eq!(harbor.body, "Please pay the attached invoice.");
+        assert_eq!(harbor.files, vec!["bolts.pdf".to_string()]);
+        let hello = msg_parts(&cfb_streams(&sample_mail("hello.msg")).unwrap());
+        assert_eq!(hello.subject, "Hello");
+        assert_eq!(hello.from, "Ada <ada@example.com>");
+        assert_eq!(hello.to, "Bao");
+        assert_eq!(hello.body, "Hello from Ada.");
+        assert_eq!(hello.files, vec!["notes.txt".to_string()]);
+    }
+
+    #[test]
+    fn msg_long_filename_wins_and_recipients_fill_an_empty_to_line() {
+        let streams = vec![
+            ("__attach_version1.0_#00000000/__substg1.0_3704001E".into(), b"INV.PDF\0".to_vec()),
+            ("__attach_version1.0_#00000000/__substg1.0_3707001F".into(), u16le("invoice.pdf")),
+            ("__recip_version1.0_#00000000/__substg1.0_3001001F".into(), u16le("Lee Park")),
+            ("__recip_version1.0_#00000000/__substg1.0_39FE001F".into(), u16le("lee@example.com")),
+            ("__recip_version1.0_#00000000/__substg1.0_0C150003".into(), 1u32.to_le_bytes().to_vec()),
+            ("__recip_version1.0_#00000001/__substg1.0_3001001E".into(), b"Ada\0".to_vec()),
+            ("__recip_version1.0_#00000001/__substg1.0_3003001E".into(), b"ada@example.com\0".to_vec()),
+            ("__recip_version1.0_#00000001/__substg1.0_0C150003".into(), 2u32.to_le_bytes().to_vec()),
+            ("__substg1.0_3FFD0003".into(), 1252u32.to_le_bytes().to_vec()),
+        ];
+        let m = msg_parts(&streams);
+        assert_eq!(m.files, vec!["invoice.pdf".to_string()]);
+        assert_eq!(m.to, "Lee Park <lee@example.com>");
+        assert_eq!(m.cc, "Ada <ada@example.com>");
+    }
+
+    #[test]
+    fn msg_html_binary_and_compressed_rtf_fill_an_empty_body() {
+        assert_eq!(RTF_DICT.len(), 207);
+        let html = msg_parts(&[("__substg1.0_10130102".into(), b"<p>Hello <b>there</b></p>".to_vec())]);
+        assert_eq!(html.body, "Hello there");
+        let raw = b"{\\rtf1 Hello from RTF}";
+        let mut wrapped = Vec::new();
+        wrapped.extend(12u32.wrapping_add(raw.len() as u32).to_le_bytes());
+        wrapped.extend((raw.len() as u32).to_le_bytes());
+        wrapped.extend(0x414C_454Du32.to_le_bytes()); // MELA
+        wrapped.extend(0u32.to_le_bytes());
+        wrapped.extend(raw);
+        let plain = msg_parts(&[("__substg1.0_10090102".into(), wrapped)]);
+        assert_eq!(plain.body, "Hello from RTF");
+
+        // LZFu: literals A, B, then a reference that repeats them, then the end marker.
+        let mut lz = Vec::new();
+        let payload = {
+            // Bit clear is a literal, bit set is a reference: A, B, repeat, end.
+            let mut p = vec![0x0Cu8, b'A', b'B'];
+            p.extend([0x0C, 0xF0]); // offset 207, length 2
+            p.extend([0x0D, 0x30]); // offset 211 == write cursor, end
+            p
+        };
+        lz.extend(12u32.wrapping_add(payload.len() as u32).to_le_bytes());
+        lz.extend(4u32.to_le_bytes());
+        lz.extend(0x7546_5A4Cu32.to_le_bytes());
+        lz.extend(0u32.to_le_bytes());
+        lz.extend(&payload);
+        let got = rtf_inflate(&lz).unwrap();
+        assert_eq!(got, b"ABAB");
+    }
+
+    #[test]
+    fn cfb_reads_mini_chain_fat_chain_and_version_4() {
+        let mut mini = vec![0u8; 80];
+        for (i, b) in mini.iter_mut().enumerate() {
+            *b = 0x40 + (i as u8);
+        }
+        let mut fat = vec![0u8; 5000];
+        for (i, b) in fat.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let bytes = pack_cfb(
+            &[
+                node("Root Entry", 5, vec![], NO_STREAM, NO_STREAM, 1),
+                node("small", 2, mini.clone(), NO_STREAM, 2, NO_STREAM),
+                node("big", 2, fat.clone(), NO_STREAM, NO_STREAM, NO_STREAM),
+            ],
+            512,
+        );
+        let streams = cfb_streams(&bytes).unwrap();
+        let got = |n: &str| streams.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(got("small"), mini);
+        assert_eq!(got("big"), fat);
+
+        // The two mini sectors are swapped, and the mini FAT chain follows the swap.
+        let swapped = swap_mini_sectors(&bytes);
+        let streams = cfb_streams(&swapped).unwrap();
+        assert_eq!(streams.iter().find(|(k, _)| k == "small").unwrap().1, mini);
+
+        let v4 = pack_cfb(&[node("Root Entry", 5, vec![], NO_STREAM, NO_STREAM, 1), node("wide", 2, b"sector-4096".to_vec(), NO_STREAM, NO_STREAM, NO_STREAM)], 4096);
+        let streams = cfb_streams(&v4).unwrap();
+        assert_eq!(streams[0].0, "wide");
+        assert_eq!(streams[0].1, b"sector-4096");
+    }
+
+    #[test]
+    fn outlook_msg_sample_has_unicode_ansi_recipients_and_an_attachment() {
+        let bytes = outlook_cfb();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/mail/outlook.msg");
+        std::fs::write(&path, &bytes).unwrap();
+        let read = std::fs::read(&path).unwrap();
+        assert_eq!(read, bytes);
+        let m = msg_parts(&cfb_streams(&read).unwrap());
+        assert_eq!(m.subject, "Dock notice");
+        assert_eq!(m.from, "Kim Lee <kim@example.com>");
+        assert_eq!(m.to, "Lee Park <lee@example.com>");
+        assert_eq!(m.cc, "Caf\u{e9} <ada@example.com>");
+        assert_eq!(m.body, "Please see the attached invoice.");
+        assert_eq!(m.files, vec!["invoice.pdf".to_string()]);
+        assert_eq!(m.date, "2023-11-14 22:13 UTC");
+        // Every property is under the 4096-byte mini cutoff, so the bytes live in the mini stream.
+        assert!(read.len() < 64 * 1024);
+    }
+
+    const NO_STREAM: u32 = 0xFFFF_FFFF;
+
+    struct Node {
+        name: String,
+        kind: u8,
+        data: Vec<u8>,
+        left: u32,
+        right: u32,
+        child: u32,
+    }
+
+    fn node(name: &str, kind: u8, data: Vec<u8>, left: u32, right: u32, child: u32) -> Node {
+        Node { name: name.into(), kind, data, left, right, child }
+    }
+
+    fn outlook_cfb() -> Vec<u8> {
+        let ft = (11_644_473_600u64 + 1_700_000_000) * 10_000_000;
+        let body = "Please see the attached invoice.";
+        assert!(body.encode_utf16().count() * 2 + 2 > 64, "body must cross a mini sector");
+        let n = NO_STREAM;
+        pack_cfb(
+            &[
+                node("Root Entry", 5, vec![], n, n, 1),
+                node("__substg1.0_0037001F", 2, u16le("Dock notice"), n, 2, n),
+                node("__substg1.0_0037001E", 2, b"ANSI dock\0".to_vec(), n, 3, n),
+                node("__substg1.0_0C1A001F", 2, u16le("Kim Lee"), n, 4, n),
+                node("__substg1.0_0065001E", 2, b"kim@example.com\0".to_vec(), n, 5, n),
+                node("__substg1.0_1000001F", 2, u16le(body), n, 6, n),
+                node("__substg1.0_3FFD0003", 2, 1252u32.to_le_bytes().to_vec(), n, 7, n),
+                node("__substg1.0_3FDE0003", 2, 949u32.to_le_bytes().to_vec(), n, 8, n),
+                node("__substg1.0_00390040", 2, ft.to_le_bytes().to_vec(), n, 9, n),
+                node("__recip_version1.0_#00000000", 1, vec![], n, 13, 10),
+                node("__substg1.0_3001001F", 2, u16le("Lee Park"), n, 11, n),
+                node("__substg1.0_39FE001F", 2, u16le("lee@example.com"), n, 12, n),
+                node("__substg1.0_0C150003", 2, 1u32.to_le_bytes().to_vec(), n, n, n),
+                node("__recip_version1.0_#00000001", 1, vec![], n, 17, 14),
+                node("__substg1.0_3001001E", 2, b"Caf\xE9\0".to_vec(), n, 15, n),
+                node("__substg1.0_3003001E", 2, b"ada@example.com\0".to_vec(), n, 16, n),
+                node("__substg1.0_0C150003", 2, 2u32.to_le_bytes().to_vec(), n, n, n),
+                node("__attach_version1.0_#00000000", 1, vec![], n, n, 18),
+                node("__substg1.0_3704001E", 2, b"INV.PDF\0".to_vec(), n, 19, n),
+                node("__substg1.0_3707001F", 2, u16le("invoice.pdf"), n, n, n),
+            ],
+            512,
+        )
+    }
+
+    /// Version 3 uses 512-byte sectors; version 4 uses 4096. The header stays 512 bytes either way.
+    fn pack_cfb(nodes: &[Node], sector: usize) -> Vec<u8> {
+        let mini_size = 64usize;
+        let mut mini_blob = Vec::new();
+        let mut mini_fat: Vec<u32> = Vec::new();
+        let mut mini_at = vec![NO_STREAM; nodes.len()];
+        for (i, node) in nodes.iter().enumerate() {
+            if node.kind != 2 || node.data.len() >= 4096 {
+                continue;
+            }
+            let start = (mini_blob.len() / mini_size) as u32;
+            mini_at[i] = start;
+            let n = node.data.len().div_ceil(mini_size).max(1);
+            for s in 0..n {
+                let at = start + s as u32;
+                mini_fat.resize((at as usize) + 1, 0xFFFF_FFFF);
+                mini_fat[at as usize] = if s + 1 == n { 0xFFFF_FFFE } else { at + 1 };
+            }
+            mini_blob.extend_from_slice(&node.data);
+            mini_blob.resize(mini_blob.len().div_ceil(mini_size) * mini_size, 0);
+        }
+        let per = sector / 4;
+        let dir_sectors = (nodes.len() * 128).div_ceil(sector).max(1);
+        let mini_stream_sectors = mini_blob.len().div_ceil(sector);
+        let mini_fat_sectors = if mini_fat.is_empty() { 0 } else { mini_fat.len().div_ceil(per).max(1) };
+        let mut large_sectors = Vec::new();
+        for node in nodes {
+            if node.kind == 2 && node.data.len() >= 4096 {
+                large_sectors.push(node.data.len().div_ceil(sector));
+            }
+        }
+        let mut fat_sectors = 1usize;
+        loop {
+            let total = fat_sectors + dir_sectors + mini_fat_sectors + mini_stream_sectors + large_sectors.iter().sum::<usize>();
+            let need = total.div_ceil(per).max(1);
+            if need <= fat_sectors {
+                break;
+            }
+            fat_sectors = need;
+        }
+        let total = fat_sectors + dir_sectors + mini_fat_sectors + mini_stream_sectors + large_sectors.iter().sum::<usize>();
+        let dir_at = fat_sectors;
+        let minifat_at = dir_at + dir_sectors;
+        let ministream_at = minifat_at + mini_fat_sectors;
+        let mut large_at = Vec::new();
+        let mut cursor = ministream_at + mini_stream_sectors;
+        for nsec in &large_sectors {
+            large_at.push(cursor);
+            cursor += nsec;
+        }
+        let mut fat = vec![0xFFFF_FFFFu32; fat_sectors * per];
+        for s in 0..fat_sectors {
+            fat[s] = 0xFFFF_FFFD;
+        }
+        let chain = |fat: &mut Vec<u32>, start: usize, n: usize| {
+            if n == 0 {
+                return;
+            }
+            for i in 0..n - 1 {
+                fat[start + i] = (start + i + 1) as u32;
+            }
+            fat[start + n - 1] = 0xFFFF_FFFE;
+        };
+        chain(&mut fat, dir_at, dir_sectors);
+        chain(&mut fat, minifat_at, mini_fat_sectors);
+        chain(&mut fat, ministream_at, mini_stream_sectors);
+        for (start, n) in large_at.iter().zip(large_sectors.iter()) {
+            chain(&mut fat, *start, *n);
+        }
+        let mut sectors = vec![vec![0u8; sector]; total];
+        for (i, chunk) in fat.chunks(per).enumerate() {
+            if i >= fat_sectors {
+                break;
+            }
+            for (j, v) in chunk.iter().enumerate() {
+                sectors[i][j * 4..j * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        let mut dir = vec![0u8; dir_sectors * sector];
+        let mut large_i = 0usize;
+        for (i, node) in nodes.iter().enumerate() {
+            let e = &mut dir[i * 128..i * 128 + 128];
+            let mut wide: Vec<u16> = node.name.encode_utf16().collect();
+            wide.push(0);
+            wide.truncate(32);
+            for (j, u) in wide.iter().enumerate() {
+                e[j * 2..j * 2 + 2].copy_from_slice(&u.to_le_bytes());
+            }
+            let nlen = (wide.len() * 2) as u16;
+            e[64..66].copy_from_slice(&nlen.to_le_bytes());
+            e[66] = node.kind;
+            e[67] = 1;
+            e[68..72].copy_from_slice(&node.left.to_le_bytes());
+            e[72..76].copy_from_slice(&node.right.to_le_bytes());
+            e[76..80].copy_from_slice(&node.child.to_le_bytes());
+            let (start, size) = if node.kind == 5 {
+                if mini_stream_sectors == 0 { (0xFFFF_FFFEu32, 0u64) } else { (ministream_at as u32, mini_blob.len() as u64) }
+            } else if node.kind == 2 && node.data.len() >= 4096 {
+                let start = large_at[large_i] as u32;
+                large_i += 1;
+                (start, node.data.len() as u64)
+            } else if node.kind == 2 {
+                (mini_at[i], node.data.len() as u64)
+            } else {
+                (0xFFFF_FFFE, 0)
+            };
+            e[116..120].copy_from_slice(&start.to_le_bytes());
+            e[120..128].copy_from_slice(&size.to_le_bytes());
+        }
+        for (i, chunk) in dir.chunks(sector).enumerate() {
+            sectors[dir_at + i][..chunk.len()].copy_from_slice(chunk);
+        }
+        if mini_fat_sectors > 0 {
+            let mut raw = vec![0xFFu8; mini_fat_sectors * sector];
+            for (i, v) in mini_fat.iter().enumerate() {
+                raw[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            for (i, chunk) in raw.chunks(sector).enumerate() {
+                sectors[minifat_at + i][..chunk.len()].copy_from_slice(chunk);
+            }
+        }
+        if mini_stream_sectors > 0 {
+            for (i, chunk) in mini_blob.chunks(sector).enumerate() {
+                sectors[ministream_at + i][..chunk.len()].copy_from_slice(chunk);
+            }
+        }
+        let mut li = 0usize;
+        for node in nodes {
+            if node.kind == 2 && node.data.len() >= 4096 {
+                let start = large_at[li];
+                li += 1;
+                for (i, chunk) in node.data.chunks(sector).enumerate() {
+                    sectors[start + i][..chunk.len()].copy_from_slice(chunk);
+                }
+            }
+        }
+        let mut file = vec![0u8; 512 + total * sector];
+        file[0..8].copy_from_slice(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
+        file[0x18..0x1A].copy_from_slice(&0x003Eu16.to_le_bytes());
+        let major: u16 = if sector == 4096 { 4 } else { 3 };
+        file[0x1A..0x1C].copy_from_slice(&major.to_le_bytes());
+        file[0x1C..0x1E].copy_from_slice(&0xFFFEu16.to_le_bytes());
+        file[0x1E..0x20].copy_from_slice(&(sector.trailing_zeros() as u16).to_le_bytes());
+        file[0x20..0x22].copy_from_slice(&6u16.to_le_bytes());
+        if major >= 4 {
+            file[0x28..0x2C].copy_from_slice(&(dir_sectors as u32).to_le_bytes());
+        }
+        file[0x2C..0x30].copy_from_slice(&(fat_sectors as u32).to_le_bytes());
+        file[0x30..0x34].copy_from_slice(&(dir_at as u32).to_le_bytes());
+        file[0x38..0x3C].copy_from_slice(&4096u32.to_le_bytes());
+        if mini_fat_sectors == 0 {
+            file[0x3C..0x40].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+        } else {
+            file[0x3C..0x40].copy_from_slice(&(minifat_at as u32).to_le_bytes());
+            file[0x40..0x44].copy_from_slice(&(mini_fat_sectors as u32).to_le_bytes());
+        }
+        file[0x44..0x48].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+        for i in 0..109 {
+            let v = if i < fat_sectors { i as u32 } else { 0xFFFF_FFFF };
+            file[0x4C + i * 4..0x50 + i * 4].copy_from_slice(&v.to_le_bytes());
+        }
+        for (i, secb) in sectors.iter().enumerate() {
+            let at = 512 + i * sector;
+            file[at..at + sector].copy_from_slice(secb);
+        }
+        file
+    }
+
+    /// Reverse the first stream's two mini sectors and point the mini FAT at the new order.
+    fn swap_mini_sectors(data: &[u8]) -> Vec<u8> {
+        let mut data = data.to_vec();
+        let sec = 512usize;
+        let dir_at = u32::from_le_bytes(data[0x30..0x34].try_into().unwrap()) as usize;
+        let root = 512 + dir_at * sec;
+        let mini_start = u32::from_le_bytes(data[root + 116..root + 120].try_into().unwrap()) as usize;
+        let mini_off = 512 + mini_start * sec;
+        let a = data[mini_off..mini_off + 64].to_vec();
+        let b = data[mini_off + 64..mini_off + 128].to_vec();
+        data[mini_off..mini_off + 64].copy_from_slice(&b);
+        data[mini_off + 64..mini_off + 128].copy_from_slice(&a);
+        let mf = u32::from_le_bytes(data[0x3C..0x40].try_into().unwrap()) as usize;
+        let mf_off = 512 + mf * sec;
+        // Chain was 0 -> 1 -> EOC. Now the bytes of sector 0 sit in slot 1, so start at 1 -> 0 -> EOC.
+        data[mf_off..mf_off + 4].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+        data[mf_off + 4..mf_off + 8].copy_from_slice(&0u32.to_le_bytes());
+        // The small stream is directory entry 1. Point it at mini sector 1.
+        let ent = root + 128;
+        data[ent + 116..ent + 120].copy_from_slice(&1u32.to_le_bytes());
+        data
     }
 }

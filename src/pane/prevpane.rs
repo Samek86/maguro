@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 
 use super::fsize::{cached_stat, classify_ui, is_volume_root, preview_walk, remember_stat};
-use super::peek::{bar_hit, bar_layout, bar_rgb, host_handler, nudge, page_toward, paint_card, thumb_scroll, BarHit, PeekReq, Pix};
+use super::peek::{bar_hit, bar_layout, bar_rgb, host_handler, image_fit_px, nudge, page_toward, paint_card, thumb_scroll, BarHit, PeekReq, Pix};
 use super::preview::*;
 use super::pview::{self, line_no_at, list_row_at, row_h, selected_text, BodyScroll};
 use super::status::{dir_totals, DirTotals, DIR_STACK_CAP};
@@ -1461,13 +1461,17 @@ fn nudge_zoom(h: HWND, delta: i32) {
     set_pane_zoom(h, next);
 }
 
+/// Same letterbox as Quick Look ([`image_fit_px`]): up or down, aspect kept. Zoom is a multiple of that fit.
 unsafe fn paint_fit(dc: HDC, area: RECT, p: &Pix, scroll: &mut BodyScroll, zoom: f64) {
     let bw = (area.right - area.left).max(1);
     let bh = (area.bottom - area.top).max(1);
-    let fit = (bw as f64 / p.w.max(1) as f64).min(bh as f64 / p.h.max(1) as f64).min(1.0);
+    let (fw, fh) = image_fit_px(p.w, p.h, bw, bh);
     let z = if zoom < 0.05 { 1.0 } else { zoom };
-    let w = ((p.w as f64) * fit * z).round().max(1.0) as i32;
-    let h = ((p.h as f64) * fit * z).round().max(1.0) as i32;
+    let grow = |n: i32| {
+        if (z - 1.0).abs() < 1e-9 { n } else { ((n as f64) * z).round().max(1.0) as i32 }
+    };
+    let w = grow(fw).max(1);
+    let h = grow(fh).max(1);
     scroll.page_w = bw;
     scroll.page_h = bh;
     scroll.max_x = (w - bw).max(0);

@@ -2019,11 +2019,10 @@ unsafe fn step_by_wheel(raw: i32) {
 }
 
 // ---------- zoom (images and PDF pages) ----------
-// Stored as a multiple of the fit size: 1.0 draws what the preview drew before zoom existed
-// (an image letterboxed in the stage, never enlarged; a PDF page fitted to the stage width,
-// stacked from the top). The header shows that multiple — "150%" is 1.5× fit, and the wheel
-// range is 10%..800%. It is not a percent of the file's pixels: the bitmap is already a fitted
-// render, and a PDF re-render would make a bitmap-pixel percent jump.
+// Stored as a multiple of the fit size: 1.0 letterboxes the picture in the stage (scaled up or
+// down, aspect kept) or fits a PDF page to the stage width, stacked from the top. The header
+// shows that multiple — "150%" is 1.5× fit, and the wheel range is 10%..800%. It is not a
+// percent of the file's pixels.
 
 pub(crate) const ZOOM_MIN: f64 = 0.10;
 pub(crate) const ZOOM_MAX: f64 = 8.0;
@@ -2084,13 +2083,18 @@ fn scaled(n: i32, zoom: f64) -> i32 {
     ((n as f64) * z).round().max(1.0) as i32
 }
 
-/// Fit an image into the stage the way paint used to: letterboxed, never enlarged.
+/// Letterbox the picture in the stage. Scales up and down and keeps the aspect ratio.
+///
+/// DDS and ICO are decoded at their own pixel size. A JPEG is often already resampled to the
+/// request, so a cap at 1 left a 32×24 DDS as a speck while a large photo filled the pane.
 pub(crate) fn image_fit_px(nat_w: i32, nat_h: i32, stage_w: i32, stage_h: i32) -> (i32, i32) {
     if nat_w <= 0 || nat_h <= 0 || stage_w <= 0 || stage_h <= 0 {
         return (0, 0);
     }
-    let k = (stage_w as f32 / nat_w as f32).min(stage_h as f32 / nat_h as f32).min(1.0);
-    ((nat_w as f32 * k) as i32, (nat_h as f32 * k) as i32)
+    let k = (stage_w as f64 / nat_w as f64).min(stage_h as f64 / nat_h as f64);
+    let w = ((nat_w as f64) * k).round().max(1.0) as i32;
+    let h = ((nat_h as f64) * k).round().max(1.0) as i32;
+    (w, h)
 }
 
 /// Fit one PDF page to the stage width, but never wider than its fit-render. Zoom 1 matches paint_pages.
@@ -2567,7 +2571,7 @@ pub(crate) unsafe fn paint_peek(h: HWND) {
         };
         match j.done.as_ref().map(|p| &p.body) {
             Some(Body::Pic(p)) => {
-                // Fit letterboxes and never enlarges. Zoom is a multiple of that; at 1.0 the rect matches the old one.
+                // Fit letterboxes, scaling up or down. Zoom is a multiple of that; at 1.0 the rect is the fit.
                 let st = g.stage;
                 let (vw, vh) = ((st.right - st.left).max(0), (st.bottom - st.top).max(0));
                 let (nw, nh) = p.lay();
@@ -3816,9 +3820,11 @@ mod tests {
         assert!(peek_resize_wants_pdf(ZOOM_MIN));
         assert!(peek_resize_wants_pdf(ZOOM_MAX));
 
-        // Fit never enlarges; a wide picture is width-bound.
-        assert_eq!(image_fit_px(100, 50, 400, 400), (100, 50));
+        // The picture scales to the stage both ways. A wide one is width-bound; a square one is height-bound.
+        assert_eq!(image_fit_px(100, 50, 400, 400), (400, 200));
         assert_eq!(image_fit_px(1000, 500, 200, 200), (200, 100));
+        assert_eq!(image_fit_px(32, 24, 800, 600), (800, 600));
+        assert_eq!(image_fit_px(256, 256, 100, 80), (80, 80));
         assert_eq!(page_fit_size(800, 1000, 400), (400, 500));
         assert_eq!(page_fit_size(100, 50, 400), (100, 50));
         assert_eq!(page_fit_size(0, 10, 100), (0, 0));

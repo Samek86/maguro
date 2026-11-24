@@ -1292,7 +1292,7 @@ fn epub_preview(path: &str) -> Option<Body> {
 }
 
 fn msg_preview(path: &str) -> Option<Body> {
-    let streams = unsafe { msg_streams(path) }?;
+    let streams = msg_file_streams(path)?;
     let parts = msg_parts(&streams);
     if parts.subject.is_empty() && parts.from.is_empty() && parts.to.is_empty() && parts.body.is_empty() && parts.files.is_empty() {
         return None;
@@ -1315,6 +1315,17 @@ fn msg_preview(path: &str) -> Option<Body> {
     out.push('\n');
     out.push_str(&parts.body);
     Some(Body::Text { text: out, kind: TextKind::Plain, cut: false })
+}
+
+fn msg_file_streams(path: &str) -> Option<Vec<(String, Vec<u8>)>> {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Some(streams) = cfb_streams(&bytes) {
+            if !streams.is_empty() {
+                return Some(streams);
+            }
+        }
+    }
+    unsafe { msg_streams(path) }
 }
 
 unsafe fn msg_streams(path: &str) -> Option<Vec<(String, Vec<u8>)>> {
@@ -1360,7 +1371,10 @@ unsafe fn collect_streams(stg: &IStorage, prefix: &str, out: &mut Vec<(String, V
             if let Some(bytes) = read_storage_stream(stg, &name) {
                 out.push((full, bytes));
             }
-        } else if stat.r#type == STGTY_STORAGE.0 as u32 && name.to_ascii_lowercase().contains("attach") {
+        } else if stat.r#type == STGTY_STORAGE.0 as u32 && {
+            let lower = name.to_ascii_lowercase();
+            lower.contains("attach") || lower.contains("recip")
+        } {
             if let Ok(child) = stg.OpenStorage(&HSTRING::from(&name), None, STGM_READ | STGM_SHARE_EXCLUSIVE, std::ptr::null(), 0) {
                 collect_streams(&child, &full, out, depth + 1);
             }
@@ -1569,7 +1583,7 @@ mod tests {
         let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         let read = |name: &str| {
             let path = sample_mail(name);
-            let streams = unsafe { msg_streams(path.to_str().unwrap()) }.unwrap_or_else(|| panic!("no streams in {}", path.display()));
+            let streams = msg_file_streams(path.to_str().unwrap()).unwrap_or_else(|| panic!("no streams in {}", path.display()));
             msg_parts(&streams)
         };
         let harbor = read("harbor.msg");
