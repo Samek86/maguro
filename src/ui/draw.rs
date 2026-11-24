@@ -783,7 +783,6 @@ fn pane_line_icon(id: i32) -> Option<LineIcon> {
         ID_BACK => LineIcon::Back,
         ID_FWD => LineIcon::Fwd,
         ID_UP => LineIcon::Up,
-        ID_OPEN_IN => LineIcon::OpenIn,
         ID_PANE_ADD => LineIcon::Add,
         _ => return None,
     })

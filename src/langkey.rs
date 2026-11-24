@@ -377,11 +377,8 @@ pub(crate) enum Key {
     OpenFoldersFromExplorerWindowsCtrlShift,
     OpenGithub,
     OpenInActivePane,
-    OpenInAnotherPane,
-    OpenInCopyOrMoveAnotherPane,
     OpenInExplorer,
     OpenProjectPage,
-    OpenSelectedFolderOrThisOneIn,
     OpenSession,
     OpenSession2,
     OpenSession3,
@@ -599,7 +596,6 @@ pub(crate) enum Key {
     SummaryErr,
     SummaryOk,
     SummarySkipped,
-    SwapPlacesWithCtrlAltShiftArrows,
     SwapWithPaneAbove,
     SwapWithPaneBelow,
     SwapWithPaneLeft,
@@ -976,7 +972,7 @@ pub(crate) enum Key {
     UninstallRefused,
 }
 
-pub(crate) const KEY_COUNT: usize = 967;
+pub(crate) const KEY_COUNT: usize = 963;
 
 const _: () = assert!((Key::UninstallRefused as usize) + 1 == KEY_COUNT);
 
@@ -1353,11 +1349,8 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Open folders from Explorer windows\tCtrl+Shift+O",
     "Open GitHub",
     "open in the active pane",
-    "Open in another pane",
-    "Open in / copy or move to another pane. One pane: split side by side and open there",
     "Open in Explorer",
     "Open the project page?",
-    "Open the selected folder (or this one) in:",
     "Open session",
     "Open session...",
     "Open a session…",
@@ -1573,7 +1566,6 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "{n} items · {changes} changes · {e} errors",
     "{n} items · {changes} changes",
     " · skipped {skipped}",
-    "Swap places with\tCtrl+Alt+Shift+arrows",
     "Swap with the pane above",
     "Swap with the pane below",
     "Swap with the pane to the left",
@@ -2323,11 +2315,8 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "open_folders_from_explorer_windows_ctrl_shift",
     "open_github",
     "open_in_active_pane",
-    "open_in_another_pane",
-    "open_in_copy_or_move_another_pane",
     "open_in_explorer",
     "open_project_page",
-    "open_selected_folder_or_this_one_in",
     "open_session",
     "open_session_2",
     "open_session_3",
@@ -2543,7 +2532,6 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "summary_err",
     "summary_ok",
     "summary_skipped",
-    "swap_places_with_ctrl_alt_shift_arrows",
     "swap_with_pane_above",
     "swap_with_pane_below",
     "swap_with_pane_left",

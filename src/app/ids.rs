@@ -7,7 +7,6 @@ pub(crate) const ID_BACK: i32 = 101;
 pub(crate) const ID_FWD: i32 = 102;
 pub(crate) const ID_UP: i32 = 103;
 pub(crate) const ID_EDIT: i32 = 104;
-pub(crate) const ID_OPEN_IN: i32 = 105;
 pub(crate) const ID_FILTER: i32 = 106;
 pub(crate) const ID_FAV: i32 = 107; // ☆+ / ★: add or remove the pane's folder from favourites
 pub(crate) const ID_PANE_ADD: i32 = 108; // add a pane tab; shown only while this pane has one tab
