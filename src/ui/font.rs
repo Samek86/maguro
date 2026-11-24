@@ -604,20 +604,29 @@ pub(crate) unsafe fn bold_ui_font() -> HFONT {
     stored
 }
 
-/// Preview faces from the body font: Consolas, semibold, then semibold at 1.6× and 1.3×.
-/// Order is mono, bold, heading, subheading. Heights use the body's `lfHeight`.
-fn preview_logfonts(base: LOGFONTW) -> [LOGFONTW; 4] {
+/// Preview faces from the body font: Consolas, semibold, then semibold at 1.6× and 1.3×, then italic.
+/// Order is mono, bold, heading, subheading, italic, bold-italic. Heights use the body's `lfHeight`.
+fn preview_logfonts(base: LOGFONTW) -> [LOGFONTW; 6] {
     let mono = LOGFONTW { lfFaceName: logfont("Consolas", 0).lfFaceName, ..base };
     let bold = LOGFONTW { lfWeight: 600, ..base };
     let h1 = LOGFONTW { lfWeight: 600, lfHeight: base.lfHeight * 16 / 10, ..base };
     let h2 = LOGFONTW { lfWeight: 600, lfHeight: base.lfHeight * 13 / 10, ..base };
-    [mono, bold, h1, h2]
+    let italic = LOGFONTW { lfItalic: 1, ..base };
+    let both = LOGFONTW { lfItalic: 1, lfWeight: 600, ..base };
+    [mono, bold, h1, h2, italic, both]
 }
 
 /// GDI fonts for one preview body. The caller owns them and deletes them with [`delete_font`].
-pub(crate) unsafe fn preview_fonts(base: &LOGFONTW) -> [HFONT; 4] {
+pub(crate) unsafe fn preview_fonts(base: &LOGFONTW) -> [HFONT; 6] {
     let faces = preview_logfonts(*base);
-    [CreateFontIndirectW(&faces[0]), CreateFontIndirectW(&faces[1]), CreateFontIndirectW(&faces[2]), CreateFontIndirectW(&faces[3])]
+    [
+        CreateFontIndirectW(&faces[0]),
+        CreateFontIndirectW(&faces[1]),
+        CreateFontIndirectW(&faces[2]),
+        CreateFontIndirectW(&faces[3]),
+        CreateFontIndirectW(&faces[4]),
+        CreateFontIndirectW(&faces[5]),
+    ]
 }
 
 #[cfg(test)]
@@ -628,7 +637,7 @@ mod tests {
     fn preview_faces_keep_the_body_metrics() {
         let mut base = logfont("Segoe UI", 16);
         base.lfWeight = 400;
-        let [mono, bold, h1, h2] = preview_logfonts(base);
+        let [mono, bold, h1, h2, italic, both] = preview_logfonts(base);
         assert_eq!(mono.lfHeight, base.lfHeight);
         assert_eq!(mono.lfWeight, 400);
         assert_eq!(utf16_face(&mono.lfFaceName), "Consolas");
@@ -639,14 +648,18 @@ mod tests {
         assert_eq!(h1.lfWeight, 600);
         assert_eq!(h2.lfHeight, base.lfHeight * 13 / 10);
         assert_eq!(h2.lfWeight, 600);
+        assert_eq!(italic.lfItalic, 1);
+        assert_eq!(italic.lfWeight, 400);
+        assert_eq!(both.lfItalic, 1);
+        assert_eq!(both.lfWeight, 600);
     }
 
     #[test]
     fn preview_tiers_grow_with_the_bumped_body() {
         let before = logfont("Segoe UI", 12);
         let after = logfont("Segoe UI", 13);
-        let [mono_b, bold_b, h1_b, h2_b] = preview_logfonts(before);
-        let [mono_a, bold_a, h1_a, h2_a] = preview_logfonts(after);
+        let [mono_b, bold_b, h1_b, h2_b, _, _] = preview_logfonts(before);
+        let [mono_a, bold_a, h1_a, h2_a, _, _] = preview_logfonts(after);
         assert_eq!((mono_b.lfHeight, mono_a.lfHeight), (-12, -13));
         assert_eq!((bold_b.lfHeight, bold_a.lfHeight), (-12, -13));
         assert_eq!((h1_b.lfHeight, h1_a.lfHeight), (-19, -20));

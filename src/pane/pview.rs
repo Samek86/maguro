@@ -20,6 +20,7 @@ pub(crate) enum Style {
     H3,
     Bullet,
     Quote,
+    Code, // fenced markdown: monospace, not wrapped, with a background
 }
 
 pub(crate) struct Line {
@@ -29,6 +30,30 @@ pub(crate) struct Line {
     pub(crate) h: i32,
     pub(crate) no: usize, // source line number, for the code gutter
     table: Option<(Vec<Vec<String>>, Vec<i32>)>,
+    frags: Vec<Frag>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Run {
+    pub(crate) text: String,
+    pub(crate) bold: bool,
+    pub(crate) italic: bool,
+    pub(crate) code: bool,
+}
+
+struct Frag {
+    text: String,
+    bold: bool,
+    italic: bool,
+    code: bool,
+    x: i32,
+    dy: i32,
+}
+
+pub(crate) struct MdLine {
+    pub(crate) text: String,
+    pub(crate) style: Style,
+    pub(crate) runs: Vec<Run>,
 }
 
 /// Scroll, laid-out lines and the heading faces for one preview surface.
@@ -45,44 +70,172 @@ pub(crate) struct BodyScroll {
 
 /// Heading faces cached by the caller. Quick Look keeps them on its view; the preview pane
 /// keeps them in a thread-local so the shared scroll state can cross threads.
-pub(crate) type FaceCache = Option<(i32, [HFONT; 4])>;
+pub(crate) type FaceCache = Option<(i32, [HFONT; 6])>;
 
-/// Markdown lines with their look: headings, bullets, quotes, fenced code. Inline marks are dropped.
-pub(crate) fn md_lines(text: &str) -> Vec<(String, Style)> {
+/// Markdown lines: headings, lists, quotes, rules, fenced code. Inline bold, italic, code, and links stay on `runs`.
+pub(crate) fn md_lines(text: &str) -> Vec<MdLine> {
     let mut out = Vec::new();
-    let mut code = false;
+    let mut fence: Option<&'static str> = None;
     for l in text.lines() {
         let t = l.trim_start();
+        if let Some(mark) = fence {
+            if t.starts_with(mark) {
+                fence = None;
+                continue;
+            }
+            out.push(MdLine { text: l.to_string(), style: Style::Code, runs: Vec::new() });
+            continue;
+        }
         if t.starts_with("```") || t.starts_with("~~~") {
-            code = !code;
+            fence = Some(if t.starts_with("```") { "```" } else { "~~~" });
             continue;
         }
-        if code {
-            out.push((l.to_string(), Style::Mono));
+        let hashes = t.bytes().take_while(|&c| c == b'#').count();
+        if (1..=6).contains(&hashes) && t.as_bytes().get(hashes) == Some(&b' ') {
+            let (text, _) = inline_runs(&t[hashes + 1..]);
+            let style = match hashes {
+                1 => Style::H1,
+                2 => Style::H2,
+                _ => Style::H3,
+            };
+            out.push(MdLine { text, style, runs: Vec::new() });
             continue;
         }
-        let clean = |s: &str| s.replace("**", "").replace("__", "").replace('`', "");
-        let h3 = t.strip_prefix("### ").or_else(|| t.strip_prefix("#### ")).or_else(|| t.strip_prefix("##### "));
-        let item = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")).or_else(|| t.strip_prefix("+ "));
-        let (text, style) = if let Some(h) = h3 {
-            (clean(h), Style::H3)
-        } else if let Some(h) = t.strip_prefix("## ") {
-            (clean(h), Style::H2)
-        } else if let Some(h) = t.strip_prefix("# ") {
-            (clean(h), Style::H1)
-        } else if let Some(b) = item {
-            let indent = "    ".repeat((l.len() - t.len()) / 2);
-            (format!("{indent}• {}", clean(b)), Style::Bullet)
-        } else if let Some(q) = t.strip_prefix("> ").or_else(|| t.strip_prefix('>')) {
-            (clean(q), Style::Quote)
-        } else if t.len() >= 3 && t.chars().all(|c| c == '-') {
-            ("────────".into(), Style::Quote)
-        } else {
-            (clean(l), Style::Plain)
-        };
-        out.push((text, style));
+        if is_rule(t) {
+            out.push(MdLine { text: "────────".into(), style: Style::Quote, runs: Vec::new() });
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("> ").or_else(|| t.strip_prefix('>')) {
+            let (text, runs) = inline_runs(rest.trim_start());
+            out.push(MdLine { text, style: Style::Quote, runs });
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")).or_else(|| t.strip_prefix("+ ")) {
+            out.push(bullet_line(l, t, "• ", rest));
+            continue;
+        }
+        if let Some((num, rest)) = numbered(t) {
+            out.push(bullet_line(l, t, &format!("{num}. "), rest));
+            continue;
+        }
+        let (text, runs) = inline_runs(l);
+        out.push(MdLine { text, style: Style::Plain, runs });
     }
     out
+}
+
+fn bullet_line(raw: &str, trimmed: &str, marker: &str, rest: &str) -> MdLine {
+    let indent = "    ".repeat((raw.len() - trimmed.len()) / 2);
+    let (body, mut runs) = inline_runs(rest);
+    let prefix = format!("{indent}{marker}");
+    let text = format!("{prefix}{body}");
+    if !runs.is_empty() {
+        runs.insert(0, Run { text: prefix, bold: false, italic: false, code: false });
+    }
+    MdLine { text, style: Style::Bullet, runs }
+}
+
+fn numbered(t: &str) -> Option<(&str, &str)> {
+    let b = t.as_bytes();
+    let mut i = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 || i > 6 || b.get(i) != Some(&b'.') || b.get(i + 1) != Some(&b' ') {
+        return None;
+    }
+    Some((&t[..i], &t[i + 2..]))
+}
+
+fn is_rule(t: &str) -> bool {
+    let u: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+    u.len() >= 3 && (u.chars().all(|c| c == '-') || u.chars().all(|c| c == '*') || u.chars().all(|c| c == '_'))
+}
+
+/// Visible text plus styled runs. A line with no bold, italic, or code returns an empty run list.
+pub(crate) fn inline_runs(input: &str) -> (String, Vec<Run>) {
+    let b = input.as_bytes();
+    let mut i = 0;
+    let mut runs: Vec<Run> = Vec::new();
+    let mut cur = String::new();
+    let mut bold = false;
+    let mut italic = false;
+    let flush = |runs: &mut Vec<Run>, cur: &mut String, bold: bool, italic: bool, code: bool| {
+        if cur.is_empty() {
+            return;
+        }
+        if let Some(last) = runs.last_mut() {
+            if last.bold == bold && last.italic == italic && last.code == code {
+                last.text.push_str(cur);
+                cur.clear();
+                return;
+            }
+        }
+        runs.push(Run { text: std::mem::take(cur), bold, italic, code });
+    };
+    while i < b.len() {
+        if b[i] == b'`' {
+            if let Some(end) = b[i + 1..].iter().position(|&c| c == b'`') {
+                flush(&mut runs, &mut cur, bold, italic, false);
+                let inner = input[i + 1..i + 1 + end].to_string();
+                if !inner.is_empty() {
+                    runs.push(Run { text: inner, bold: false, italic: false, code: true });
+                }
+                i += end + 2;
+                continue;
+            }
+        }
+        if b[i..].starts_with(b"**") || b[i..].starts_with(b"__") {
+            flush(&mut runs, &mut cur, bold, italic, false);
+            bold = !bold;
+            i += 2;
+            continue;
+        }
+        if b[i] == b'*' || (b[i] == b'_' && underscore_mark(b, i, italic)) {
+            flush(&mut runs, &mut cur, bold, italic, false);
+            italic = !italic;
+            i += 1;
+            continue;
+        }
+        if b[i] == b'[' {
+            if let Some((shown, next)) = link_text(&input[i..]) {
+                flush(&mut runs, &mut cur, bold, italic, false);
+                cur.push_str(&shown);
+                flush(&mut runs, &mut cur, bold, italic, false);
+                i += next;
+                continue;
+            }
+        }
+        let ch = input[i..].chars().next().unwrap_or('\u{FFFD}');
+        cur.push(ch);
+        i += ch.len_utf8();
+    }
+    flush(&mut runs, &mut cur, bold, italic, false);
+    let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+    if runs.iter().any(|r| r.bold || r.italic || r.code) { (text, runs) } else { (text, Vec::new()) }
+}
+
+fn underscore_mark(b: &[u8], i: usize, italic: bool) -> bool {
+    if italic {
+        return true;
+    }
+    if i > 0 && b[i - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    b[i + 1..].contains(&b'_')
+}
+
+fn link_text(s: &str) -> Option<(String, usize)> {
+    let end = s.find(']')?;
+    if end < 1 || !s[end..].starts_with("](") {
+        return None;
+    }
+    let url_at = end + 2;
+    let close = s[url_at..].find(')')?;
+    let label = s[1..end].to_string();
+    let url = s[url_at..url_at + close].to_string();
+    let shown = if label.is_empty() { url } else if label == url { label } else { format!("{label} ({url})") };
+    Some((shown, url_at + close + 1))
 }
 
 /// Source text, or the laid-out lines inside `sel` (1-based, inclusive) when a range is set.
@@ -129,7 +282,7 @@ pub(crate) fn row_h(fh: i32, dpi: i32) -> i32 {
     fh + SPACE_8 * dpi / 96
 }
 
-pub(crate) unsafe fn fonts(cache: &mut FaceCache, dpi: i32, base: HFONT) -> [HFONT; 4] {
+pub(crate) unsafe fn fonts(cache: &mut FaceCache, dpi: i32, base: HFONT) -> [HFONT; 6] {
     if let Some((d, f)) = *cache {
         if d == dpi {
             return f;
@@ -153,9 +306,9 @@ pub(crate) unsafe fn clear_faces(cache: &mut FaceCache) {
     }
 }
 
-fn style_font(st: Style, font: HFONT, f: &[HFONT; 4]) -> HFONT {
+fn style_font(st: Style, font: HFONT, f: &[HFONT; 6]) -> HFONT {
     match st {
-        Style::Mono => f[0],
+        Style::Mono | Style::Code => f[0],
         Style::H1 => f[2],
         Style::H2 => f[3],
         Style::H3 => f[1],
@@ -163,30 +316,46 @@ fn style_font(st: Style, font: HFONT, f: &[HFONT; 4]) -> HFONT {
     }
 }
 
+fn run_font(bold: bool, italic: bool, code: bool, font: HFONT, f: &[HFONT; 6]) -> HFONT {
+    if code {
+        f[0]
+    } else if bold && italic {
+        f[5]
+    } else if bold {
+        f[1]
+    } else if italic {
+        f[4]
+    } else {
+        font
+    }
+}
+
 // Heights of every line at this width, measured once per item and width; painting then draws only what shows.
-unsafe fn layout(scroll: &mut BodyScroll, dc: HDC, gen: usize, width: i32, text: &str, kind: TextKind, font: HFONT, f: &[HFONT; 4], dpi: i32) -> i32 {
+unsafe fn layout(scroll: &mut BodyScroll, dc: HDC, gen: usize, width: i32, text: &str, kind: TextKind, font: HFONT, f: &[HFONT; 6], dpi: i32) -> i32 {
     if let Some(total) = scroll.layout.as_ref().filter(|(g, w, ..)| *g == gen && *w == width).map(|l| l.3) {
         return total;
     }
-    let src: Vec<(String, Style)> = match kind {
+    let plain = |l: &str, st: Style| MdLine { text: l.to_string(), style: st, runs: Vec::new() };
+    let src: Vec<MdLine> = match kind {
         TextKind::Markdown => md_lines(text),
-        TextKind::Code => text.lines().map(|l| (l.to_string(), Style::Mono)).collect(),
-        TextKind::Plain => text.lines().map(|l| (l.to_string(), Style::Plain)).collect(),
-        TextKind::Document => text.lines().map(|l| (l.to_string(), Style::Plain)).collect(),
+        TextKind::Code => text.lines().map(|l| plain(l, Style::Mono)).collect(),
+        TextKind::Plain => text.lines().map(|l| plain(l, Style::Plain)).collect(),
+        TextKind::Document => text.lines().map(|l| plain(l, Style::Plain)).collect(),
     };
     let mut y = 0;
     let mut lines = Vec::with_capacity(src.len().min(40_000));
     let mut source = src.into_iter().take(40_000).enumerate().peekable();
-    while let Some((no, (t, st))) = source.next() {
+    while let Some((no, line)) = source.next() {
+        let (t, st, runs) = (line.text, line.style, line.runs);
         if kind == TextKind::Document && t.starts_with("| ") {
             let mut rows = Vec::new();
             let parse = |line: &str| -> Vec<String> {
                 line.strip_prefix("| ").unwrap_or(line).strip_suffix('|').unwrap_or(line).split(" | ").map(|cell| cell.trim().to_string()).collect()
             };
             rows.push(parse(&t));
-            while source.peek().is_some_and(|(_, (line, _))| line.starts_with("| ")) {
-                if let Some((_, (line, _))) = source.next() {
-                    rows.push(parse(&line));
+            while source.peek().is_some_and(|(_, line)| line.text.starts_with("| ")) {
+                if let Some((_, line)) = source.next() {
+                    rows.push(parse(&line.text));
                 }
             }
             let mut widths = Vec::<i32>::new();
@@ -201,7 +370,7 @@ unsafe fn layout(scroll: &mut BodyScroll, dc: HDC, gen: usize, width: i32, text:
             }
             let rh = app(|a| a.fh) + scale(SPACE_8);
             let h = rh * rows.len() as i32;
-            lines.push(Line { text: String::new(), style: st, y, h, no: no + 1, table: Some((rows, widths)) });
+            lines.push(Line { text: String::new(), style: st, y, h, no: no + 1, table: Some((rows, widths)), frags: Vec::new() });
             y += h;
             continue;
         }
@@ -209,7 +378,15 @@ unsafe fn layout(scroll: &mut BodyScroll, dc: HDC, gen: usize, width: i32, text:
         let mut tm = TEXTMETRICW::default();
         _ = GetTextMetricsW(dc, &mut tm);
         let lh = tm.tmHeight + tm.tmExternalLeading;
-        let h = if st == Style::Mono || t.is_empty() {
+        let (frags, run_h) = if !runs.is_empty() && !matches!(st, Style::Mono | Style::Code | Style::H1 | Style::H2 | Style::H3) {
+            let (frags, h) = wrap_runs(dc, width, &runs, font, f, lh);
+            (frags, Some(h))
+        } else {
+            (Vec::new(), None)
+        };
+        let h = if let Some(h) = run_h {
+            h.max(lh)
+        } else if matches!(st, Style::Mono | Style::Code) || t.is_empty() {
             lh
         } else {
             let mut w: Vec<u16> = t.encode_utf16().collect();
@@ -223,7 +400,7 @@ unsafe fn layout(scroll: &mut BodyScroll, dc: HDC, gen: usize, width: i32, text:
             Style::H3 => lh / 3,
             _ => 0,
         };
-        lines.push(Line { text: t, style: st, y, h, no: no + 1, table: None });
+        lines.push(Line { text: t, style: st, y, h, no: no + 1, table: None, frags });
         y += h + if matches!(st, Style::H1 | Style::H2) { SPACE_4 * dpi / 96 } else { 0 };
     }
     scroll.layout = Some((gen, width, lines, y));
@@ -237,6 +414,56 @@ pub(crate) fn clamp_scroll(scroll: &mut BodyScroll, total: i32, page: i32) {
     scroll.y = scroll.y.clamp(0, scroll.max_y.max(0));
     // Text, tables and lists keep their own sideways scroll and do not grow this bar.
     (scroll.max_x, scroll.page_w) = (0, 0);
+}
+
+unsafe fn wrap_runs(dc: HDC, width: i32, runs: &[Run], font: HFONT, faces: &[HFONT; 6], lh: i32) -> (Vec<Frag>, i32) {
+    let width = width.max(1);
+    let mut frags = Vec::new();
+    let mut x = 0i32;
+    let mut dy = 0i32;
+    for run in runs {
+        for piece in run_pieces(&run.text) {
+            let face = run_font(run.bold, run.italic, run.code, font, faces);
+            let chunks: Vec<String> = if piece.chars().count() > 1 && text_w(dc, piece, face) > width {
+                piece.chars().map(|c| c.to_string()).collect()
+            } else {
+                vec![piece.to_string()]
+            };
+            for chunk in chunks {
+                if chunk.is_empty() {
+                    continue;
+                }
+                let w = text_w(dc, &chunk, face).max(1);
+                if x > 0 && x + w > width && chunk.trim().is_empty() == false {
+                    x = 0;
+                    dy += lh;
+                }
+                frags.push(Frag { text: chunk, bold: run.bold, italic: run.italic, code: run.code, x, dy });
+                x += w;
+            }
+        }
+    }
+    (frags, dy + lh)
+}
+
+fn run_pieces(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut spaces = None;
+    for (i, c) in s.char_indices() {
+        let sp = c == ' ' || c == '\t';
+        if spaces != Some(sp) {
+            if i > start {
+                out.push(&s[start..i]);
+            }
+            start = i;
+            spaces = Some(sp);
+        }
+    }
+    if start < s.len() {
+        out.push(&s[start..]);
+    }
+    out
 }
 
 pub(crate) unsafe fn text_w(dc: HDC, s: &str, font: HFONT) -> i32 {
@@ -289,7 +516,23 @@ pub(crate) unsafe fn paint_text(
             .as_ref()
             .map(|(_, _, lines, _)| lines.iter().filter_map(|l| l.table.as_ref()).map(|(_, widths)| widths.iter().sum::<i32>()).max().unwrap_or(0))
             .unwrap_or(0);
-        scroll.x = scroll.x.clamp(0, (full - (area.right - area.left)).max(0));
+        let view_w = (area.right - area.left).max(1);
+        scroll.page_w = view_w;
+        scroll.max_x = (full - view_w).max(0);
+        scroll.x = scroll.x.clamp(0, scroll.max_x);
+    } else {
+        let wide = scroll
+            .layout
+            .as_ref()
+            .map(|(_, _, lines, _)| {
+                lines.iter().filter(|l| matches!(l.style, Style::Mono | Style::Code)).map(|l| unsafe { text_w(dc, &l.text, f[0]) }).max().unwrap_or(0)
+            })
+            .unwrap_or(0);
+        if wide > width {
+            scroll.page_w = width.max(1);
+            scroll.max_x = wide - width;
+            scroll.x = scroll.x.clamp(0, scroll.max_x);
+        }
     }
     let (sy, sx) = (scroll.y, scroll.x);
     let mark = sel.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
@@ -316,7 +559,7 @@ pub(crate) unsafe fn paint_text(
                         if x + w > area.left && x < area.right {
                             let cell = row.get(col).map(String::as_str).unwrap_or("");
                             let rect = RECT { left: x + s(7), top: row_top, right: x + w - s(7), bottom: row_top + rh };
-                            paint_label(dc, rect, cell, font);
+                            paint_label(dc, rect, cell, if row_no == 0 { f[1] } else { font });
                             fill(dc, RECT { left: x + w - 1, top: row_top, right: x + w, bottom: row_top + rh }, pal().line);
                             fill(dc, RECT { left: x, top: row_top + rh - 1, right: x + w, bottom: row_top + rh }, pal().line);
                         }
@@ -335,7 +578,25 @@ pub(crate) unsafe fn paint_text(
                 let g = RECT { left: area.left, top, right: area.left + gutter - s(10), bottom: top + l.h };
                 paint_text_flags(dc, g, &l.no.to_string(), f[0], pal().sub, DT_RIGHT | DT_SINGLELINE);
             }
-            let mono = l.style == Style::Mono;
+            let mono = matches!(l.style, Style::Mono | Style::Code);
+            if l.style == Style::Code {
+                fill(dc, RECT { left: area.left, top, right: area.right, bottom: top + l.h }, pal().pill);
+            }
+            if !l.frags.is_empty() {
+                for frag in &l.frags {
+                    let face = run_font(frag.bold, frag.italic, frag.code, font, &f);
+                    let ink = if l.style == Style::Quote && !frag.code { pal().sub } else { pal().text };
+                    let fw = text_w(dc, &frag.text, face).max(1);
+                    let left = area.left + gutter + frag.x;
+                    let row_top = top + frag.dy;
+                    if frag.code {
+                        fill(dc, RECT { left, top: row_top, right: left + fw, bottom: row_top + fh }, blend(pal().pill, pal().line, 0.35));
+                    }
+                    let r = RECT { left, top: row_top, right: left + fw + s(4), bottom: row_top + fh };
+                    paint_text_flags(dc, r, &frag.text, face, ink, DT_SINGLELINE);
+                }
+                continue;
+            }
             let (ink, fnt) = match l.style {
                 Style::Quote => (pal().sub, font),
                 st => (pal().text, style_font(st, font, &f)),
@@ -373,8 +634,11 @@ pub(crate) unsafe fn paint_table(scroll: &mut BodyScroll, dc: HDC, area: RECT, r
     let rh = app(|a| a.fh) + s(SPACE_8);
     let total = rh * rows.len() as i32 + if cut { rh } else { 0 };
     clamp_scroll(scroll, total, area.bottom - area.top);
+    let view_w = (area.right - area.left).max(1);
     let full: i32 = num + widths.iter().sum::<i32>();
-    scroll.x = scroll.x.min((full - (area.right - area.left)).max(0)).max(0);
+    scroll.page_w = view_w;
+    scroll.max_x = (full - view_w).max(0);
+    scroll.x = scroll.x.clamp(0, scroll.max_x);
     let (sy, sx) = (scroll.y, scroll.x);
     clip(dc, area, || {
         let first = (sy / rh) as usize;
@@ -412,7 +676,7 @@ pub(crate) unsafe fn paint_table(scroll: &mut BodyScroll, dc: HDC, area: RECT, r
     });
 }
 
-pub(crate) unsafe fn paint_list(scroll: &mut BodyScroll, dc: HDC, area: RECT, rows: &[(String, String)], font: HFONT, dpi: i32) {
+pub(crate) unsafe fn paint_list(scroll: &mut BodyScroll, dc: HDC, area: RECT, rows: &[super::preview::ListItem], font: HFONT, dpi: i32) {
     let s = |v: i32| v * dpi / 96;
     let rh = app(|a| a.fh) + s(SPACE_8);
     let top0 = area.top;
@@ -423,16 +687,22 @@ pub(crate) unsafe fn paint_list(scroll: &mut BodyScroll, dc: HDC, area: RECT, ro
     let page = area.bottom - top0;
     clamp_scroll(scroll, rh * rows.len() as i32, page);
     let sy = scroll.y;
+    let dated = rows.iter().any(|r| !r.date.is_empty());
+    let dw = if dated { s(132) } else { 0 };
     let sw = s(90);
     clip(dc, RECT { top: top0, ..area }, || {
-        for (k, (name, size)) in rows.iter().enumerate().skip((sy / rh) as usize).take((page / rh + 2) as usize) {
+        for (k, row) in rows.iter().enumerate().skip((sy / rh) as usize).take((page / rh + 2) as usize) {
             let top = top0 + k as i32 * rh - sy;
             let r = RECT { left: area.left, top, right: area.right, bottom: top + rh };
             if k % 2 == 1 {
                 fill(dc, RECT { left: r.left - s(SPACE_8), right: r.right + s(SPACE_8), ..r }, blend(pal().card, pal().bg, 0.45));
             }
-            paint_label(dc, RECT { right: r.right - sw - s(SPACE_8), ..r }, name, font);
-            paint_meta_right(dc, RECT { left: r.right - sw, ..r }, size, font);
+            let right = r.right - sw - dw - s(SPACE_8);
+            paint_label(dc, RECT { right, ..r }, &row.name, font);
+            if dated {
+                paint_meta_right(dc, RECT { left: r.right - sw - dw, right: r.right - sw, ..r }, &row.date, font);
+            }
+            paint_meta_right(dc, RECT { left: r.right - sw, ..r }, &row.size, font);
         }
     });
 }
@@ -444,9 +714,9 @@ mod tests {
     #[test]
     fn selection_or_whole_text() {
         let lines = vec![
-            Line { text: "one".into(), style: Style::Plain, y: 0, h: 10, no: 1, table: None },
-            Line { text: "two".into(), style: Style::Plain, y: 10, h: 10, no: 2, table: None },
-            Line { text: "three".into(), style: Style::Plain, y: 20, h: 10, no: 3, table: None },
+            Line { text: "one".into(), style: Style::Plain, y: 0, h: 10, no: 1, table: None, frags: Vec::new() },
+            Line { text: "two".into(), style: Style::Plain, y: 10, h: 10, no: 2, table: None, frags: Vec::new() },
+            Line { text: "three".into(), style: Style::Plain, y: 20, h: 10, no: 3, table: None, frags: Vec::new() },
         ];
         assert_eq!(selected_text("one\ntwo\nthree", &lines, None), "one\ntwo\nthree");
         assert_eq!(selected_text("one\ntwo\nthree", &lines, Some((2, 3))), "two\nthree");
@@ -460,7 +730,7 @@ mod tests {
         assert_eq!(list_row_at(20, 100, 110, 20, 3), Some(1));
         assert_eq!(list_row_at(0, 100, 99, 20, 3), None);
         assert_eq!(list_row_at(0, 100, 160, 20, 3), None);
-        let lines = vec![Line { text: "a".into(), style: Style::Mono, y: 0, h: 16, no: 1, table: None }];
+        let lines = vec![Line { text: "a".into(), style: Style::Mono, y: 0, h: 16, no: 1, table: None, frags: Vec::new() }];
         assert_eq!(line_no_at(&lines, 0, 40, 48), Some(1));
         assert_eq!(line_no_at(&lines, 0, 40, 39), None);
     }

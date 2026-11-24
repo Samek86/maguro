@@ -1719,6 +1719,7 @@ unsafe fn handler_ready(h: HWND, gen: usize, ok: bool) {
 }
 
 // Text, tables and lists live in pview so the preview pane paints the same bodies.
+#[cfg(test)]
 pub(crate) use super::pview::{md_lines, Style};
 
 // ---------- scrollbar ----------
@@ -2662,7 +2663,8 @@ unsafe fn bars_now(h: HWND) -> (Option<BarNow>, Option<BarNow>) {
     let stage = geo_of(h).stage;
     view(|v| {
         let show_v = v.max_y > 0 && v.page_h > 0;
-        let show_h = !is_fit(v.zoom) && v.max_x > 0 && v.page_w > 0;
+        // Pictures grow this bar only while zoomed (fit keeps max_x at 0). Tables and long lines set it too.
+        let show_h = v.max_x > 0 && v.page_w > 0;
         let (vr, hr) = peek_scroll_rects(stage, dpi, show_v, show_h);
         let min_thumb = thumb_min(dpi);
         let vert = vr.and_then(|rects| {
@@ -3259,6 +3261,10 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let alt = GetAsyncKeyState(VK_MENU.0 as i32) < 0;
                 if ctrl && matches!(k, VK_0 | VK_NUMPAD0) {
                     set_zoom(h, 1.0, None);
+                } else if ctrl && matches!(k, VK_OEM_PLUS | VK_ADD | VK_OEM_MINUS | VK_SUBTRACT) && zoom_shape().is_some() {
+                    let delta = if matches!(k, VK_OEM_MINUS | VK_SUBTRACT) { -120 } else { 120 };
+                    let z = view(|v| zoom_factor(v.zoom, delta));
+                    set_zoom(h, z, None);
                 } else {
                     match k {
                         // a held F3 only opens it; its repeats must not close it again
@@ -3390,11 +3396,16 @@ mod tests {
 
     #[test]
     fn markdown_lines() {
-        let l = md_lines("# T\n\nsome **bold** `x`\n- a\n  - b\n> q\n```\ncode **\n```\n---");
-        let styles: Vec<Style> = l.iter().map(|x| x.1).collect();
+        let l = md_lines("# T\n\nsome **bold** `x`\n- a\n  - b\n> q\n```\ncode **\n```\n---\n1. n\n[Maguro](https://example.com)");
+        let styles: Vec<Style> = l.iter().map(|x| x.style).collect();
         use Style::*;
-        assert_eq!(styles, vec![H1, Plain, Plain, Bullet, Bullet, Quote, Mono, Quote]);
-        assert_eq!((l[2].0.as_str(), l[3].0.as_str(), l[4].0.as_str(), l[6].0.as_str()), ("some bold x", "• a", "    • b", "code **"));
+        assert_eq!(styles, vec![H1, Plain, Plain, Bullet, Bullet, Quote, Code, Quote, Bullet, Plain]);
+        assert_eq!(l[2].text, "some bold x");
+        assert!(l[2].runs.iter().any(|r| r.bold && r.text == "bold"));
+        assert!(l[2].runs.iter().any(|r| r.code && r.text == "x"));
+        assert_eq!((l[3].text.as_str(), l[4].text.as_str(), l[6].text.as_str()), ("• a", "    • b", "code **"));
+        assert_eq!(l[8].text, "1. n");
+        assert_eq!(l[9].text, "Maguro (https://example.com)");
     }
 
     #[test]

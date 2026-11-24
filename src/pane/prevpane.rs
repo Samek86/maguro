@@ -93,6 +93,8 @@ struct Slot {
     /// A click in the pane clears the flag so the handler can keep the keyboard.
     return_focus: bool,
     cancel: Option<Arc<AtomicBool>>,
+    /// Picture and PDF zoom, as a multiple of the fit size. 1 is fit. Reset when the file changes.
+    zoom: f64,
 }
 
 impl Default for Slot {
@@ -121,6 +123,7 @@ impl Default for Slot {
             seq: 0,
             return_focus: false,
             cancel: None,
+            zoom: 1.0,
         }
     }
 }
@@ -380,6 +383,7 @@ pub(crate) unsafe fn run_preview(force: bool) {
         slot.hit = Hit::default();
         slot.bar_drag = None;
         slot.return_focus = !inside;
+        slot.zoom = 1.0;
         slot.kind = if path.is_empty() { Kind::Empty } else { Kind::Opening };
         slot.gen
     };
@@ -507,8 +511,8 @@ fn produce(job: &Work) -> Ready {
 }
 
 unsafe fn produce_com(job: &Work, is_dir: bool, len: u64) -> Ready {
-    if !is_dir && !job.skip_handler && len > 0 && len <= HEAVY_MAX {
-        let ext = ext_of(&job.path);
+    let ext = ext_of(&job.path);
+    if !is_dir && !job.skip_handler && len > 0 && len <= HEAVY_MAX && !own_preview(&ext) {
         if let Some(g) = handler_for(&ext) {
             let facts = meta(&job.path, None);
             return Ready::Handler { clsid: g, facts };
@@ -996,7 +1000,7 @@ unsafe fn open_row(h: HWND, x: i32, y: i32) {
         let Some(Body::List { rows, .. }) = slot.body.as_ref() else { return };
         let rh = row_h(fh, dpi);
         let Some(i) = list_row_at(slot.scroll.y, slot.hit.body.top, y, rh, rows.len()) else { return };
-        let name = rows[i].0.clone();
+        let name = rows[i].name.clone();
         join_child(&slot.path, &name)
     };
     let Some(path) = jump else { return };
@@ -1115,15 +1119,29 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_MOUSEWHEEL => {
                 let raw = (wp.0 >> 16) as i16 as i32;
                 let px = app(|a| -raw * a.fh * 3 / 120);
-                let shift = (wp.0 & 0xffff) as u32 & MK_SHIFT.0 != 0;
-                if shift { scroll_by(h, 0, -px) } else { scroll_by(h, px, 0) };
+                let keys = (wp.0 & 0xffff) as u32;
+                let ctrl = keys & MK_CONTROL.0 != 0;
+                let shift = keys & MK_SHIFT.0 != 0;
+                if ctrl && preview_can_zoom(h) {
+                    nudge_zoom(h, raw);
+                } else if shift {
+                    scroll_by(h, 0, -px);
+                } else {
+                    scroll_by(h, px, 0);
+                }
             }
             WM_KEYDOWN => {
                 let k = VIRTUAL_KEY(wp.0 as u16);
                 let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32) < 0;
                 let page = slots().get(&key_of(h)).map(|s| s.scroll.page_h.max(1)).unwrap_or(1);
                 let line = app(|a| a.fh.max(1) * 3);
-                if ctrl && k == VIRTUAL_KEY(b'C' as u16) {
+                if ctrl && preview_can_zoom(h) && matches!(k, VK_OEM_PLUS | VK_ADD | VK_OEM_MINUS | VK_SUBTRACT | VK_0 | VK_NUMPAD0) {
+                    if matches!(k, VK_0 | VK_NUMPAD0) {
+                        set_pane_zoom(h, 1.0);
+                    } else {
+                        nudge_zoom(h, if matches!(k, VK_OEM_MINUS | VK_SUBTRACT) { -120 } else { 120 });
+                    }
+                } else if ctrl && k == VIRTUAL_KEY(b'C' as u16) {
                     copy_preview(h);
                 } else {
                     match k {
@@ -1341,8 +1359,8 @@ unsafe fn paint_preview(h: HWND) {
                     }
                     Some(Body::Table { rows, cut }) => pview::paint_table(&mut slot.scroll, dc, body, rows, *cut, font, dpi, faces),
                     Some(Body::List { rows, .. }) => pview::paint_list(&mut slot.scroll, dc, body, rows, font, dpi),
-                    Some(Body::Pic(p)) => paint_fit(dc, body, p),
-                    Some(Body::Pages { pages, total }) => paint_pages(&mut slot.scroll, dc, body, pages, *total, font, dpi),
+                    Some(Body::Pic(p)) => paint_fit(dc, body, p, &mut slot.scroll, slot.zoom),
+                    Some(Body::Pages { pages, total }) => paint_pages(&mut slot.scroll, dc, body, pages, *total, font, dpi, slot.zoom),
                     Some(Body::Card { icon, rows }) => paint_card(dc, body, icon.as_ref(), rows, font, dpi),
                     Some(Body::Handler(_)) | None => text(dc, body, tr(crate::Key::NoPreview), font, pal().sub, DT_CENTER),
                     }
@@ -1419,24 +1437,57 @@ unsafe fn paint_folder_head(dc: HDC, rc: RECT, slot: &mut Slot, font: HFONT, dpi
     (bottom, pad)
 }
 
-unsafe fn paint_fit(dc: HDC, area: RECT, p: &Pix) {
+fn preview_can_zoom(h: HWND) -> bool {
+    slots().get(&key_of(h)).is_some_and(|s| matches!(s.body, Some(Body::Pic(_) | Body::Pages { .. })))
+}
+
+fn set_pane_zoom(h: HWND, z: f64) {
+    if let Some(slot) = slots().get_mut(&key_of(h)) {
+        slot.zoom = z.clamp(0.1, 8.0);
+        slot.scroll.x = 0;
+        slot.scroll.y = 0;
+    }
+    unsafe { _ = InvalidateRect(Some(h), None, false) };
+}
+
+fn nudge_zoom(h: HWND, delta: i32) {
+    let z = slots().get(&key_of(h)).map(|s| s.zoom).unwrap_or(1.0);
+    let factor = if delta > 0 { 1.25 } else { 0.8 };
+    let steps = (delta.abs() / 120).max(1);
+    let mut next = if z < 0.05 { 1.0 } else { z };
+    for _ in 0..steps {
+        next *= factor;
+    }
+    set_pane_zoom(h, next);
+}
+
+unsafe fn paint_fit(dc: HDC, area: RECT, p: &Pix, scroll: &mut BodyScroll, zoom: f64) {
     let bw = (area.right - area.left).max(1);
     let bh = (area.bottom - area.top).max(1);
-    let k = (bw as f32 / p.w.max(1) as f32).min(bh as f32 / p.h.max(1) as f32).min(1.0);
-    let (w, h) = ((p.w as f32 * k) as i32, (p.h as f32 * k) as i32);
-    let x = area.left + (bw - w) / 2;
-    let y = area.top + (bh - h) / 2;
+    let fit = (bw as f64 / p.w.max(1) as f64).min(bh as f64 / p.h.max(1) as f64).min(1.0);
+    let z = if zoom < 0.05 { 1.0 } else { zoom };
+    let w = ((p.w as f64) * fit * z).round().max(1.0) as i32;
+    let h = ((p.h as f64) * fit * z).round().max(1.0) as i32;
+    scroll.page_w = bw;
+    scroll.page_h = bh;
+    scroll.max_x = (w - bw).max(0);
+    scroll.max_y = (h - bh).max(0);
+    scroll.x = scroll.x.clamp(0, scroll.max_x);
+    scroll.y = scroll.y.clamp(0, scroll.max_y);
+    let x = if w <= bw { area.left + (bw - w) / 2 } else { area.left - scroll.x };
+    let y = if h <= bh { area.top + (bh - h) / 2 } else { area.top - scroll.y };
     blit_bgra(dc, RECT { left: x, top: y, right: x + w, bottom: y + h }, p.w, p.h, &p.bgra);
 }
 
-unsafe fn paint_pages(scroll: &mut BodyScroll, dc: HDC, area: RECT, pages: &[Pix], total: u32, font: HFONT, dpi: i32) {
+unsafe fn paint_pages(scroll: &mut BodyScroll, dc: HDC, area: RECT, pages: &[Pix], total: u32, font: HFONT, dpi: i32, zoom: f64) {
     let s = |v: i32| v * dpi / 96;
     let gap = s(12);
     let width = (area.right - area.left).max(1);
     let mut boxes = Vec::with_capacity(pages.len());
     let mut y = s(8);
     for p in pages {
-        let k = (width as f32 * 0.92 / p.w.max(1) as f32).min(1.0);
+        let z = if zoom < 0.05 { 1.0 } else { zoom as f32 };
+        let k = (width as f32 * 0.92 / p.w.max(1) as f32).min(1.0) * z;
         let (w, h) = ((p.w as f32 * k) as i32, (p.h as f32 * k) as i32);
         boxes.push((y, w.max(1), h.max(1)));
         y += h.max(1) + gap;
@@ -1446,13 +1497,18 @@ unsafe fn paint_pages(scroll: &mut BodyScroll, dc: HDC, area: RECT, pages: &[Pix
         y += s(28);
     }
     pview::clamp_scroll(scroll, y, (area.bottom - area.top).max(0));
+    let widest = boxes.iter().map(|(_, w, _)| *w).max().unwrap_or(0);
+    scroll.page_w = width.max(1);
+    scroll.max_x = (widest - width).max(0);
+    scroll.x = scroll.x.clamp(0, scroll.max_x);
     let sy = scroll.y;
+    let sx = scroll.x;
     for (p, (top, w, h)) in pages.iter().zip(boxes.iter().copied()) {
         let top = area.top + top - sy;
         if top + h < area.top || top > area.bottom {
             continue;
         }
-        let x = area.left + (width - w) / 2;
+        let x = if w <= width { area.left + (width - w) / 2 } else { area.left - sx };
         blit_bgra(dc, RECT { left: x, top, right: x + w, bottom: top + h }, p.w, p.h, &p.bgra);
         frame(dc, RECT { left: x - 1, top: top - 1, right: x + w + 1, bottom: top + h + 1 }, 1, pal().line);
     }
@@ -1506,7 +1562,7 @@ fn preview_host_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
 #[cfg(test)]
 mod tests {
     use super::{band, cap_lines, folder_block_facts, folder_chrome, slot_head_height, Kind, Slot, Total};
-    use crate::pane::preview::{Body, TextKind};
+    use crate::pane::preview::{Body, ListItem, TextKind};
 
     #[test]
     fn header_caps_extra_lines() {
@@ -1536,7 +1592,7 @@ mod tests {
         folder.facts.extra = "2 folders, 10 files, 1.2 MB".into();
         folder.facts.modified = "Modified 2026-11-01".into();
         folder.facts.created = "Created 2026-01-01".into();
-        folder.body = Some(Body::List { head: "2 folders, 10 files, 1.2 MB".into(), rows: vec![("a.jpg".into(), "1 KB".into())] });
+        folder.body = Some(Body::List { head: "2 folders, 10 files, 1.2 MB".into(), rows: vec![ListItem { name: "a.jpg".into(), size: "1 KB".into(), date: String::new() }] });
         folder.total = Total::Pending;
         let facts = folder_block_facts(&folder);
         assert_eq!(
