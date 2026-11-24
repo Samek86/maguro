@@ -1,6 +1,7 @@
 mod docparse;
 pub(crate) mod recent;
 mod imgjob;
+mod svg;
 mod jpeg;
 mod find;
 mod fsize;

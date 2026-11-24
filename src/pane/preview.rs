@@ -150,8 +150,8 @@ pub(crate) unsafe fn content(req: &PeekReq) -> Body {
         };
     }
     if e == "svg" {
-        // Rasterize large enough to zoom. A failed render shows the source.
-        let side = req.w.max(req.h).clamp(512, 2048);
+        // Rasterize large enough to zoom. The worker draws it; a failed render shows the source.
+        let side = req.w.max(req.h).clamp(512, super::svg::SVG_MAX_EDGE);
         let flags = (SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK | SIIGBF_THUMBNAILONLY).0 as u32;
         return match super::imgjob::isolated_pic(path, side, side, flags) {
             Ok(p) => Body::Pic(p),
