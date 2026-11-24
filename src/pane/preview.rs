@@ -33,8 +33,6 @@ pub(crate) enum Body {
     Table { rows: Vec<Vec<String>>, cut: bool },
     List { head: String, rows: Vec<(String, String)> }, // folder or archive contents: name, size
     Handler(GUID),                                       // a Windows preview handler shows it (on the UI thread)
-    /// Audio or video. The UI thread plays it with Media Foundation and releases it on the next file.
-    Media { video: bool, icon: Option<Pix>, rows: Vec<(String, String)> },
     Card { icon: Option<Pix>, rows: Vec<(String, String)> },
 }
 
@@ -77,9 +75,10 @@ pub(crate) fn ext_of(path: &str) -> String {
 
 // The registered preview handler of an extension; macro-enabled and show variants borrow their plain twin's.
 /// Types Maguro draws itself. A registered shell handler is not asked first for these:
-/// text, images, SVG, PDF, office packages this process parses, and audio/video (Media Foundation).
+/// text, images, SVG, PDF, and office packages this process parses.
+/// Audio and video are not here: a registered handler is used when one exists, otherwise a thumbnail or a card.
 pub(crate) fn maguro_owns(ext: &str) -> bool {
-    if PICS.contains(&ext) || VIDEOS.contains(&ext) || AUDIO.contains(&ext) || PLAIN.contains(&ext) || CODE.contains(&ext) {
+    if PICS.contains(&ext) || PLAIN.contains(&ext) || CODE.contains(&ext) {
         return true;
     }
     if OFFICE_ZIP.contains(&ext) || ZIPS.contains(&ext) || PROGRAMS.contains(&ext) {
@@ -159,26 +158,22 @@ pub(crate) unsafe fn content(req: &PeekReq) -> Body {
             Err(_) => text_body(path, TextKind::Code).unwrap_or_else(|| unsafe { card(path, &[]) }),
         };
     }
-    if VIDEOS.contains(&e) {
-        if !req.skip_media {
-            return Body::Media { video: true, icon: None, rows: Vec::new() };
+    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    // Audio and video: a registered handler when the file is small enough, otherwise the old thumbnail or card.
+    if VIDEOS.contains(&e) || AUDIO.contains(&e) {
+        if want_shell_handler(e, len, req.plain, true) {
+            if let Some(g) = handler_for(e) {
+                return Body::Handler(g);
+            }
         }
-        return match super::imgjob::isolated_pic(path, req.w, req.h, (SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY).0 as u32) {
-            Ok(p) => Body::Pic(p),
-            Err(msg) => image_fail(path, &msg),
-        };
-    }
-    if AUDIO.contains(&e) {
-        if !req.skip_media {
-            let (icon, rows) = match card(path, &[]) {
-                Body::Card { icon, rows } => (icon, rows),
-                _ => (None, Vec::new()),
+        if VIDEOS.contains(&e) {
+            return match super::imgjob::isolated_pic(path, req.w, req.h, (SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY).0 as u32) {
+                Ok(p) => Body::Pic(p),
+                Err(msg) => image_fail(path, &msg),
             };
-            return Body::Media { video: false, icon, rows };
         }
         return card(path, &[]);
     }
-    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
     let heavy = HANDLED.contains(&e) || OFFICE_ZIP.contains(&e) || matches!(e, "pdf" | "eml" | "hwp" | "hwpx" | "hwpt" | "psd" | "psb");
     if heavy && len > HEAVY_MAX {
         let note = (tr(crate::Key::Preview).to_string(), tr(crate::Key::SkippedLargerThan10Mb).to_string());
@@ -747,20 +742,6 @@ pub(crate) unsafe fn meta(path: &str, body: Option<&Body>) -> FileFacts {
     let image = PICS.contains(&e.as_str());
     if let Some(body) = body {
         match body {
-            Body::Media { .. } => {
-                if let Some(ps) = &ps {
-                    let (w, h) = (prop(ps, &PKEY_Video_FrameWidth), prop(ps, &PKEY_Video_FrameHeight));
-                    if let (Some(w), Some(h)) = (w, h) {
-                        let dim = format!("{w} × {h}");
-                        facts.dimensions = dim.clone();
-                        out.push(dim);
-                    }
-                    if let Some(d) = prop(ps, &PKEY_Media_Duration) {
-                        facts.extra = d.clone();
-                        out.push(d);
-                    }
-                }
-            }
             Body::Pic(_) if VIDEOS.contains(&e.as_str()) => {
                 if let Some(ps) = &ps {
                     let (w, h) = (prop(ps, &PKEY_Video_FrameWidth), prop(ps, &PKEY_Video_FrameHeight));
@@ -1203,10 +1184,12 @@ mod tests {
     fn shell_handler_skips_types_maguro_draws() {
         assert!(maguro_owns("png") && maguro_owns("svg") && maguro_owns("txt") && maguro_owns("rs"));
         assert!(maguro_owns("pdf") && maguro_owns("docx") && maguro_owns("xlsx") && maguro_owns("pptx"));
-        assert!(maguro_owns("mp4") && maguro_owns("mp3") && maguro_owns("md"));
+        assert!(maguro_owns("md") && !maguro_owns("mp4") && !maguro_owns("mp3") && !maguro_owns("wav"));
         assert!(!maguro_owns("html") && !maguro_owns("dwg") && !maguro_owns("msg") && !maguro_owns("ttf"));
         assert!(!want_shell_handler("png", 100, false, true));
-        assert!(!want_shell_handler("mp4", 100, false, true));
+        assert!(want_shell_handler("mp4", 100, false, true));
+        assert!(want_shell_handler("mp3", 100, false, true));
+        assert!(!want_shell_handler("mp4", HEAVY_MAX + 1, false, true));
         assert!(want_shell_handler("html", 100, false, true));
         assert!(want_shell_handler("dwg", 100, false, true));
         assert!(!want_shell_handler("dwg", 100, true, true));

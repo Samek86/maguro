@@ -1,10 +1,11 @@
 //! Right-hand preview of the active pane's focused item.
 //!
 //! The docked preview uses the same body as Quick Look. Maguro draws text, images,
-//! SVG, PDF, parsed office files, and audio/video itself. Any other registered
+//! SVG, PDF, and parsed office files. Audio and video use a registered preview
+//! handler when one exists, otherwise a thumbnail or a card. Any other registered
 //! Windows preview handler gets a child window under the attribute header. The
-//! handler and the media player each live on their own thread, and both are
-//! released when the selection changes or the pane closes.
+//! handler lives on its own thread and is released when the selection changes or
+//! the pane closes.
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -31,7 +32,6 @@ const WM_PREVIEW_READY: u32 = WM_APP + 70; // wParam = generation; the result si
 const WM_PREVIEW_SIZE: u32 = WM_APP + 71; // thread message: the host window changed size
 const WM_PREVIEW_HOSTED: u32 = WM_APP + 72; // wParam = generation, lParam = 1 shown / 0 failed
 const WM_PREVIEW_TOTAL: u32 = WM_APP + 73; // wParam = generation; a folder walk finished
-const WM_PREVIEW_MEDIA: u32 = WM_APP + 74; // wParam = generation, lParam = 1 playing / 0 failed
 const CMD_COPY: usize = 1;
 const CMD_EDIT: usize = 2;
 
@@ -142,7 +142,6 @@ struct Work {
     w: i32,
     h: i32,
     skip_handler: bool,
-    skip_media: bool,
 }
 
 fn slots() -> std::sync::MutexGuard<'static, HashMap<isize, Slot>> {
@@ -393,8 +392,7 @@ pub(crate) unsafe fn run_preview(force: bool) {
         _ = InvalidateRect(Some(h), None, false);
         return;
     }
-    super::play::play_stop(key);
-    enqueue(Work { hwnd: key, gen, path, w: bw, h: bh, skip_handler: false, skip_media: false });
+    enqueue(Work { hwnd: key, gen, path, w: bw, h: bh, skip_handler: false });
     _ = InvalidateRect(Some(h), None, false);
 }
 
@@ -433,7 +431,6 @@ pub(crate) unsafe fn preview_clear() {
     };
     if stop {
         jobs().remove(&key);
-        super::play::play_stop(key);
         drop_host(key);
         _ = InvalidateRect(Some(h), None, false);
     }
@@ -523,7 +520,6 @@ unsafe fn produce_com(job: &Work, is_dir: bool, _len: u64) -> Ready {
         h: job.h.max(1),
         hwnd: 0,
         plain: job.skip_handler,
-        skip_media: job.skip_media,
     };
     let body = content(&req);
     if let Body::Handler(clsid) = body {
@@ -721,16 +717,6 @@ unsafe fn on_ready(h: HWND, gen: u64) {
                 }
             }
             drop_host(key);
-            let media = {
-                let map = slots();
-                map.get(&key).and_then(|s| match &s.body {
-                    Some(Body::Media { video, .. }) if s.gen == gen => Some(*video),
-                    _ => None,
-                })
-            };
-            if let Some(video) = media {
-                start_media_pane(h, gen, video);
-            }
             if folder {
                 arm_total(h, gen);
             }
@@ -754,7 +740,7 @@ unsafe fn start_host(h: HWND, gen: u64, clsid: GUID, path: String) {
     let ht = (body.bottom - body.top).max(1);
     let style = WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN;
     let Ok(win) = CreateWindowExW(WINDOW_EX_STYLE(0), w!("MaguroPreviewHost"), w!(""), style, body.left, body.top, w, ht, Some(h), None, None, None) else {
-        enqueue(Work { hwnd: key, gen, path, w, h: ht, skip_handler: true, skip_media: false });
+        enqueue(Work { hwnd: key, gen, path, w, h: ht, skip_handler: true });
         return;
     };
     {
@@ -778,7 +764,7 @@ unsafe fn start_host(h: HWND, gen: u64, clsid: GUID, path: String) {
     let again = path.clone();
     if std::thread::Builder::new().name("maguro-preview-host".into()).spawn(move || host_thread(gen, clsid, path, hwnd, popup, area)).is_err() {
         drop_host(key);
-        enqueue(Work { hwnd: key, gen, path: again, w, h: ht, skip_handler: true, skip_media: false });
+        enqueue(Work { hwnd: key, gen, path: again, w, h: ht, skip_handler: true });
     }
 }
 
@@ -877,7 +863,6 @@ unsafe fn sync_host(h: HWND) {
     if tid != 0 {
         _ = PostThreadMessageW(tid, WM_PREVIEW_SIZE, WPARAM(gen as usize), LPARAM(0));
     }
-    super::play::play_layout(key, w, ht);
 }
 
 unsafe fn on_hosted(h: HWND, gen: u64, ok: bool) {
@@ -910,55 +895,7 @@ unsafe fn on_hosted(h: HWND, gen: u64, ok: bool) {
             slot.kind = Kind::Opening;
         }
     }
-    enqueue(Work { hwnd: key, gen, path, w, h: ht, skip_handler: true, skip_media: false });
-}
-
-unsafe fn start_media_pane(h: HWND, gen: u64, video: bool) {
-    let key = key_of(h);
-    let path = slots().get(&key).filter(|s| s.gen == gen).map(|s| s.path.clone());
-    let Some(path) = path else { return };
-    super::play::play_stop(key);
-    let (child, area) = if video {
-        drop_host(key);
-        let body = body_rect(h);
-        let w = (body.right - body.left).max(1);
-        let ht = (body.bottom - body.top).max(1);
-        let style = WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN;
-        let Ok(win) = CreateWindowExW(WINDOW_EX_STYLE(0), w!("MaguroPreviewHost"), w!(""), style, body.left, body.top, w, ht, Some(h), None, None, None) else {
-            reload_without_media(h, gen);
-            return;
-        };
-        if let Some(slot) = slots().get_mut(&key) {
-            if slot.gen == gen {
-                slot.host = win.0 as isize;
-            } else {
-                _ = DestroyWindow(win);
-                return;
-            }
-        }
-        (win.0 as isize, RECT { left: 0, top: 0, right: w, bottom: ht })
-    } else {
-        (0, RECT::default())
-    };
-    super::play::play_start(key, gen, h.0 as isize, child, &path, video, area, WM_PREVIEW_MEDIA);
-}
-
-unsafe fn reload_without_media(h: HWND, gen: u64) {
-    let key = key_of(h);
-    let path = {
-        let map = slots();
-        let Some(slot) = map.get(&key) else { return };
-        if slot.gen != gen {
-            return;
-        }
-        slot.path.clone()
-    };
-    let (w, ht) = client_size(h);
-    if path.is_empty() {
-        return;
-    }
-    super::play::play_stop(key);
-    enqueue(Work { hwnd: key, gen, path, w, h: ht, skip_handler: false, skip_media: true });
+    enqueue(Work { hwnd: key, gen, path, w, h: ht, skip_handler: true });
 }
 
 unsafe fn on_ready_miss(h: HWND, gen: u64) {
@@ -1275,13 +1212,6 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_CONTEXTMENU => preview_menu(h, lp),
             WM_PREVIEW_READY => on_ready(h, wp.0 as u64),
             WM_PREVIEW_HOSTED => on_hosted(h, wp.0 as u64, lp.0 != 0),
-            WM_PREVIEW_MEDIA => {
-                if lp.0 == 0 {
-                    reload_without_media(h, wp.0 as u64);
-                } else {
-                    _ = InvalidateRect(Some(h), None, false);
-                }
-            }
             WM_PREVIEW_TOTAL => on_total(h, wp.0 as u64),
             WM_DESTROY => preview_clear(),
             _ => return DefWindowProcW(h, msg, wp, lp),
@@ -1485,11 +1415,9 @@ unsafe fn paint_preview(h: HWND) {
                     Some(Body::List { rows, .. }) => pview::paint_list(&mut slot.scroll, dc, body, rows, zfont, dpi),
                     Some(Body::Pic(p)) => paint_fit(dc, body, p, zoom, &mut slot.scroll),
                     Some(Body::Pages { pages, total }) => paint_pages(&mut slot.scroll, dc, body, pages, *total, zfont, dpi, zoom),
-                    Some(Body::Card { icon, rows }) | Some(Body::Media { video: false, icon, rows }) => {
+                    Some(Body::Card { icon, rows }) => {
                         paint_card(dc, body, icon.as_ref(), rows, font, dpi);
                     }
-                    Some(Body::Media { video: true, .. }) if slot.host == 0 => text(dc, body, tr(crate::Key::OpeningPreview), font, pal().sub, DT_CENTER),
-                    Some(Body::Media { video: true, .. }) => {}
                     Some(Body::Handler(_)) | None => text(dc, body, tr(crate::Key::NoPreview), font, pal().sub, DT_CENTER),
                     }
                 });

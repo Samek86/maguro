@@ -41,7 +41,6 @@ pub(crate) const WM_PEEK_HOSTED: u32 = WM_APP + 52; // wParam = generation, lPar
 const WM_PEEK_HOST_SIZE: u32 = WM_APP + 53; // thread message: the host window changed size
 const WM_PEEK_ZOOM: u32 = WM_APP + 54; // wParam = generation; a PDF page was re-rendered for zoom. Does not resize.
 const WM_PEEK_DELETED: u32 = WM_APP + 56; // wParam = 1 success / 0 cancel-or-fail; apply AFTER_DEL
-const WM_PEEK_MEDIA: u32 = WM_APP + 59; // wParam = generation, lParam = 1 playing / 0 failed
 
 const ICON_PREV: &str = "";
 const ICON_NEXT: &str = "";
@@ -63,7 +62,6 @@ pub(crate) struct PeekReq {
     pub(crate) h: i32,
     pub(crate) hwnd: isize, // popup told by WM_PEEK_DONE
     pub(crate) plain: bool, // the preview handler failed: read the file ourselves
-    pub(crate) skip_media: bool, // Media Foundation failed: show a thumbnail or a card instead
 }
 
 pub(crate) struct Pix {
@@ -448,8 +446,8 @@ pub(crate) fn fit_source(body: &Body) -> FitSource {
         Body::Document { text, .. } => FitSource::Lines { lines: text.lines().count() as i32, code: false },
         Body::Table { rows, .. } => FitSource::Lines { lines: rows.len() as i32, code: false },
         Body::List { rows, .. } => FitSource::Lines { lines: rows.len() as i32, code: false },
-        Body::Card { rows, .. } | Body::Media { rows, video: false, .. } => FitSource::Lines { lines: (rows.len() as i32).max(12), code: false },
-        Body::Handler(_) | Body::Media { video: true, .. } => FitSource::Lines { lines: 40, code: false },
+        Body::Card { rows, .. } => FitSource::Lines { lines: (rows.len() as i32).max(12), code: false },
+        Body::Handler(_) => FitSource::Lines { lines: 40, code: false },
     }
 }
 
@@ -637,7 +635,6 @@ pub(crate) struct PeekView {
     sel: Option<(usize, usize)>, // source lines, 1-based inclusive, same as the docked pane
     anchor: usize,
     selecting: bool,
-    skip_media: bool, // retry the file on screen without Media Foundation
 }
 
 impl Deref for PeekView {
@@ -711,7 +708,6 @@ fn reset_frame() {
         v.sel = None;
         v.anchor = 0;
         v.selecting = false;
-        v.skip_media = false;
     });
 }
 
@@ -958,21 +954,19 @@ pub(crate) unsafe fn open_peek_path(i: usize, path: &str, name: &str) {
         return;
     }
     app(|a| a.peek_name = name.to_string());
-    show_path(path, false, false);
+    show_path(path, false);
 }
 
-unsafe fn show_path(path: &str, plain: bool, skip_media: bool) {
+unsafe fn show_path(path: &str, plain: bool) {
     let h = app(|a| a.peek);
     if h.0.is_null() {
         return;
     }
     unload_handler();
-    super::play::play_stop(h.0 as isize);
     drop_zoom(h);
     reset_scroll();
-    view(|v| v.skip_media = skip_media);
     let (w, ht) = request_stage(h);
-    want_peek(Some(PeekReq { path: path.to_string(), w, h: ht, hwnd: h.0 as isize, plain, skip_media }));
+    want_peek(Some(PeekReq { path: path.to_string(), w, h: ht, hwnd: h.0 as isize, plain }));
     _ = InvalidateRect(Some(h), None, false);
 }
 
@@ -999,23 +993,21 @@ pub(crate) unsafe fn load_peek(plain: bool) {
     if FROM_FIND.load(Ordering::SeqCst) {
         let path = peek_job().req.as_ref().map(|r| r.path.clone());
         if let Some(path) = path {
-            show_path(&path, plain, false);
+            show_path(&path, plain);
             return;
         }
     }
     let (h, i) = app(|a| (a.peek, a.peek_pane));
     let Some(fv) = view_of::<IFolderView2>(i) else { return };
     unload_handler();
-    super::play::play_stop(h.0 as isize);
     drop_zoom(h);
     reset_scroll();
-    view(|v| v.skip_media = false);
     let it = fv.GetItem::<IShellItem>(fv.GetFocusedItem().unwrap_or(-1)).ok();
     let shown = |kind| it.as_ref().and_then(|it| it.GetDisplayName(kind).ok()).map(|p| pwstr(p));
     app(|a| a.peek_name = shown(SIGDN_NORMALDISPLAY).unwrap_or_default());
     let (w, ht) = request_stage(h);
     match shown(SIGDN_FILESYSPATH).or_else(|| shown(SIGDN_DESKTOPABSOLUTEPARSING)) {
-        Some(path) => want_peek(Some(PeekReq { path, w, h: ht, hwnd: h.0 as isize, plain, skip_media: false })),
+        Some(path) => want_peek(Some(PeekReq { path, w, h: ht, hwnd: h.0 as isize, plain })),
         None => {
             let gen = {
                 let mut j = peek_job();
@@ -1036,7 +1028,7 @@ pub(crate) unsafe fn step_peek(prev: bool) {
         let i = app(|a| a.peek_pane);
         if let Some(hit) = step_find_sel(i, prev) {
             app(|a| a.peek_name = hit.name);
-            show_path(&hit.path, false, false);
+            show_path(&hit.path, false);
         }
     } else {
         let Some(fv) = view_of::<IFolderView2>(app(|a| a.peek_pane)) else { return };
@@ -1158,12 +1150,12 @@ unsafe fn apply_after_peek_delete(h: HWND) {
             if FROM_FIND.load(Ordering::SeqCst) {
                 peek_find_select_path(i, &path);
                 app(|a| a.peek_name = name);
-                show_path(&path, false, false);
+                show_path(&path, false);
             } else if Path::new(&path).exists() && select_peek_path(i, &path) {
                 load_peek(false);
             } else if Path::new(&path).exists() {
                 app(|a| a.peek_name = name);
-                show_path(&path, false, false);
+                show_path(&path, false);
             } else {
                 close_peek(h);
                 return;
@@ -1187,7 +1179,6 @@ pub(crate) unsafe fn rename_peek() {
     if h.0.is_null() {
         return;
     }
-    super::play::play_stop(h.0 as isize);
     let Some(path) = peek_job().req.as_ref().map(|r| r.path.clone()).filter(|p| !p.is_empty()) else {
         _ = MessageBeep(MB_ICONWARNING);
         return;
@@ -1262,11 +1253,11 @@ pub(crate) unsafe fn rename_peek() {
     }
     if FROM_FIND.load(Ordering::SeqCst) {
         peek_find_select_path(i, &new_path_s);
-        show_path(&new_path_s, false, false);
+        show_path(&new_path_s, false);
     } else if select_peek_path(i, &new_path_s) {
         load_peek(false);
     } else if Path::new(&new_path_s).exists() {
-        show_path(&new_path_s, false, false);
+        show_path(&new_path_s, false);
     } else {
         close_peek(h);
         HOLD_PEEK.store(false, Ordering::SeqCst);
@@ -1285,7 +1276,6 @@ pub(crate) unsafe fn delete_peek(shift: bool) {
     if h.0.is_null() {
         return;
     }
-    super::play::play_stop(h.0 as isize);
     let Some(path) = peek_job().req.as_ref().map(|r| r.path.clone()).filter(|p| !p.is_empty()) else {
         _ = MessageBeep(MB_ICONWARNING);
         return;
@@ -1576,7 +1566,6 @@ unsafe fn sync_host(h: HWND) {
     if tid != 0 {
         _ = PostThreadMessageW(tid, WM_PEEK_HOST_SIZE, WPARAM(gen), LPARAM(0));
     }
-    super::play::play_layout(h.0 as isize, w, ht);
 }
 
 pub(crate) unsafe fn unload_handler() {
@@ -1694,43 +1683,6 @@ unsafe fn start_handler(h: HWND, gen: usize) {
     if std::thread::Builder::new().spawn(move || host_thread(gen, clsid, path, hwnd, popup, area)).is_err() {
         load_peek(true);
     }
-}
-
-unsafe fn start_media_peek(h: HWND, gen: usize) {
-    let (video, path) = {
-        let j = peek_job();
-        match (&j.done, &j.req) {
-            (Some(Peeked { body: Body::Media { video, .. }, .. }), Some(r)) if j.gen == gen => (*video, r.path.clone()),
-            _ => return,
-        }
-    };
-    super::play::play_stop(h.0 as isize);
-    let area = if video {
-        let st = geo_of(h).stage;
-        let line = 1;
-        let (w, ht) = ((st.right - st.left - line * 2).max(1), (st.bottom - st.top - line * 2).max(1));
-        let style = WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN;
-        let Ok(win) = CreateWindowExW(WINDOW_EX_STYLE(0), w!("MaguroPeekHost"), w!(""), style, st.left + line, st.top + line, w, ht, Some(h), None, None, None) else {
-            reload_without_media();
-            return;
-        };
-        view(|v| v.host_win = Some(win));
-        RECT { left: 0, top: 0, right: w, bottom: ht }
-    } else {
-        RECT::default()
-    };
-    let child = view(|v| v.host_win.map(|w| w.0 as isize).unwrap_or(0));
-    super::play::play_start(h.0 as isize, gen as u64, h.0 as isize, child, &path, video, area, WM_PEEK_MEDIA);
-}
-
-unsafe fn reload_without_media() {
-    let h = app(|a| a.peek);
-    if h.0.is_null() {
-        return;
-    }
-    let path = peek_job().req.as_ref().map(|r| r.path.clone());
-    let Some(path) = path else { return };
-    show_path(&path, false, true);
 }
 
 fn peek_text_line(inner_top: i32, y: i32) -> Option<usize> {
@@ -2768,11 +2720,11 @@ pub(crate) unsafe fn paint_peek(h: HWND) {
                 plate();
                 view(|v| super::pview::paint_list(&mut v.scroll, dc, g.inner, rows, zfont, dpi));
             }
-            Some(Body::Card { icon, rows }) | Some(Body::Media { video: false, icon, rows }) => {
+            Some(Body::Card { icon, rows }) => {
                 plate();
                 paint_card(dc, g.inner, icon.as_ref(), rows, font, dpi);
             }
-            Some(Body::Handler(_)) | Some(Body::Media { video: true, .. }) => {
+            Some(Body::Handler(_)) => {
                 plate();
                 if hosted != Some(gen) {
                     paint_center_meta(dc, g.stage, tr(crate::Key::OpeningEscCancel), font);
@@ -3247,23 +3199,12 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 // Size before the content paints, so the first frame is already the fitted window.
                 fit_on_result(h, wp.0);
                 start_handler(h, wp.0);
-                start_media_peek(h, wp.0);
                 if !is_fit(view(|v| v.zoom)) {
                     schedule_pdf_zoom(h);
                 }
                 _ = InvalidateRect(Some(h), None, false);
             }
             WM_PEEK_HOSTED => handler_ready(h, wp.0, lp.0 != 0),
-            WM_PEEK_MEDIA => {
-                if peek_job().gen == wp.0 {
-                    if lp.0 != 0 {
-                        view(|v| v.hosted = Some(wp.0));
-                        _ = InvalidateRect(Some(h), None, false);
-                    } else {
-                        reload_without_media();
-                    }
-                }
-            }
             WM_MOUSEMOVE => {
                 let (x, y) = lp_xy(lp);
                 if let Some((px, py)) = view(|v| v.pan_pt) {
@@ -3509,7 +3450,6 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 drop_peek_tip(h);
                 mark_find_peek(None);
                 unload_handler();
-                super::play::play_stop(h.0 as isize);
                 want_peek(None);
                 reset_scroll();
                 reset_frame();
@@ -3553,7 +3493,7 @@ mod tests {
 
     #[test]
     fn peek_newest_only() {
-        let req = |p: &str| Some(PeekReq { path: p.into(), w: 10, h: 10, hwnd: 0, plain: false, skip_media: false });
+        let req = |p: &str| Some(PeekReq { path: p.into(), w: 10, h: 10, hwnd: 0, plain: false });
         let pix = || Peeked { body: Body::Pic(Pix::new(1, 1, vec![0; 4])), icon: -1, meta: Vec::new(), file: FileFacts::default() };
         let card = || Peeked { body: Body::Card { icon: None, rows: Vec::new() }, icon: -1, meta: Vec::new(), file: FileFacts::default() };
         let mut j = PeekJob { gen: 0, req: None, done: None, zoom: None };
