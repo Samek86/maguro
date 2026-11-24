@@ -97,6 +97,7 @@ pub(crate) fn csv_sep(text: &str) -> char {
 pub(crate) struct ZipEntry {
     pub(crate) name: String,
     pub(crate) size: u64,
+    pub(crate) modified: String,
     csize: u64,
     method: u16,
     offset: u64,
@@ -172,7 +173,8 @@ pub(crate) fn zip_entries<R: Read + Seek>(f: &mut R) -> Option<Vec<ZipEntry>> {
             }
             q += 4 + l;
         }
-        out.push(ZipEntry { name: name.replace('\\', "/"), size: usize_, csize, method, offset });
+        let modified = super::formats::dos_when(le16(&cd, p + 14) as u16, le16(&cd, p + 12) as u16);
+        out.push(ZipEntry { name: name.replace('\\', "/"), size: usize_, modified, csize, method, offset });
         p += 46 + n + x + c;
     }
     Some(out)
