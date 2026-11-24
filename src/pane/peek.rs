@@ -614,6 +614,8 @@ pub(crate) struct PeekView {
     pub(crate) edge_at: Option<Instant>, // the wheel reached the top / bottom then
     pub(crate) wheel: i32, // wheel delta toward the next file step (120 a notch)
     pub(crate) hosted: Option<usize>, // generation a preview handler is showing
+    /// This Quick Look generation fell back to a handler after Media Foundation failed.
+    media_fallback: Option<usize>,
     pub(crate) host_win: Option<HWND>, // the picture area's child window the handler draws in
     pub(crate) hover: bool,            // the mouse is over the popup: ‹ › show
     pub(crate) hot: Hot,
@@ -990,9 +992,10 @@ unsafe fn show_path(path: &str, plain: bool) {
     unload_handler();
     drop_zoom(h);
     reset_scroll();
-    open_media(h, path, plain);
+    view(|v| v.media_fallback = None);
     let (w, ht) = request_stage(h);
     want_peek(Some(PeekReq { path: path.to_string(), w, h: ht, hwnd: h.0 as isize, plain }));
+    open_media(h, path, plain, peek_job().gen as u64);
     _ = InvalidateRect(Some(h), None, false);
 }
 
@@ -1029,14 +1032,15 @@ pub(crate) unsafe fn load_peek(plain: bool) {
     unload_handler();
     drop_zoom(h);
     reset_scroll();
+    view(|v| v.media_fallback = None);
     let it = fv.GetItem::<IShellItem>(fv.GetFocusedItem().unwrap_or(-1)).ok();
     let shown = |kind| it.as_ref().and_then(|it| it.GetDisplayName(kind).ok()).map(|p| pwstr(p));
     app(|a| a.peek_name = shown(SIGDN_NORMALDISPLAY).unwrap_or_default());
     let (w, ht) = request_stage(h);
     match shown(SIGDN_FILESYSPATH).or_else(|| shown(SIGDN_DESKTOPABSOLUTEPARSING)) {
         Some(path) => {
-            open_media(h, &path, plain);
-            want_peek(Some(PeekReq { path, w, h: ht, hwnd: h.0 as isize, plain }));
+            want_peek(Some(PeekReq { path: path.clone(), w, h: ht, hwnd: h.0 as isize, plain }));
+            open_media(h, &path, plain, peek_job().gen as u64);
         }
         None => {
             super::media::close(h);
@@ -1807,6 +1811,15 @@ unsafe fn start_handler(h: HWND, gen: usize) {
             _ => return,
         }
     };
+    begin_handler(h, gen, clsid, path);
+}
+
+/// Start a preview handler for this generation. A media fallback calls this with the
+/// registered CLSID after Media Foundation refuses the file. The worker path calls it too.
+unsafe fn begin_handler(h: HWND, gen: usize, clsid: GUID, path: String) {
+    if peek_job().gen != gen {
+        return;
+    }
     if HOST_GEN.swap(gen, Ordering::SeqCst) == gen {
         return;
     }
@@ -3024,13 +3037,28 @@ unsafe fn peek_video_dest(h: HWND) -> RECT {
     super::media::video_dest(stage, stage.top, dpi)
 }
 
-/// Start playback when a handler will not show this file. `skip_handler` is the
-/// retry after that handler failed. The video child is sized before the player binds.
-unsafe fn open_media(h: HWND, path: &str, skip_handler: bool) {
+/// Start playback. Media Foundation is first for audio and video. `skip_handler` is the
+/// reload after that handler fallback failed, and then the player stays closed.
+/// The video child is sized before the player binds. `view_gen` is the Quick Look generation.
+unsafe fn open_media(h: HWND, path: &str, skip_handler: bool, view_gen: u64) {
     if media_playback_for(path, skip_handler) {
-        super::media::open_in(h, path, Some(peek_video_dest(h)));
+        super::media::open_bound(h, path, Some(peek_video_dest(h)), view_gen);
+        follow_media_failure(h, view_gen);
     } else {
         super::media::close(h);
+    }
+}
+
+/// Media Foundation refused this file. Start the registered handler, or leave the info view.
+/// A generation that is no longer current is ignored.
+unsafe fn follow_media_failure(h: HWND, current: u64) {
+    let Some(fail) = super::media::take_open_failure(h) else { return };
+    match media_failure_follow(&fail.path, fail.view_gen, current) {
+        MediaFollow::Handler(clsid) => {
+            view(|v| v.media_fallback = Some(current as usize));
+            begin_handler(h, current as usize, clsid, fail.path);
+        }
+        MediaFollow::Info | MediaFollow::Ignore => {}
     }
 }
 
@@ -3436,6 +3464,7 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             super::media::WM_MEDIA => {
                 super::media::on_posted(h);
+                follow_media_failure(h, peek_job().gen as u64);
                 if super::media::take_relayout(h) {
                     place_media(h);
                     super::media::repaint_header(h);
@@ -3507,14 +3536,17 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                         None
                     } else {
                         let handler = j.done.as_ref().is_some_and(|p| matches!(p.body, Body::Handler(_)));
-                        j.req.as_ref().map(|r| (handler, r.path.clone()))
+                        let plain = j.req.as_ref().is_some_and(|r| r.plain);
+                        j.req.as_ref().map(|r| (handler, plain, r.path.clone()))
                     }
                 };
-                if let Some((handler, path)) = follow {
+                if let Some((handler, plain, path)) = follow {
+                    let fallback = view(|v| v.media_fallback) == Some(wp.0);
                     if handler {
                         super::media::close(h);
-                    } else if !super::media::covers(h) {
-                        super::media::open_in(h, &path, Some(peek_video_dest(h)));
+                    } else if !fallback && !super::media::covers(h) && media_playback_for(&path, plain) {
+                        super::media::open_bound(h, &path, Some(peek_video_dest(h)), wp.0 as u64);
+                        follow_media_failure(h, wp.0 as u64);
                     }
                 }
                 // Size before the content paints, so the first frame is already the fitted window.

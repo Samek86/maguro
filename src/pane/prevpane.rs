@@ -1,9 +1,9 @@
 //! Right-hand preview of the active pane's focused item.
 //!
 //! The docked preview uses the same body as Quick Look. Maguro draws text, images,
-//! SVG, PDF, and parsed office files. Audio and video use a registered preview
-//! handler when one exists and the file is 10 MB or less. Otherwise Media Foundation
-//! plays, and a thumbnail or a card remains when playback cannot start. Any other
+//! SVG, PDF, and parsed office files. Audio and video play with Media Foundation
+//! first. A registered preview handler is used only when that open fails and the
+//! file is 10 MB or less. Otherwise a thumbnail or a card remains. Any other
 //! registered Windows preview handler gets a child window under the attribute header.
 //! The handler lives on its own thread. The UI asks that thread to unload the handler
 //! before the host window is destroyed, and waits briefly so a stuck handler
@@ -104,6 +104,8 @@ struct Slot {
     cancel: Option<Arc<AtomicBool>>,
     /// Stays while the pane is open, including across selection changes. 1.0 is fit.
     zoom: f64,
+    /// This generation fell back to a preview handler after Media Foundation failed.
+    media_fallback: bool,
 }
 
 impl Default for Slot {
@@ -134,6 +136,7 @@ impl Default for Slot {
             return_focus: false,
             cancel: None,
             zoom: 1.0,
+            media_fallback: false,
         }
     }
 }
@@ -394,6 +397,7 @@ pub(crate) unsafe fn run_preview(force: bool) {
         slot.bar_drag = None;
         slot.return_focus = !inside;
         slot.kind = if path.is_empty() { Kind::Empty } else { Kind::Opening };
+        slot.media_fallback = false;
         slot.gen
     };
     drop_host(key);
@@ -404,10 +408,11 @@ pub(crate) unsafe fn run_preview(force: bool) {
     }
     // Show the picture under the current header before MFPlay binds the renderer.
     // Waiting for the preview job left the child hidden and this rect solid black.
-    // A registered handler for a small file does not start the player.
+    // Audio and video always try the player first. A handler starts only if that open fails.
     place_head(h);
     if media_playback_for(&path, false) {
-        super::media::open_in(h, &path, Some(pane_video_dest(h)));
+        super::media::open_bound(h, &path, Some(pane_video_dest(h)), gen);
+        follow_media_failure(h, gen);
     } else {
         super::media::close(h);
     }
@@ -744,6 +749,22 @@ unsafe fn on_ready(h: HWND, gen: u64) {
             start_host(h, gen, clsid, path);
         }
         Ready::Shown { body, facts, big, folder } => {
+            let keep_handler = slots().get(&key).is_some_and(|s| s.gen == gen && s.media_fallback);
+            if keep_handler {
+                // The handler fallback already owns this file. Refresh the attribute
+                // header and leave the host window where it is.
+                if let Some(slot) = slots().get_mut(&key) {
+                    if slot.gen == gen {
+                        slot.facts = facts;
+                        slot.big = big;
+                        slot.folder = false;
+                    }
+                }
+                place_head(h);
+                sync_host(h);
+                _ = InvalidateRect(Some(h), None, false);
+                return;
+            }
             {
                 let mut map = slots();
                 if let Some(slot) = map.get_mut(&key) {
@@ -775,8 +796,9 @@ unsafe fn on_ready(h: HWND, gen: u64) {
                 place_media(h);
             } else {
                 let again = slots().get(&key).map(|s| s.path.clone()).unwrap_or_default();
-                if !again.is_empty() {
-                    super::media::open_in(h, &again, Some(pane_video_dest(h)));
+                if !again.is_empty() && media_playback_for(&again, false) {
+                    super::media::open_bound(h, &again, Some(pane_video_dest(h)), gen);
+                    follow_media_failure(h, gen);
                 }
             }
             _ = InvalidateRect(Some(h), None, false);
@@ -796,6 +818,7 @@ unsafe fn start_host(h: HWND, gen: u64, clsid: GUID, path: String) {
     let ht = (body.bottom - body.top).max(1);
     let style = WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN;
     let Ok(win) = CreateWindowExW(WINDOW_EX_STYLE(0), w!("MaguroPreviewHost"), w!(""), style, body.left, body.top, w, ht, Some(h), None, None, None) else {
+        clear_media_fallback(key, gen);
         enqueue(Work { hwnd: key, gen, path, w, h: ht, skip_handler: true });
         return;
     };
@@ -805,11 +828,13 @@ unsafe fn start_host(h: HWND, gen: u64, clsid: GUID, path: String) {
         let Some(slot) = map.get_mut(&key) else {
             drop(map);
             _ = DestroyWindow(win);
+            clear_media_fallback(key, gen);
             return;
         };
         if slot.gen != gen {
             drop(map);
             _ = DestroyWindow(win);
+            clear_media_fallback(key, gen);
             return;
         }
         slot.host = win.0 as isize;
@@ -827,7 +852,37 @@ unsafe fn start_host(h: HWND, gen: u64, clsid: GUID, path: String) {
             }
         }
         drop_host(key);
+        clear_media_fallback(key, gen);
         enqueue(Work { hwnd: key, gen, path: again, w, h: ht, skip_handler: true });
+    }
+}
+
+fn clear_media_fallback(key: isize, gen: u64) {
+    if let Some(slot) = slots().get_mut(&key) {
+        if slot.gen == gen {
+            slot.media_fallback = false;
+        }
+    }
+}
+
+/// Media Foundation refused this file. Start the registered handler, or leave the info view.
+/// A generation that is no longer current is ignored.
+unsafe fn follow_media_failure(h: HWND, view_gen: u64) {
+    let Some(fail) = super::media::take_open_failure(h) else { return };
+    let key = key_of(h);
+    if !current(key, view_gen) {
+        return;
+    }
+    match media_failure_follow(&fail.path, fail.view_gen, view_gen) {
+        MediaFollow::Handler(clsid) => {
+            if let Some(slot) = slots().get_mut(&key) {
+                if slot.gen == view_gen {
+                    slot.media_fallback = true;
+                }
+            }
+            start_host(h, view_gen, clsid, fail.path);
+        }
+        MediaFollow::Info | MediaFollow::Ignore => {}
     }
 }
 
@@ -991,11 +1046,10 @@ unsafe fn on_hosted(h: HWND, gen: u64, ok: bool) {
         on_ready_miss(h, gen);
         return;
     }
-    // The handler failed. Play audio and video while the fallback body is read.
+    // The handler failed. For audio and video, Media Foundation was already tried,
+    // so the information view is what remains. Other types fall back to Maguro's own preview.
     place_head(h);
-    if media_playback_for(&path, true) {
-        super::media::open_in(h, &path, Some(pane_video_dest(h)));
-    }
+    clear_media_fallback(key, gen);
     if let Some(slot) = slots().get_mut(&key) {
         if slot.gen == gen {
             slot.kind = Kind::Opening;
@@ -1255,6 +1309,8 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             super::media::WM_MEDIA => {
                 super::media::on_posted(h);
+                let gen = slots().get(&key_of(h)).map(|s| s.gen).unwrap_or(0);
+                follow_media_failure(h, gen);
                 if super::media::take_relayout(h) {
                     place_media(h);
                     super::media::repaint_header(h);

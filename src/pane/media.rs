@@ -383,13 +383,23 @@ struct Ev {
     hr: i32,
 }
 
+/// One Media Foundation open that the view can fall back from, once.
+pub(crate) struct OpenFailure {
+    pub view_gen: u64,
+    pub path: String,
+}
+
 struct Slot {
     gen: u64,
+    /// View generation that asked for this open. A later file has a different one.
+    view_gen: u64,
     path: String,
     kind: MediaKind,
     player: Option<IMFPMediaPlayer>,
     video: HWND,
     failed: bool,
+    /// `fail` set this. The view takes it once, then starts a handler or leaves the info view.
+    fail_pending: bool,
     ready: bool,
     playing: bool,
     /// Paused on the last frame. The clock shows the duration. Play starts over at 0.
@@ -489,20 +499,31 @@ pub(crate) unsafe fn open(host: HWND, path: &str) {
     open_in(host, path, None);
 }
 
-/// Like [`open`], and for video show the child at `dest` before the player is created.
+/// Like [`open_bound`] with no view generation. Tests use this.
+#[cfg(test)]
+pub(crate) unsafe fn open_in(host: HWND, path: &str, dest: Option<RECT>) {
+    open_bound(host, path, dest, 0);
+}
+
+/// Like [`open_in`]. `view_gen` is the Quick Look or preview-pane generation for this file.
+/// A later failure is reported with that generation so a stale open is ignored.
+///
+/// For video, show the child at `dest` before the player is created.
 ///
 /// MFPlay binds the EVR to the HWND it is given. A window that is still 8×8 and
 /// hidden at that moment presents nothing, and a later paint of the pane is all
 /// the user sees. `dest` is the rect from [`video_dest`]. `None` leaves placement
 /// to the view (audio, or a host that does not have a size yet).
-pub(crate) unsafe fn open_in(host: HWND, path: &str, dest: Option<RECT>) {
+pub(crate) unsafe fn open_bound(host: HWND, path: &str, dest: Option<RECT>, view_gen: u64) {
     let ext = super::preview::ext_of(path);
     let Some(kind) = media_kind(&ext) else {
         close(host);
         return;
     };
     let key = key_of(host);
-    let same = slots().borrow().get(&key).is_some_and(|s| s.path == path && (s.player.is_some() || s.failed));
+    // The same generation keeps a player that is already up, or a failure the view already saw.
+    // A new generation retries, so a theme change can open the file again.
+    let same = slots().borrow().get(&key).is_some_and(|s| s.path == path && s.view_gen == view_gen && (s.player.is_some() || s.failed));
     if same {
         return;
     }
@@ -522,11 +543,13 @@ pub(crate) unsafe fn open_in(host: HWND, path: &str, dest: Option<RECT>) {
         key,
         Slot {
             gen,
+            view_gen,
             path: path.to_string(),
             kind,
             player: None,
             video,
             failed: false,
+            fail_pending: false,
             ready: false,
             playing: false,
             holding: false,
@@ -596,6 +619,17 @@ pub(crate) unsafe fn close(host: HWND) {
     if !slot.video.0.is_null() && IsWindow(Some(slot.video)).as_bool() {
         let _ = DestroyWindow(slot.video);
     }
+}
+
+/// The open that just failed, once. `None` when the player is fine or the view already took it.
+pub(crate) fn take_open_failure(host: HWND) -> Option<OpenFailure> {
+    let mut map = slots().borrow_mut();
+    let slot = map.get_mut(&key_of(host))?;
+    if !slot.failed || !slot.fail_pending {
+        return None;
+    }
+    slot.fail_pending = false;
+    Some(OpenFailure { view_gen: slot.view_gen, path: slot.path.clone() })
 }
 
 pub(crate) unsafe fn on_posted(host: HWND) {
@@ -1188,6 +1222,7 @@ unsafe fn fail(host: HWND) {
         let mut map = slots().borrow_mut();
         let Some(slot) = map.get_mut(&key) else { return };
         slot.failed = true;
+        slot.fail_pending = true;
         slot.playing = false;
         slot.ready = false;
         let player = slot.player.take();

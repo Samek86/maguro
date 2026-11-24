@@ -45,7 +45,8 @@ const PICS: &[&str] = &[
     "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "dib", "tif", "tiff", "webp", "heic", "heif", "avif", "ico", "cur", "jxr", "wdp", "dds",
     "raw", "cr2", "cr3", "nef", "nrw", "arw", "dng", "orf", "rw2", "raf", "srw", "pef",
 ];
-// Video and audio extensions live in media.rs. Playback uses them; a failed open falls back here.
+// Video and audio extensions live in media.rs. The view plays them first. This body is the
+// information view when Media Foundation and the handler fallback both decline.
 // shown by the Windows preview handler when there is one (Office, Outlook, the browser engine, fonts, a PDF reader)
 const HANDLED: &[&str] = &[
     "doc", "docx", "docm", "dot", "dotx", "rtf", "odt", "xls", "xlsx", "xlsm", "xlsb", "ods", "ppt", "pptx", "pptm", "pps", "ppsx",
@@ -75,9 +76,8 @@ pub(crate) fn ext_of(path: &str) -> String {
 // The registered preview handler of an extension; macro-enabled and show variants borrow their plain twin's.
 /// Types Maguro draws itself. A registered shell handler is not asked first for these:
 /// text, images, SVG, PDF, and office packages this process parses.
-/// Audio and video are not here: a registered handler is used when one exists and the file
-/// is small enough. Otherwise Media Foundation plays, and the thumbnail or card remains
-/// when playback cannot start.
+/// Audio and video are not here either. [`route_media`] plays them with Media Foundation
+/// first. A handler is only the fallback after that open fails.
 pub(crate) fn maguro_owns(ext: &str) -> bool {
     if PICS.contains(&ext) || PLAIN.contains(&ext) || CODE.contains(&ext) {
         return true;
@@ -93,7 +93,9 @@ pub(crate) fn maguro_owns(ext: &str) -> bool {
 
 /// Shell preview handler for a type Maguro does not draw, when one is registered and the file is small enough.
 /// `plain` means that handler already failed. `registered` is the lookup result, so tests skip the registry.
-/// Parsed spreadsheets never take the handler. `handlers_first` is the old "handler before Maguro" route.
+/// Parsed spreadsheets never take the handler. Audio and video never take it here: [`route_media`]
+/// plays them first and uses a handler only after Media Foundation cannot open the file.
+/// `handlers_first` is the old "handler before Maguro" route for types that are not media.
 pub(crate) fn want_shell_handler(ext: &str, len: u64, plain: bool, registered: bool) -> bool {
     shell_handler_wanted(ext, len, plain, registered, false)
 }
@@ -102,31 +104,106 @@ pub(crate) fn shell_handler_wanted(ext: &str, len: u64, plain: bool, registered:
     if plain || !registered || len == 0 || len > HEAVY_MAX {
         return false;
     }
+    if super::media::is_video(ext) || super::media::is_audio(ext) {
+        return false;
+    }
     super::prehost::allow_shell_handler(ext, maguro_owns(ext), handlers_first)
 }
 
-/// Media Foundation plays this audio or video file when a shell preview handler will not.
-/// A registered handler for a file of 1 byte through 10 MB wins. Over that limit, after a
-/// handler failure (`plain`), or with no handler, playback is Maguro's. An empty file,
-/// a directory, and every type Maguro draws another way stay with that other preview.
-pub(crate) fn media_playback_wanted(ext: &str, is_file: bool, len: u64, plain: bool, registered: bool) -> bool {
-    super::media::playable_len(is_file, len)
-        && (super::media::is_video(ext) || super::media::is_audio(ext))
-        && !want_shell_handler(ext, len, plain, registered)
+/// What shows an audio or video file. Quick Look and the preview pane both call this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MediaRoute {
+    /// Maguro's Media Foundation player. This is the first try.
+    Player,
+    /// A registered preview handler. Only after Media Foundation refused the file,
+    /// and only while the file is within [`HEAVY_MAX`].
+    Handler,
+    /// The existing thumbnail, card, or attribute view. No player and no handler.
+    Info,
 }
 
-/// UI-thread guess matching [`content`]: play now, or leave the file for a handler.
-/// The view closes the player when the worker actually returns [`Body::Handler`], and
-/// opens it if that worker returns Maguro's own thumbnail or card instead.
+/// `mf_failed` is true after Media Foundation could not open the file.
+/// `handler_blocked` means that handler was already tried (`plain`, or the failure memo).
+/// `registered` is the lookup result, so tests skip the registry.
+/// `asked` is the view generation that opened the file. `current` is the generation on screen.
+/// A mismatch returns `None`: a stale open must not change the file now showing.
+pub(crate) fn route_media(
+    ext: &str,
+    is_file: bool,
+    len: u64,
+    mf_failed: bool,
+    handler_blocked: bool,
+    registered: bool,
+    asked: u64,
+    current: u64,
+) -> Option<MediaRoute> {
+    if asked != current {
+        return None;
+    }
+    let media = super::media::playable_len(is_file, len) && (super::media::is_video(ext) || super::media::is_audio(ext));
+    if !media || handler_blocked {
+        return Some(MediaRoute::Info);
+    }
+    if !mf_failed {
+        return Some(MediaRoute::Player);
+    }
+    if registered && len <= HEAVY_MAX {
+        Some(MediaRoute::Handler)
+    } else {
+        Some(MediaRoute::Info)
+    }
+}
+
+/// Start the built-in player for a playable audio or video file.
+/// A registered handler does not block it. `plain` is the reload after a handler
+/// failure: the player was already tried, so this returns false and the info view stays.
+pub(crate) fn media_playback_wanted(ext: &str, is_file: bool, len: u64, plain: bool, registered: bool) -> bool {
+    let _ = registered;
+    route_media(ext, is_file, len, false, plain, false, 1, 1) == Some(MediaRoute::Player)
+}
+
+/// UI-thread guess matching [`route_media`]: play now.
+/// The handler fallback runs later, from [`media_failure_follow`], if this open fails.
 pub(crate) fn media_playback_for(path: &str, plain: bool) -> bool {
     let Ok(meta) = std::fs::metadata(path) else { return false };
     if !meta.is_file() {
         return false;
     }
     let ext = ext_of(path);
-    let skip = plain || super::prehost::handler_failure_blocks(path, super::prehost::mtime_key(meta.modified().ok()));
+    media_playback_wanted(&ext, true, meta.len(), plain, false)
+}
+
+/// What the view does after Media Foundation refuses `path`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MediaFollow {
+    /// Start this registered handler. The generation still matches.
+    Handler(GUID),
+    /// Keep the thumbnail, card, or attribute view.
+    Info,
+    /// `asked` is not the file on screen. Do nothing.
+    Ignore,
+}
+
+/// Handler fallback for one failed Media Foundation open. Both views call this
+/// with the generation they stored when they started the player.
+pub(crate) fn media_failure_follow(path: &str, asked: u64, current: u64) -> MediaFollow {
+    if asked != current {
+        return MediaFollow::Ignore;
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return MediaFollow::Info;
+    };
+    if !meta.is_file() {
+        return MediaFollow::Info;
+    }
+    let ext = ext_of(path);
+    let blocked = super::prehost::handler_failure_blocks(path, super::prehost::mtime_key(meta.modified().ok()));
     let registered = handler_for(&ext).is_some();
-    media_playback_wanted(&ext, true, meta.len(), skip, registered)
+    match route_media(&ext, true, meta.len(), true, blocked, registered, asked, current) {
+        Some(MediaRoute::Handler) => handler_for(&ext).map(MediaFollow::Handler).unwrap_or(MediaFollow::Info),
+        None => MediaFollow::Ignore,
+        Some(MediaRoute::Player | MediaRoute::Info) => MediaFollow::Info,
+    }
 }
 
 pub(crate) fn handler_for(ext: &str) -> Option<GUID> {
@@ -197,14 +274,10 @@ pub(crate) unsafe fn content(req: &PeekReq) -> Body {
     }
     let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
     let skip_handler = req.plain || super::prehost::handler_failure_blocks(path, super::prehost::mtime_key(meta.as_ref().and_then(|m| m.modified().ok())));
-    // Audio and video: a registered handler when the file is small enough.
-    // Otherwise the view plays it. The thumbnail or card is what remains if playback cannot start.
+    // Audio and video: the view plays with Media Foundation. This body is the
+    // information view under the player, and what remains when playback and the
+    // handler fallback both decline. The handler is not chosen here.
     if super::media::is_video(e) || super::media::is_audio(e) {
-        if want_shell_handler(e, len, skip_handler, true) {
-            if let Some(g) = handler_for(e) {
-                return Body::Handler(g);
-            }
-        }
         if super::media::is_video(e) {
             return match super::imgjob::isolated_pic(path, req.w, req.h, (SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY).0 as u32) {
                 Ok(p) => Body::Pic(p),
@@ -1226,8 +1299,9 @@ mod tests {
         assert!(maguro_owns("md") && !maguro_owns("mp4") && !maguro_owns("mp3") && !maguro_owns("wav"));
         assert!(!maguro_owns("html") && !maguro_owns("dwg") && !maguro_owns("msg") && !maguro_owns("ttf"));
         assert!(!want_shell_handler("png", 100, false, true));
-        assert!(want_shell_handler("mp4", 100, false, true));
-        assert!(want_shell_handler("mp3", 100, false, true));
+        assert!(!want_shell_handler("mp4", 100, false, true));
+        assert!(!want_shell_handler("mp3", 100, false, true));
+        assert!(!shell_handler_wanted("mp4", 100, false, true, true));
         assert!(!want_shell_handler("mp4", HEAVY_MAX + 1, false, true));
         assert!(want_shell_handler("html", 100, false, true));
         assert!(want_shell_handler("dwg", 100, false, true));
@@ -1247,16 +1321,16 @@ mod tests {
     }
 
     #[test]
-    fn media_plays_when_no_shell_handler_will() {
-        // A registered handler at or under 10 MB shows the file. The player stays off.
-        assert!(!media_playback_wanted("mp4", true, 100, false, true));
-        assert!(!media_playback_wanted("mp3", true, HEAVY_MAX, false, true));
-        assert!(!media_playback_wanted("wav", true, 1, false, true));
-        // No handler, over the limit, or a handler that already failed: Media Foundation.
+    fn media_plays_before_a_registered_handler() {
+        // A registered handler does not block the player, including at the size limit.
+        assert!(media_playback_wanted("mp4", true, 100, false, true));
+        assert!(media_playback_wanted("mp3", true, HEAVY_MAX, false, true));
+        assert!(media_playback_wanted("wav", true, 1, false, true));
         assert!(media_playback_wanted("mp4", true, 100, false, false));
         assert!(media_playback_wanted("mkv", true, HEAVY_MAX + 1, false, true));
-        assert!(media_playback_wanted("webm", true, 100, true, true));
         assert!(media_playback_wanted("flac", true, 50, false, false));
+        // The reload after a handler failure does not open the player again.
+        assert!(!media_playback_wanted("webm", true, 100, true, true));
         // Empty, not a file, and types drawn another way never start the player.
         assert!(!media_playback_wanted("mp4", true, 0, false, false));
         assert!(!media_playback_wanted("mp4", false, 100, false, false));
@@ -1265,6 +1339,34 @@ mod tests {
         assert!(!media_playback_wanted("docx", true, 100, false, true));
         assert!(!media_playback_wanted("xlsx", true, 100, false, true));
         assert!(!media_playback_wanted("csv", true, 100, false, true));
+    }
+
+    #[test]
+    fn media_route_tries_the_player_then_the_handler() {
+        let now = 7u64;
+        // Playable audio and video start on Media Foundation even when a handler is registered.
+        assert_eq!(route_media("mp4", true, 100, false, false, true, now, now), Some(MediaRoute::Player));
+        assert_eq!(route_media("mp3", true, HEAVY_MAX, false, false, true, now, now), Some(MediaRoute::Player));
+        assert_eq!(route_media("mkv", true, HEAVY_MAX + 1, false, false, true, now, now), Some(MediaRoute::Player));
+        // The open failed. A registered handler within 10 MB is the fallback.
+        assert_eq!(route_media("mp4", true, 100, true, false, true, now, now), Some(MediaRoute::Handler));
+        assert_eq!(route_media("wav", true, 1, true, false, true, now, now), Some(MediaRoute::Handler));
+        assert_eq!(route_media("flac", true, HEAVY_MAX, true, false, true, now, now), Some(MediaRoute::Handler));
+        // No handler, over the limit, or a handler that already failed: the info view.
+        assert_eq!(route_media("mp4", true, 100, true, false, false, now, now), Some(MediaRoute::Info));
+        assert_eq!(route_media("webm", true, HEAVY_MAX + 1, true, false, true, now, now), Some(MediaRoute::Info));
+        assert_eq!(route_media("mp3", true, 50, true, true, true, now, now), Some(MediaRoute::Info));
+        // A stale generation does not change the file now on screen.
+        assert_eq!(route_media("mp4", true, 100, true, false, true, now, now + 1), None);
+        assert_eq!(route_media("mp4", true, 100, false, false, true, 1, 2), None);
+        // Non-media stays on its own route: this function does not send it to a handler or a player.
+        assert_eq!(route_media("png", true, 100, false, false, true, now, now), Some(MediaRoute::Info));
+        assert_eq!(route_media("html", true, 100, true, false, true, now, now), Some(MediaRoute::Info));
+        assert_eq!(route_media("docx", true, 100, false, false, true, now, now), Some(MediaRoute::Info));
+        assert_eq!(route_media("xlsx", true, 100, true, false, true, now, now), Some(MediaRoute::Info));
+        assert!(want_shell_handler("html", 100, false, true));
+        assert!(!want_shell_handler("docx", 100, false, true));
+        assert!(!shell_handler_wanted("xlsx", 100, false, true, true));
     }
 
     #[test]
