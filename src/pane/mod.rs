@@ -1,4 +1,5 @@
 mod docparse;
+mod play;
 pub(crate) mod recent;
 mod imgjob;
 mod jpeg;

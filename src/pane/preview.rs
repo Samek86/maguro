@@ -33,6 +33,8 @@ pub(crate) enum Body {
     Table { rows: Vec<Vec<String>>, cut: bool },
     List { head: String, rows: Vec<(String, String)> }, // folder or archive contents: name, size
     Handler(GUID),                                       // a Windows preview handler shows it (on the UI thread)
+    /// Audio or video. The UI thread plays it with Media Foundation and releases it on the next file.
+    Media { video: bool, icon: Option<Pix>, rows: Vec<(String, String)> },
     Card { icon: Option<Pix>, rows: Vec<(String, String)> },
 }
 
@@ -53,7 +55,7 @@ const HANDLED: &[&str] = &[
     "odp", "vsd", "vsdx", "msg", "html", "htm", "mht", "mhtml", "xps", "oxps", "ttf", "otf", "ttc", "fon",
 ];
 const CODE: &[&str] = &[
-    "json", "jsonc", "json5", "ndjson", "geojson", "xml", "xaml", "xsd", "xsl", "xslt", "svg", "plist", "yaml", "yml", "toml", "ini", "cfg", "conf",
+    "json", "jsonc", "json5", "ndjson", "geojson", "xml", "xaml", "xsd", "xsl", "xslt", "plist", "yaml", "yml", "toml", "ini", "cfg", "conf",
     "config", "properties", "env", "reg", "inf", "rs", "py", "pyw", "ipynb", "js", "mjs", "cjs", "ts", "tsx", "jsx", "vue", "svelte", "java", "kt",
     "kts", "scala", "groovy", "gradle", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "fs", "vb", "go", "rb", "php", "pl", "pm", "lua", "r",
     "swift", "m", "mm", "dart", "sh", "bash", "zsh", "fish", "bat", "cmd", "ps1", "psm1", "psd1", "sql", "css", "scss", "sass", "less", "lock",
@@ -74,6 +76,27 @@ pub(crate) fn ext_of(path: &str) -> String {
 }
 
 // The registered preview handler of an extension; macro-enabled and show variants borrow their plain twin's.
+/// Types Maguro draws itself. A registered shell handler is not asked first for these:
+/// text, images, SVG, PDF, office packages this process parses, and audio/video (Media Foundation).
+pub(crate) fn maguro_owns(ext: &str) -> bool {
+    if PICS.contains(&ext) || VIDEOS.contains(&ext) || AUDIO.contains(&ext) || PLAIN.contains(&ext) || CODE.contains(&ext) {
+        return true;
+    }
+    if OFFICE_ZIP.contains(&ext) || ZIPS.contains(&ext) || PROGRAMS.contains(&ext) {
+        return true;
+    }
+    matches!(
+        ext,
+        "svg" | "pdf" | "csv" | "tsv" | "md" | "markdown" | "mdown" | "mkd" | "eml" | "hwp" | "hwpx" | "hwpt" | "psd" | "psb" | "url" | "website" | "lnk" | "xhtml"
+    )
+}
+
+/// Shell preview handler for a type Maguro does not draw, when one is registered and the file is small enough.
+/// `plain` means that handler already failed. `registered` is the lookup result, so tests skip the registry.
+pub(crate) fn want_shell_handler(ext: &str, len: u64, plain: bool, registered: bool) -> bool {
+    !plain && registered && len > 0 && len <= HEAVY_MAX && !maguro_owns(ext)
+}
+
 pub(crate) fn handler_for(ext: &str) -> Option<GUID> {
     const PREVIEW: PCWSTR = w!("{8895b1c6-b41f-4c1c-a562-0d564250836f}");
     let twin = match ext {
@@ -127,21 +150,43 @@ pub(crate) unsafe fn content(req: &PeekReq) -> Body {
             Err(msg) => image_fail(path, &msg),
         };
     }
+    if e == "svg" {
+        // Rasterize large enough to zoom. A failed render shows the source.
+        let side = req.w.max(req.h).clamp(512, 2048);
+        let flags = (SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK | SIIGBF_THUMBNAILONLY).0 as u32;
+        return match super::imgjob::isolated_pic(path, side, side, flags) {
+            Ok(p) => Body::Pic(p),
+            Err(_) => text_body(path, TextKind::Code).unwrap_or_else(|| unsafe { card(path, &[]) }),
+        };
+    }
     if VIDEOS.contains(&e) {
+        if !req.skip_media {
+            return Body::Media { video: true, icon: None, rows: Vec::new() };
+        }
         return match super::imgjob::isolated_pic(path, req.w, req.h, (SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY).0 as u32) {
             Ok(p) => Body::Pic(p),
             Err(msg) => image_fail(path, &msg),
         };
     }
     if AUDIO.contains(&e) {
+        if !req.skip_media {
+            let (icon, rows) = match card(path, &[]) {
+                Body::Card { icon, rows } => (icon, rows),
+                _ => (None, Vec::new()),
+            };
+            return Body::Media { video: false, icon, rows };
+        }
         return card(path, &[]);
     }
+    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
     let heavy = HANDLED.contains(&e) || OFFICE_ZIP.contains(&e) || matches!(e, "pdf" | "eml" | "hwp" | "hwpx" | "hwpt" | "psd" | "psb");
-    if heavy && meta.as_ref().is_some_and(|m| m.len() > HEAVY_MAX) {
+    if heavy && len > HEAVY_MAX {
         let note = (tr(crate::Key::Preview).to_string(), tr(crate::Key::SkippedLargerThan10Mb).to_string());
         return card(path, &[note]);
     }
-    if !req.plain && HANDLED.contains(&e) {
+    // Same order in Quick Look and the docked pane: Maguro's own preview for types it draws,
+    // otherwise any registered IPreviewHandler (not only the old extension list).
+    if want_shell_handler(e, len, req.plain, true) {
         if let Some(g) = handler_for(e) {
             return Body::Handler(g);
         }
@@ -702,6 +747,20 @@ pub(crate) unsafe fn meta(path: &str, body: Option<&Body>) -> FileFacts {
     let image = PICS.contains(&e.as_str());
     if let Some(body) = body {
         match body {
+            Body::Media { .. } => {
+                if let Some(ps) = &ps {
+                    let (w, h) = (prop(ps, &PKEY_Video_FrameWidth), prop(ps, &PKEY_Video_FrameHeight));
+                    if let (Some(w), Some(h)) = (w, h) {
+                        let dim = format!("{w} × {h}");
+                        facts.dimensions = dim.clone();
+                        out.push(dim);
+                    }
+                    if let Some(d) = prop(ps, &PKEY_Media_Duration) {
+                        facts.extra = d.clone();
+                        out.push(d);
+                    }
+                }
+            }
             Body::Pic(_) if VIDEOS.contains(&e.as_str()) => {
                 if let Some(ps) = &ps {
                     let (w, h) = (prop(ps, &PKEY_Video_FrameWidth), prop(ps, &PKEY_Video_FrameHeight));
@@ -1139,6 +1198,22 @@ pub(crate) unsafe fn version_rows(path: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_handler_skips_types_maguro_draws() {
+        assert!(maguro_owns("png") && maguro_owns("svg") && maguro_owns("txt") && maguro_owns("rs"));
+        assert!(maguro_owns("pdf") && maguro_owns("docx") && maguro_owns("xlsx") && maguro_owns("pptx"));
+        assert!(maguro_owns("mp4") && maguro_owns("mp3") && maguro_owns("md"));
+        assert!(!maguro_owns("html") && !maguro_owns("dwg") && !maguro_owns("msg") && !maguro_owns("ttf"));
+        assert!(!want_shell_handler("png", 100, false, true));
+        assert!(!want_shell_handler("mp4", 100, false, true));
+        assert!(want_shell_handler("html", 100, false, true));
+        assert!(want_shell_handler("dwg", 100, false, true));
+        assert!(!want_shell_handler("dwg", 100, true, true));
+        assert!(!want_shell_handler("dwg", 0, false, true));
+        assert!(!want_shell_handler("html", HEAVY_MAX + 1, false, true));
+        assert!(!want_shell_handler("html", 100, false, false));
+    }
 
     #[test]
     fn extension_of_a_path() {
