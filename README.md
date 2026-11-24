@@ -102,7 +102,7 @@ Start with one pane, then pick any built-in grid (up to 4×4). Drag boundaries t
 
 ### 2. Window tabs and nested pane tabs
 
-Chrome-style tabs across the window, plus tabs inside each pane. A tab is named after its active folder (full path in the tooltip). Duplicate a tab, move it to a new window, or save it as a session.
+Chrome-style tabs across the window, plus tabs inside each pane. With one folder, the pane-tab strip stays hidden and the New pane tab button sits to the right of Up. With two or more folders, the strip is shown and its + adds a tab. A tab is named after its active folder (full path in the tooltip). Duplicate a tab, move it to a new window, or save it as a session.
 
 <p align="center"><img width="760" alt="Window and pane tabs" src="docs/images-v10/en/tabs.png"></p>
 
@@ -124,7 +124,7 @@ A new install, or **Use Default Set** in the editor, starts with New folder, New
 
 ### 5. Toolbar editor
 
-Open the editor from the pencil button at the bottom of the vertical command column, or the matching control on the horizontal bar. Drag commands onto the bar, rearrange them, and pick from the palette underneath. You can add an Open target for a specific folder or file; those targets replace the generic Open item. The editor window is resizable and has a fixed minimum size, so the bar and the palette stay usable. A long name on a palette card ends in an ellipsis; the tooltip shows the full name.
+Open the editor from the pencil button at the bottom of the vertical command column, or the matching control on the horizontal bar. Drag commands onto the bar, rearrange them, and pick from the palette underneath. You can add an Open target for a specific folder or file; those targets replace the generic Open item. The editor opens wide and short, and it can be resized. At its smallest size the footer stays on screen and the palette scrolls. A long name on a palette card is one line and ends in an ellipsis; the tooltip shows the full name.
 
 <p align="center"><img width="560" alt="Toolbar editor" src="docs/images-v10/en/toolbar_editor.png"></p>
 
@@ -164,7 +164,11 @@ The sidebar is split evenly: favourites on top, folder tree below. Favourites ho
 
 ### 11. Quick preview
 
-F3 opens Quick look for pictures, PDF, Office, HTML, Markdown, code, CSV, ZIP, HWP/HWPX (Hancom) and more. Space does the same when Preview with Space is on (the default). Ctrl+wheel zooms (10–800%), drag pans, the wheel scrolls, ←/→ step through files. In Quick look, **F2** renames and **Del** deletes the file on screen.
+F3 opens Quick look. Space does the same when Preview with Space is on (the default). A space typed within a second of typing a name, or during IME composition, stays part of the name.
+
+Quick look and the preview pane (Alt+P) show the same files. Pictures include JPEG, PNG, GIF, BMP, TIFF, WebP, ICO, DDS and camera RAW. HEIC, HEIF and AVIF use Windows Imaging Component and need the matching Windows codec. SVG is drawn as an image. The same views show PDF, Markdown, text and code, CSV and TSV, xlsx as a table, RTF, OpenDocument, EPUB, mail (.eml and .msg, with headers, the attachment names and the body), shortcut cards (.lnk and .url), archive listings (zip, tar, gzip and Cabinet), and HWP/HWPX/HWPT. Text encoding is detected from the bytes. Office files Maguro reads, such as docx and pptx, are drawn by Maguro. Other types use a registered Windows preview handler. Video and audio play with Windows Media Foundation.
+
+Ctrl+=, Ctrl+- and Ctrl+0 zoom, and so does Ctrl+mouse wheel (10–800%). The level stays while you move between files. Drag selects text; Ctrl+A selects all; Ctrl+C copies. In Quick look, ←/→ step through files, Enter opens the file, and Esc, Space or F3 closes the window. **F2** renames and **Del** deletes the file on screen. K pauses or resumes playback, and J and L seek by 5 seconds. In the preview pane, Space pauses or resumes.
 
 <p align="center">
   <img width="480" alt="Preview in a pane" src="docs/images-v10/en/preview.png">
@@ -287,6 +291,9 @@ Defaults. A chord that appears under Settings → Shortcuts can be changed there
 | **Preview** | F3 | Quick look. Space also opens it when Preview with Space is on (the default) |
 |  | Esc / Space / F3 | Close Quick look |
 |  | Alt+P | Show or hide the preview pane |
+|  | Ctrl+= / Ctrl+- / Ctrl+0 | Zoom in Quick look or the preview pane. Ctrl+mouse wheel does the same |
+|  | K / J / L | Pause or resume, seek back, or seek forward by 5 seconds |
+|  | Space | Pause or resume in the preview pane. In Quick look, Space closes the window |
 | **File** | Ctrl+Shift+C | Copy full path |
 |  | Ctrl+Shift+B | File basket |
 |  | Ctrl+Alt+B | Add selection to basket |
