@@ -1,18 +1,25 @@
 //! Right-hand preview of the active pane's focused item.
 //!
-//! A registered Windows preview handler draws Office, PDF, and HTML, with the
-//! attribute header kept above its child window. When no handler is registered,
-//! or the handler fails, the pane paints the same body as Quick Look (text, code,
-//! a CSV grid, a picture, a folder list, a card). The handler lives on its own
-//! STA thread. Arrow keys only arm a short timer, so the file list never waits.
+//! The docked preview uses the same body as Quick Look. Maguro draws text, images,
+//! SVG, PDF, and parsed office files. Audio and video play with Media Foundation
+//! first. A registered preview handler is used only when that open fails and the
+//! file is 10 MB or less. Otherwise a thumbnail or a card remains. Any other
+//! registered Windows preview handler gets a child window under the attribute header.
+//! The handler lives on its own thread. The UI asks that thread to unload the handler
+//! before the host window is destroyed, and waits briefly so a stuck handler
+//! cannot block the pane.
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 
+use super::prehost::{
+    drive_host, foreground_process, note_handler_failure, reclaim_foreground, release_host_window, remember_handler_pid, should_reclaim, ComUninit, HandlerSession,
+    HostCtl, HostDone, HostRun, WM_HOST_UNLOAD,
+};
+
 use super::fsize::{cached_stat, classify_ui, is_volume_root, preview_walk, remember_stat};
-use super::peek::{bar_hit, bar_layout, bar_rgb, host_handler, image_fit_px, nudge, page_toward, paint_card, thumb_scroll, BarHit, PeekReq, Pix};
+use super::peek::{bar_hit, bar_layout, bar_rgb, host_handler, image_fit_px, nudge, page_toward, paint_card, scaled, thumb_scroll, zoom_after, zoom_cmd, zoom_factor, zoom_or_fit, BarHit, PeekReq, Pix};
 use super::preview::*;
 use super::pview::{self, line_no_at, list_row_at, row_h, selected_text, BodyScroll};
 use super::status::{dir_totals, DirTotals, DIR_STACK_CAP};
@@ -22,7 +29,7 @@ use crate::i18n::*;
 use crate::imports::*;
 use crate::ui::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::Controls::{IImageList, ILD_NORMAL};
 use windows::Win32::UI::Shell::IPreviewHandler;
 
@@ -31,6 +38,7 @@ const WM_PREVIEW_READY: u32 = WM_APP + 70; // wParam = generation; the result si
 const WM_PREVIEW_SIZE: u32 = WM_APP + 71; // thread message: the host window changed size
 const WM_PREVIEW_HOSTED: u32 = WM_APP + 72; // wParam = generation, lParam = 1 shown / 0 failed
 const WM_PREVIEW_TOTAL: u32 = WM_APP + 73; // wParam = generation; a folder walk finished
+const WM_PREVIEW_RECLAIM: u32 = WM_APP + 75; // handler process took the foreground
 const CMD_COPY: usize = 1;
 const CMD_EDIT: usize = 2;
 
@@ -84,7 +92,8 @@ struct Slot {
     hit: Hit,
     head_h: i32,
     bar_drag: Option<i32>,
-    host: isize, // HWND is not Send; the UI thread is the only one that creates or destroys it
+    host: isize, // HWND is not Send; the host thread destroys it after Unload
+    ctl: Option<Arc<HostCtl>>,
     tid: u32,
     area_w: i32,
     area_h: i32,
@@ -93,8 +102,10 @@ struct Slot {
     /// A click in the pane clears the flag so the handler can keep the keyboard.
     return_focus: bool,
     cancel: Option<Arc<AtomicBool>>,
-    /// Picture and PDF zoom, as a multiple of the fit size. 1 is fit. Reset when the file changes.
+    /// Stays while the pane is open, including across selection changes. 1.0 is fit.
     zoom: f64,
+    /// This generation fell back to a preview handler after Media Foundation failed.
+    media_fallback: bool,
 }
 
 impl Default for Slot {
@@ -117,6 +128,7 @@ impl Default for Slot {
             head_h: 0,
             bar_drag: None,
             host: 0,
+            ctl: None,
             tid: 0,
             area_w: 0,
             area_h: 0,
@@ -124,6 +136,7 @@ impl Default for Slot {
             return_focus: false,
             cancel: None,
             zoom: 1.0,
+            media_fallback: false,
         }
     }
 }
@@ -383,14 +396,25 @@ pub(crate) unsafe fn run_preview(force: bool) {
         slot.hit = Hit::default();
         slot.bar_drag = None;
         slot.return_focus = !inside;
-        slot.zoom = 1.0;
         slot.kind = if path.is_empty() { Kind::Empty } else { Kind::Opening };
+        slot.media_fallback = false;
         slot.gen
     };
     drop_host(key);
     if path.is_empty() {
+        super::media::close(h);
         _ = InvalidateRect(Some(h), None, false);
         return;
+    }
+    // Show the picture under the current header before MFPlay binds the renderer.
+    // Waiting for the preview job left the child hidden and this rect solid black.
+    // Audio and video always try the player first. A handler starts only if that open fails.
+    place_head(h);
+    if media_playback_for(&path, false) {
+        super::media::open_bound(h, &path, Some(pane_video_dest(h)), gen);
+        follow_media_failure(h, gen);
+    } else {
+        super::media::close(h);
     }
     enqueue(Work { hwnd: key, gen, path, w: bw, h: bh, skip_handler: false });
     _ = InvalidateRect(Some(h), None, false);
@@ -404,6 +428,7 @@ pub(crate) unsafe fn preview_clear() {
     if h.0.is_null() {
         return;
     }
+    super::media::close(h);
     let key = key_of(h);
     let stop = {
         let mut map = slots();
@@ -426,11 +451,13 @@ pub(crate) unsafe fn preview_clear() {
         slot.anchor = 0;
         slot.return_focus = false;
         slot.tid = 0;
+        slot.zoom = 1.0;
         true
     };
     if stop {
         jobs().remove(&key);
         drop_host(key);
+        super::media::close(h);
         _ = InvalidateRect(Some(h), None, false);
     }
 }
@@ -448,6 +475,7 @@ pub(crate) unsafe fn retint_preview() {
     if host != 0 {
         super::theme_hwnd(HWND(host as _), dark);
     }
+    super::media::sync_theme(h);
     let handler = slots().get(&key_of(h)).is_some_and(|s| s.kind == Kind::Handler);
     if handler {
         run_preview(true);
@@ -510,16 +538,21 @@ fn produce(job: &Work) -> Ready {
     ready
 }
 
-unsafe fn produce_com(job: &Work, is_dir: bool, len: u64) -> Ready {
-    let ext = ext_of(&job.path);
-    if !is_dir && !job.skip_handler && len > 0 && len <= HEAVY_MAX && !own_preview(&ext) {
-        if let Some(g) = handler_for(&ext) {
-            let facts = meta(&job.path, None);
-            return Ready::Handler { clsid: g, facts };
-        }
-    }
-    let req = PeekReq { path: job.path.clone(), w: job.w.max(1), h: job.h.max(1), hwnd: 0, plain: true };
+unsafe fn produce_com(job: &Work, is_dir: bool, _len: u64) -> Ready {
+    // `content` chooses Maguro's renderer or any registered preview handler. `plain` is set
+    // once a handler has already failed, so this does not ask the shell twice.
+    let req = PeekReq {
+        path: job.path.clone(),
+        w: job.w.max(1),
+        h: job.h.max(1),
+        hwnd: 0,
+        plain: job.skip_handler,
+    };
     let body = content(&req);
+    if let Body::Handler(clsid) = body {
+        let facts = meta(&job.path, None);
+        return Ready::Handler { clsid, facts };
+    }
     let facts = meta(&job.path, Some(&body));
     // A UNC icon factory can stall on a dead share. The header still has the small system icon.
     let big = if is_dir && !job.path.starts_with(r"\\") { shell_pic(&job.path, 96, 96, SIIGBF_ICONONLY) } else { None };
@@ -623,19 +656,40 @@ unsafe fn on_total(h: HWND, gen: u64) {
     _ = InvalidateRect(Some(h), None, false);
 }
 
+static DROP_BUSY: AtomicBool = AtomicBool::new(false);
+
 unsafe fn drop_host(key: isize) {
-    let host = {
-        let mut map = slots();
-        let Some(slot) = map.get_mut(&key) else { return };
-        slot.tid = 0;
-        let host = slot.host;
-        slot.host = 0;
-        host
-    };
-    let host = HWND(host as _);
-    if !host.0.is_null() && IsWindow(Some(host)).as_bool() {
-        _ = DestroyWindow(host);
+    if DROP_BUSY.swap(true, Ordering::SeqCst) {
+        let (tid, ctl) = {
+            let map = slots();
+            match map.get(&key) {
+                Some(slot) => (slot.tid, slot.ctl.clone()),
+                None => (0, None),
+            }
+        };
+        if let Some(ctl) = ctl {
+            ctl.unload.store(true, Ordering::Release);
+            if tid != 0 {
+                _ = PostThreadMessageW(tid, WM_HOST_UNLOAD, WPARAM(0), LPARAM(0));
+            }
+        }
+        return;
     }
+    let (host, tid, ctl) = {
+        let mut map = slots();
+        let Some(slot) = map.get_mut(&key) else {
+            DROP_BUSY.store(false, Ordering::SeqCst);
+            return;
+        };
+        let host = slot.host;
+        let tid = slot.tid;
+        slot.tid = 0;
+        slot.host = 0;
+        let ctl = slot.ctl.take();
+        (host, tid, ctl)
+    };
+    release_host_window(ctl, HWND(host as _), tid);
+    DROP_BUSY.store(false, Ordering::SeqCst);
 }
 
 unsafe fn give_back(h: HWND) {
@@ -689,10 +743,28 @@ unsafe fn on_ready(h: HWND, gen: u64) {
             if path.is_empty() || !current(key, gen) {
                 return;
             }
+            // The handler fills the plate. Stop a player opened on the early guess.
+            super::media::close(h);
             place_head(h);
             start_host(h, gen, clsid, path);
         }
         Ready::Shown { body, facts, big, folder } => {
+            let keep_handler = slots().get(&key).is_some_and(|s| s.gen == gen && s.media_fallback);
+            if keep_handler {
+                // The handler fallback already owns this file. Refresh the attribute
+                // header and leave the host window where it is.
+                if let Some(slot) = slots().get_mut(&key) {
+                    if slot.gen == gen {
+                        slot.facts = facts;
+                        slot.big = big;
+                        slot.folder = false;
+                    }
+                }
+                place_head(h);
+                sync_host(h);
+                _ = InvalidateRect(Some(h), None, false);
+                return;
+            }
             {
                 let mut map = slots();
                 if let Some(slot) = map.get_mut(&key) {
@@ -717,6 +789,18 @@ unsafe fn on_ready(h: HWND, gen: u64) {
             // The total line is part of the folder block, so measure after it is armed.
             place_head(h);
             give_back(h);
+            // Facts make the header taller. Move the picture before the paint, or the
+            // child still covers the new lines and WS_CLIPCHILDREN never draws them.
+            // The worker declined a handler. If the early guess did not start playback, start it now.
+            if super::media::covers(h) {
+                place_media(h);
+            } else {
+                let again = slots().get(&key).map(|s| s.path.clone()).unwrap_or_default();
+                if !again.is_empty() && media_playback_for(&again, false) {
+                    super::media::open_bound(h, &again, Some(pane_video_dest(h)), gen);
+                    follow_media_failure(h, gen);
+                }
+            }
             _ = InvalidateRect(Some(h), None, false);
         }
         Ready::Miss => on_ready_miss(h, gen),
@@ -734,35 +818,76 @@ unsafe fn start_host(h: HWND, gen: u64, clsid: GUID, path: String) {
     let ht = (body.bottom - body.top).max(1);
     let style = WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN;
     let Ok(win) = CreateWindowExW(WINDOW_EX_STYLE(0), w!("MaguroPreviewHost"), w!(""), style, body.left, body.top, w, ht, Some(h), None, None, None) else {
+        clear_media_fallback(key, gen);
         enqueue(Work { hwnd: key, gen, path, w, h: ht, skip_handler: true });
         return;
     };
+    let ctl = HostCtl::fresh();
     {
         let mut map = slots();
         let Some(slot) = map.get_mut(&key) else {
             drop(map);
             _ = DestroyWindow(win);
+            clear_media_fallback(key, gen);
             return;
         };
         if slot.gen != gen {
             drop(map);
             _ = DestroyWindow(win);
+            clear_media_fallback(key, gen);
             return;
         }
         slot.host = win.0 as isize;
+        slot.ctl = Some(ctl.clone());
         slot.area_w = w;
         slot.area_h = ht;
         slot.seq = slot.seq.wrapping_add(1);
     }
     let (hwnd, popup, area) = (win.0 as isize, h.0 as isize, RECT { left: 0, top: 0, right: w, bottom: ht });
     let again = path.clone();
-    if std::thread::Builder::new().name("maguro-preview-host".into()).spawn(move || host_thread(gen, clsid, path, hwnd, popup, area)).is_err() {
+    if std::thread::Builder::new().name("maguro-preview-host".into()).spawn(move || host_thread(gen, clsid, path, hwnd, popup, area, ctl)).is_err() {
+        if let Some(slot) = slots().get_mut(&key) {
+            if let Some(ctl) = slot.ctl.take() {
+                ctl.done.store(true, Ordering::Release);
+            }
+        }
         drop_host(key);
+        clear_media_fallback(key, gen);
         enqueue(Work { hwnd: key, gen, path: again, w, h: ht, skip_handler: true });
     }
 }
 
-unsafe fn host_thread(gen: u64, clsid: GUID, path: String, hwnd: isize, popup: isize, area: RECT) {
+fn clear_media_fallback(key: isize, gen: u64) {
+    if let Some(slot) = slots().get_mut(&key) {
+        if slot.gen == gen {
+            slot.media_fallback = false;
+        }
+    }
+}
+
+/// Media Foundation refused this file. Start the registered handler, or leave the info view.
+/// A generation that is no longer current is ignored.
+unsafe fn follow_media_failure(h: HWND, view_gen: u64) {
+    let Some(fail) = super::media::take_open_failure(h) else { return };
+    let key = key_of(h);
+    if !current(key, view_gen) {
+        return;
+    }
+    match media_failure_follow(&fail.path, fail.view_gen, view_gen) {
+        MediaFollow::Handler(clsid) => {
+            if let Some(slot) = slots().get_mut(&key) {
+                if slot.gen == view_gen {
+                    slot.media_fallback = true;
+                }
+            }
+            start_host(h, view_gen, clsid, fail.path);
+        }
+        MediaFollow::Info | MediaFollow::Ignore => {}
+    }
+}
+
+unsafe fn host_thread(gen: u64, clsid: GUID, path: String, hwnd: isize, popup: isize, area: RECT, ctl: Arc<HostCtl>) {
+    let _done = HostDone(ctl.clone());
     let tid = GetCurrentThreadId();
     let key = popup;
     {
@@ -773,31 +898,49 @@ unsafe fn host_thread(gen: u64, clsid: GUID, path: String, hwnd: isize, popup: i
             }
         }
     }
-    let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+    let _com = ComUninit(unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() });
     let h = HWND(hwnd as _);
-    let mut prime = MSG::default();
-    // The queue has to exist before DoPreview, or a size posted during startup is lost.
-    _ = PeekMessageW(&mut prime, None, WM_PREVIEW_SIZE, WM_PREVIEW_SIZE, PM_NOREMOVE);
-    let ph = host_handler(h, &clsid, &path, area);
-    if current(key, gen) {
-        _ = PostMessageW(Some(HWND(popup as _)), WM_PREVIEW_HOSTED, WPARAM(gen as usize), LPARAM(ph.is_ok() as isize));
-    }
-    if let Ok(ph) = ph {
-        let mut seen = 0u64;
-        let mut msg = MSG::default();
-        while current(key, gen) && IsWindow(Some(h)).as_bool() {
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_PREVIEW_SIZE {
-                    apply_host_rect(&ph, key, gen, &mut seen);
-                } else {
-                    _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
+    let mut session = HandlerSession { ph: None, host: h };
+    let mut keep = || current(key, gen) && !ctl.unload.load(Ordering::Acquire);
+    // Posted after Unload so the UI never waits on this thread from inside the thread's SendMessage.
+    let mut tell_fail = false;
+    unsafe {
+        let mut prime = MSG::default();
+        // The queue has to exist before DoPreview, or a size posted during startup is lost.
+        _ = PeekMessageW(&mut prime, None, WM_PREVIEW_SIZE, WM_PREVIEW_SIZE, PM_NOREMOVE);
+        if !keep() {
+            return;
+        }
+        let popup_hwnd = HWND(popup as _);
+        match host_handler(h, &clsid, &path, area) {
+            Ok(ph) => {
+                session.ph = Some(ph);
+                if keep() {
+                    let pid = remember_handler_pid(h, &ctl);
+                    let fg = foreground_process();
+                    if should_reclaim(fg, pid, GetCurrentProcessId()) {
+                        _ = PostMessageW(Some(popup_hwnd), WM_PREVIEW_RECLAIM, WPARAM(gen as usize), LPARAM(0));
+                    }
+                    _ = PostMessageW(Some(popup_hwnd), WM_PREVIEW_HOSTED, WPARAM(gen as usize), LPARAM(1));
+                    let mut seen = 0u64;
+                    let ph = session.ph.as_ref().unwrap();
+                    let end = drive_host(ph, h, WM_PREVIEW_SIZE, &mut keep, |ph| apply_host_rect(ph, key, gen, &mut seen));
+                    if end == HostRun::Failed && keep() {
+                        tell_fail = true;
+                    }
                 }
             }
-            apply_host_rect(&ph, key, gen, &mut seen);
-            _ = MsgWaitForMultipleObjects(None, false, 100, QS_ALLINPUT);
+            Err(_) => {
+                if keep() {
+                    tell_fail = true;
+                }
+            }
         }
-        _ = ph.Unload();
+    }
+    drop(session);
+    if tell_fail {
+        note_handler_failure(&path);
+        unsafe { _ = PostMessageW(Some(HWND(popup as _)), WM_PREVIEW_HOSTED, WPARAM(gen as usize), LPARAM(0)) };
     }
     {
         let mut map = slots();
@@ -807,24 +950,21 @@ unsafe fn host_thread(gen: u64, clsid: GUID, path: String, hwnd: isize, popup: i
             }
         }
     }
-    if com {
-        CoUninitialize();
-    }
 }
 
-unsafe fn apply_host_rect(ph: &IPreviewHandler, key: isize, gen: u64, seen: &mut u64) {
+unsafe fn apply_host_rect(ph: &IPreviewHandler, key: isize, gen: u64, seen: &mut u64) -> Result<()> {
     let Some((seq, w, ht)) = ({
         let map = slots();
         map.get(&key).and_then(|s| (s.gen == gen && s.area_w > 0 && s.area_h > 0).then_some((s.seq, s.area_w, s.area_h)))
     }) else {
-        return;
+        return Ok(());
     };
     if seq == *seen {
-        return;
+        return Ok(());
     }
     *seen = seq;
     let area = RECT { left: 0, top: 0, right: w, bottom: ht };
-    _ = ph.SetRect(&area);
+    ph.SetRect(&area)
 }
 
 unsafe fn sync_host(h: HWND) {
@@ -868,11 +1008,33 @@ unsafe fn on_hosted(h: HWND, gen: u64, ok: bool) {
         if let Some(slot) = slots().get_mut(&key) {
             if slot.gen == gen {
                 slot.kind = Kind::Handler;
+                if let Some(ctl) = slot.ctl.clone() {
+                    ctl.loading.store(false, Ordering::Release);
+                }
+            }
+        }
+        let host = slots().get(&key).map(|s| s.host).unwrap_or(0);
+        if let Some(ctl) = slots().get(&key).and_then(|s| s.ctl.clone()) {
+            if host != 0 {
+                _ = remember_handler_pid(HWND(host as _), &ctl);
+            }
+            let fg = foreground_process();
+            if should_reclaim(fg, ctl.handler_pid.load(Ordering::Acquire), GetCurrentProcessId()) {
+                let main = app(|a| a.main);
+                if !main.0.is_null() {
+                    reclaim_foreground(main);
+                }
             }
         }
         give_back(h);
         _ = InvalidateRect(Some(h), None, false);
         return;
+    }
+    if DROP_BUSY.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Some(path) = slots().get(&key).map(|s| s.path.clone()) {
+        note_handler_failure(&path);
     }
     drop_host(key);
     let (path, w, ht) = {
@@ -884,6 +1046,10 @@ unsafe fn on_hosted(h: HWND, gen: u64, ok: bool) {
         on_ready_miss(h, gen);
         return;
     }
+    // The handler failed. For audio and video, Media Foundation was already tried,
+    // so the information view is what remains. Other types fall back to Maguro's own preview.
+    place_head(h);
+    clear_media_fallback(key, gen);
     if let Some(slot) = slots().get_mut(&key) {
         if slot.gen == gen {
             slot.kind = Kind::Opening;
@@ -914,6 +1080,54 @@ fn copy_source(slot: &Slot) -> Option<String> {
         }
         Some(Body::Document { text, .. }) => Some(text.clone()),
         _ => None,
+    }
+}
+
+fn pane_zoom(h: HWND) -> f64 {
+    slots().get(&key_of(h)).map(|s| s.zoom).unwrap_or(1.0)
+}
+
+fn pane_zoomable(slot: &Slot) -> bool {
+    matches!(slot.body, Some(Body::Text { .. } | Body::Document { .. } | Body::Table { .. } | Body::List { .. } | Body::Pic(_) | Body::Pages { .. }))
+}
+
+unsafe fn nudge_pane_zoom(h: HWND, new_z: f64) {
+    let key = key_of(h);
+    let changed = {
+        let mut map = slots();
+        let Some(slot) = map.get_mut(&key) else { return };
+        if !pane_zoomable(slot) {
+            return;
+        }
+        let old = zoom_or_fit(slot.zoom);
+        let new_z = zoom_or_fit(new_z);
+        if (old - new_z).abs() < 1e-12 {
+            return;
+        }
+        let factor = new_z / old;
+        slot.zoom = new_z;
+        slot.scroll.y = ((slot.scroll.y as f64) * factor).round().max(0.0) as i32;
+        slot.scroll.x = ((slot.scroll.x as f64) * factor).round().max(0.0) as i32;
+        slot.scroll.layout = None;
+        true
+    };
+    if changed {
+        _ = InvalidateRect(Some(h), None, false);
+    }
+}
+
+unsafe fn select_all_preview(h: HWND) {
+    let changed = {
+        let mut map = slots();
+        let Some(slot) = map.get_mut(&key_of(h)) else { return };
+        if !matches!(slot.body, Some(Body::Text { .. })) {
+            return;
+        }
+        slot.sel = Some((1, usize::MAX));
+        true
+    };
+    if changed {
+        _ = InvalidateRect(Some(h), None, false);
     }
 }
 
@@ -1082,7 +1296,26 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_NCHITTEST if crate::nchit_passes_to_splitter(h, lp) => return LRESULT(HTTRANSPARENT as isize),
             WM_ERASEBKGND => return LRESULT(1),
             WM_PAINT => paint_preview(h),
-            WM_SIZE => sync_host(h),
+            WM_SIZE => {
+                sync_host(h);
+                place_media(h);
+            }
+            WM_TIMER if wp.0 == super::media::TIMER_MEDIA => {
+                super::media::tick(h);
+                if super::media::take_relayout(h) {
+                    place_media(h);
+                    super::media::repaint_header(h);
+                }
+            }
+            super::media::WM_MEDIA => {
+                super::media::on_posted(h);
+                let gen = slots().get(&key_of(h)).map(|s| s.gen).unwrap_or(0);
+                follow_media_failure(h, gen);
+                if super::media::take_relayout(h) {
+                    place_media(h);
+                    super::media::repaint_header(h);
+                }
+            }
             WM_MOUSEACTIVATE => {
                 if let Some(slot) = slots().get_mut(&key_of(h)) {
                     slot.return_focus = false;
@@ -1091,13 +1324,15 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_LBUTTONDOWN => {
                 let (x, y) = lp_xy(lp);
-                if press_at(h, x, y) {
+                if super::media::pointer_down(h, x, y) || press_at(h, x, y) {
                     return LRESULT(0);
                 }
             }
             WM_MOUSEMOVE => {
                 let (x, y) = lp_xy(lp);
-                if slots().get(&key_of(h)).is_some_and(|s| s.bar_drag.is_some()) {
+                if super::media::pointer_move(h, x, y) {
+                    // Seek or volume drag owns the pointer.
+                } else if slots().get(&key_of(h)).is_some_and(|s| s.bar_drag.is_some()) {
                     drag_bar(h, y);
                 } else {
                     drag_sel(h, y);
@@ -1105,8 +1340,15 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
             WM_LBUTTONUP | WM_CAPTURECHANGED => {
+                if msg == WM_CAPTURECHANGED {
+                    super::media::pointer_cancel(h);
+                }
+                let media = msg == WM_LBUTTONUP && super::media::pointer_up(h);
                 if let Some(slot) = slots().get_mut(&key_of(h)) {
                     slot.bar_drag = None;
+                }
+                if media {
+                    return LRESULT(0);
                 }
                 if msg == WM_LBUTTONUP && GetCapture() == h {
                     _ = ReleaseCapture();
@@ -1118,30 +1360,38 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_MOUSEWHEEL => {
                 let raw = (wp.0 >> 16) as i16 as i32;
-                let px = app(|a| -raw * a.fh * 3 / 120);
-                let keys = (wp.0 & 0xffff) as u32;
-                let ctrl = keys & MK_CONTROL.0 != 0;
-                let shift = keys & MK_SHIFT.0 != 0;
-                if ctrl && preview_can_zoom(h) {
-                    nudge_zoom(h, raw);
-                } else if shift {
-                    scroll_by(h, 0, -px);
-                } else {
-                    scroll_by(h, px, 0);
+                let ctrl = (wp.0 & 0xffff) as u32 & MK_CONTROL.0 != 0;
+                if ctrl && !super::media::covers(h) {
+                    nudge_pane_zoom(h, zoom_factor(pane_zoom(h), raw));
+                } else if !ctrl {
+                    let px = app(|a| -raw * a.fh * 3 / 120);
+                    let shift = (wp.0 & 0xffff) as u32 & MK_SHIFT.0 != 0;
+                    if shift { scroll_by(h, 0, -px) } else { scroll_by(h, px, 0) };
                 }
             }
             WM_KEYDOWN => {
                 let k = VIRTUAL_KEY(wp.0 as u16);
+                let repeat = lp.0 & (1 << 30) != 0;
                 let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32) < 0;
+                let shift = GetAsyncKeyState(VK_SHIFT.0 as i32) < 0;
+                let alt = GetAsyncKeyState(VK_MENU.0 as i32) < 0;
+                // Space is free here, so it pauses. Plain arrows still scroll the card.
+                // Zoom and select stay available once the player is not covering the pane.
+                if super::media::covers(h) {
+                    if let Some(cmd) = super::media::media_key(k.0, shift, ctrl, alt, false) {
+                        super::media::command(h, cmd, repeat);
+                        return LRESULT(0);
+                    }
+                }
                 let page = slots().get(&key_of(h)).map(|s| s.scroll.page_h.max(1)).unwrap_or(1);
                 let line = app(|a| a.fh.max(1) * 3);
-                if ctrl && preview_can_zoom(h) && matches!(k, VK_OEM_PLUS | VK_ADD | VK_OEM_MINUS | VK_SUBTRACT | VK_0 | VK_NUMPAD0) {
-                    if matches!(k, VK_0 | VK_NUMPAD0) {
-                        set_pane_zoom(h, 1.0);
-                    } else {
-                        nudge_zoom(h, if matches!(k, VK_OEM_MINUS | VK_SUBTRACT) { -120 } else { 120 });
-                    }
-                } else if ctrl && k == VIRTUAL_KEY(b'C' as u16) {
+                if !super::media::covers(h) && ctrl && !alt && zoom_cmd(k.0).is_some_and(|cmd| {
+                    nudge_pane_zoom(h, zoom_after(pane_zoom(h), cmd));
+                    true
+                }) {
+                } else if !super::media::covers(h) && ctrl && k == VIRTUAL_KEY(b'A' as u16) {
+                    select_all_preview(h);
+                } else if !super::media::covers(h) && ctrl && k == VIRTUAL_KEY(b'C' as u16) {
                     copy_preview(h);
                 } else {
                     match k {
@@ -1160,6 +1410,13 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_CONTEXTMENU => preview_menu(h, lp),
             WM_PREVIEW_READY => on_ready(h, wp.0 as u64),
             WM_PREVIEW_HOSTED => on_hosted(h, wp.0 as u64, lp.0 != 0),
+            WM_PREVIEW_RECLAIM => {
+                let main = app(|a| a.main);
+                if !main.0.is_null() {
+                    reclaim_foreground(main);
+                }
+                give_back(h);
+            }
             WM_PREVIEW_TOTAL => on_total(h, wp.0 as u64),
             WM_DESTROY => preview_clear(),
             _ => return DefWindowProcW(h, msg, wp, lp),
@@ -1259,6 +1516,9 @@ unsafe fn hover_btn(h: HWND, x: i32, y: i32) {
 }
 
 unsafe fn paint_preview(h: HWND) {
+    // Move or hide the video child before BeginPaint. WS_CLIPCHILDREN would otherwise
+    // skip header lines the child still covers, and SWP_NOREDRAW would not ask for another paint.
+    place_media(h);
     let key = key_of(h);
     let (font, dpi, fh, accent, ilist) = app(|a| (a.font, a.dpi, a.fh, a.s.accent_now(), a.ilist.clone()));
     let mut sync = false;
@@ -1341,6 +1601,23 @@ unsafe fn paint_preview(h: HWND) {
         let gutter = s(12);
         let body = RECT { left: rc.left + pad, top: y, right: (rc.right - gutter).max(rc.left + pad), bottom: rc.bottom };
         slot.hit.body = body;
+        if super::media::covers(h) && slot.kind != Kind::Handler {
+            let area = RECT { left: rc.left, top: y, right: rc.right, bottom: rc.bottom };
+            let (content, bar) = super::media::split_content(area, dpi);
+            if super::media::has_video(h) {
+                fill(dc, content, pal().bg);
+                // Same rect place_media published before BeginPaint. A taller header
+                // moves the child; it is not kept hidden until the preview job finishes.
+                let dest = super::media::video_dest(RECT { bottom: rc.bottom, top: rc.top, ..rc }, y, dpi);
+                super::media::queue_place(h, dest);
+            } else {
+                match slot.body.as_ref() {
+                    Some(Body::Card { icon, rows }) => paint_card(dc, content, icon.as_ref(), rows, font, dpi),
+                    _ => text(dc, content, tr(crate::Key::OpeningPreview), font, pal().sub, DT_CENTER),
+                }
+            }
+            super::media::paint_transport(dc, h, bar, font, dpi, accent);
+        } else {
         match slot.kind {
             Kind::Handler => fill(dc, RECT { top: y, ..rc }, pal().card),
             Kind::Opening => text(dc, body, tr(crate::Key::OpeningPreview), font, pal().sub, DT_CENTER),
@@ -1348,30 +1625,64 @@ unsafe fn paint_preview(h: HWND) {
             Kind::Shown => {
                 let gen = slot.gen as usize;
                 let sel = slot.sel;
+                let zoom = zoom_or_fit(slot.zoom);
+                let (zfont, zowned) = pview::font_at_zoom(font, zoom);
                 PANE_FACES.with(|c| {
                     let faces = &mut *c.borrow_mut();
                     match slot.body.as_ref() {
                     Some(Body::Text { text: t, kind, cut }) => {
-                        pview::paint_text(&mut slot.scroll, dc, body, gen, t, *kind, *cut, font, dpi, None, sel, accent, faces);
+                        pview::paint_text(&mut slot.scroll, dc, body, gen, t, *kind, *cut, zfont, dpi, None, sel, accent, faces);
                     }
                     Some(Body::Document { pic, text: t, cut }) => {
-                        pview::paint_text(&mut slot.scroll, dc, body, gen, t, TextKind::Document, *cut, font, dpi, pic.as_ref(), None, 0, faces);
+                        pview::paint_text(&mut slot.scroll, dc, body, gen, t, TextKind::Document, *cut, zfont, dpi, pic.as_ref(), None, 0, faces);
                     }
-                    Some(Body::Table { rows, cut }) => pview::paint_table(&mut slot.scroll, dc, body, rows, *cut, font, dpi, faces),
-                    Some(Body::List { rows, .. }) => pview::paint_list(&mut slot.scroll, dc, body, rows, font, dpi),
-                    Some(Body::Pic(p)) => paint_fit(dc, body, p, &mut slot.scroll, slot.zoom),
-                    Some(Body::Pages { pages, total }) => paint_pages(&mut slot.scroll, dc, body, pages, *total, font, dpi, slot.zoom),
-                    Some(Body::Card { icon, rows }) => paint_card(dc, body, icon.as_ref(), rows, font, dpi),
+                    Some(Body::Table { rows, cut }) => pview::paint_table(&mut slot.scroll, dc, body, rows, *cut, zfont, dpi, faces),
+                    Some(Body::List { rows, .. }) => pview::paint_list(&mut slot.scroll, dc, body, rows, zfont, dpi),
+                    Some(Body::Pic(p)) => paint_fit(dc, body, p, zoom, &mut slot.scroll),
+                    Some(Body::Pages { pages, total }) => paint_pages(&mut slot.scroll, dc, body, pages, *total, zfont, dpi, zoom),
+                    Some(Body::Card { icon, rows }) => {
+                        paint_card(dc, body, icon.as_ref(), rows, font, dpi);
+                    }
                     Some(Body::Handler(_)) | None => text(dc, body, tr(crate::Key::NoPreview), font, pal().sub, DT_CENTER),
                     }
                 });
+                if zowned {
+                    delete_font(zfont);
+                }
                 paint_bar(dc, rc, body, slot, dpi, accent);
             }
         }
+        }
     });
+    super::media::apply_place(h);
     if sync {
         sync_host(h);
     }
+}
+
+/// Video child follows the area under the attribute header. Called on size, and before a paint.
+/// The child is shown as soon as that rect has area, including while the header is still
+/// only the file name. Hiding it until the preview job finished left a solid black fill.
+unsafe fn place_media(h: HWND) {
+    if !super::media::has_video(h) {
+        return;
+    }
+    place_head(h);
+    let dest = pane_video_dest(h);
+    if !super::media::reveal_video(dest) {
+        super::media::hide_video(h);
+        return;
+    }
+    super::media::queue_place(h, dest);
+    super::media::apply_place(h);
+}
+
+unsafe fn pane_video_dest(h: HWND) -> RECT {
+    let mut rc = RECT::default();
+    let _ = GetClientRect(h, &mut rc);
+    let dpi = app(|a| a.dpi);
+    let head = slots().get(&key_of(h)).map(|s| s.head_h).unwrap_or(0);
+    super::media::video_dest(rc, head, dpi)
 }
 
 unsafe fn paint_btn(dc: HDC, r: RECT, label: &str, font: HFONT, hot: bool, accent: u32) {
@@ -1437,45 +1748,16 @@ unsafe fn paint_folder_head(dc: HDC, rc: RECT, slot: &mut Slot, font: HFONT, dpi
     (bottom, pad)
 }
 
-fn preview_can_zoom(h: HWND) -> bool {
-    slots().get(&key_of(h)).is_some_and(|s| matches!(s.body, Some(Body::Pic(_) | Body::Pages { .. })))
-}
-
-fn set_pane_zoom(h: HWND, z: f64) {
-    if let Some(slot) = slots().get_mut(&key_of(h)) {
-        slot.zoom = z.clamp(0.1, 8.0);
-        slot.scroll.x = 0;
-        slot.scroll.y = 0;
-    }
-    unsafe { _ = InvalidateRect(Some(h), None, false) };
-}
-
-fn nudge_zoom(h: HWND, delta: i32) {
-    let z = slots().get(&key_of(h)).map(|s| s.zoom).unwrap_or(1.0);
-    let factor = if delta > 0 { 1.25 } else { 0.8 };
-    let steps = (delta.abs() / 120).max(1);
-    let mut next = if z < 0.05 { 1.0 } else { z };
-    for _ in 0..steps {
-        next *= factor;
-    }
-    set_pane_zoom(h, next);
-}
-
 /// Same letterbox as Quick Look ([`image_fit_px`]): up or down, aspect kept. Zoom is a multiple of that fit.
-unsafe fn paint_fit(dc: HDC, area: RECT, p: &Pix, scroll: &mut BodyScroll, zoom: f64) {
+unsafe fn paint_fit(dc: HDC, area: RECT, p: &Pix, zoom: f64, scroll: &mut BodyScroll) {
     let bw = (area.right - area.left).max(1);
     let bh = (area.bottom - area.top).max(1);
     let (fw, fh) = image_fit_px(p.w, p.h, bw, bh);
-    let z = if zoom < 0.05 { 1.0 } else { zoom };
-    let grow = |n: i32| {
-        if (z - 1.0).abs() < 1e-9 { n } else { ((n as f64) * z).round().max(1.0) as i32 }
-    };
-    let w = grow(fw).max(1);
-    let h = grow(fh).max(1);
+    let (w, h) = (scaled(fw, zoom), scaled(fh, zoom));
     scroll.page_w = bw;
     scroll.page_h = bh;
-    scroll.max_x = (w - bw).max(0);
-    scroll.max_y = (h - bh).max(0);
+    scroll.max_x = w.saturating_sub(bw).max(0);
+    scroll.max_y = h.saturating_sub(bh).max(0);
     scroll.x = scroll.x.clamp(0, scroll.max_x);
     scroll.y = scroll.y.clamp(0, scroll.max_y);
     let x = if w <= bw { area.left + (bw - w) / 2 } else { area.left - scroll.x };
@@ -1490,8 +1772,7 @@ unsafe fn paint_pages(scroll: &mut BodyScroll, dc: HDC, area: RECT, pages: &[Pix
     let mut boxes = Vec::with_capacity(pages.len());
     let mut y = s(8);
     for p in pages {
-        let z = if zoom < 0.05 { 1.0 } else { zoom as f32 };
-        let k = (width as f32 * 0.92 / p.w.max(1) as f32).min(1.0) * z;
+        let k = (width as f32 * 0.92 / p.w.max(1) as f32).min(1.0) * zoom as f32;
         let (w, h) = ((p.w as f32 * k) as i32, (p.h as f32 * k) as i32);
         boxes.push((y, w.max(1), h.max(1)));
         y += h.max(1) + gap;

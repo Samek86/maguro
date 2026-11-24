@@ -616,6 +616,22 @@ fn preview_logfonts(base: LOGFONTW) -> [LOGFONTW; 6] {
     [mono, bold, h1, h2, italic, both]
 }
 
+/// A body font scaled by `zoom`. `1.0` returns `base` and does not own a new handle.
+pub(crate) unsafe fn font_at_zoom(base: HFONT, zoom: f64) -> (HFONT, bool) {
+    if base.is_invalid() || (zoom - 1.0).abs() < 1e-9 {
+        return (base, false);
+    }
+    let mut lf = LOGFONTW::default();
+    let n = GetObjectW(base.into(), size_of::<LOGFONTW>() as i32, Some(&mut lf as *mut _ as _));
+    if n < size_of::<LOGFONTW>() as i32 || lf.lfHeight == 0 {
+        return (base, false);
+    }
+    let h = ((lf.lfHeight as f64) * zoom).round() as i32;
+    lf.lfHeight = if h == 0 { lf.lfHeight.signum() } else { h };
+    let font = CreateFontIndirectW(&lf);
+    if font.is_invalid() { (base, false) } else { (font, true) }
+}
+
 /// GDI fonts for one preview body. The caller owns them and deletes them with [`delete_font`].
 pub(crate) unsafe fn preview_fonts(base: &LOGFONTW) -> [HFONT; 6] {
     let faces = preview_logfonts(*base);

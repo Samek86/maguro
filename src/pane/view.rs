@@ -40,7 +40,6 @@ pub(crate) unsafe fn create_pane(i: usize) -> Result<Pane> {
         (ID_BACK, tr(crate::Key::Back), tr(crate::Key::BackAltRightClickRecentFolders)),
         (ID_FWD, tr(crate::Key::Forward), tr(crate::Key::ForwardAltRightClickRecentFolders)),
         (ID_UP, tr(crate::Key::ParentFolder), tr(crate::Key::ParentFolderAlt)),
-        (ID_OPEN_IN, tr(crate::Key::OpenInAnotherPane), tr(crate::Key::OpenInCopyOrMoveAnotherPane)),
         (ID_PANE_ADD, tr(crate::Key::NewPaneTab), tr(crate::Key::NewPaneTabCtrlAltT)),
         (ID_FAV, tr(crate::Key::Favourite), tr(crate::Key::AddFavouritesFilledStarRemove)),
     ];
@@ -276,7 +275,7 @@ pub(crate) unsafe fn layout_pane(h: HWND) {
         (edit, unsafe { edit_window_rect(edit, outer) })
     };
     let ctl = |id: i32| GetDlgItem(Some(h), id).unwrap_or_default();
-    let mut moves: Vec<(HWND, RECT)> = [ID_BACK, ID_FWD, ID_UP, ID_OPEN_IN].iter().zip(pg.btn).map(|(&id, r)| (ctl(id), r)).collect();
+    let mut moves: Vec<(HWND, RECT)> = [ID_BACK, ID_FWD, ID_UP].iter().zip(pg.btn).map(|(&id, r)| (ctl(id), r)).collect();
     // The icon slot is reserved by width, so the edit does not move when the icon arrives.
     let inset = crumb_field(pg.addr, dpi).left - pg.addr.left;
     let add = ctl(ID_PANE_ADD);
@@ -294,7 +293,6 @@ pub(crate) unsafe fn layout_pane(h: HWND) {
     show(ID_BACK, pg.btn[0]);
     show(ID_FWD, pg.btn[1]);
     show(ID_UP, pg.btn[2]);
-    show(ID_OPEN_IN, pg.btn[3]);
     show(ID_FAV, pg.fav);
     show(ID_PANE_ADD, pg.add);
     show(ID_FILTER, pg.filt);
@@ -1020,7 +1018,7 @@ pub(crate) unsafe fn set_active(i: usize) {
 
 pub(crate) unsafe fn repaint_header(pane: HWND) {
     _ = InvalidateRect(Some(pane), None, false);
-    for id in [ID_BACK, ID_FWD, ID_UP, ID_OPEN_IN, ID_PANE_ADD, ID_FAV, ID_EDIT, ID_FILTER] {
+    for id in [ID_BACK, ID_FWD, ID_UP, ID_PANE_ADD, ID_FAV, ID_EDIT, ID_FILTER] {
         if let Ok(c) = GetDlgItem(Some(pane), id) {
             _ = InvalidateRect(Some(c), None, true);
         }

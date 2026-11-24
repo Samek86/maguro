@@ -1,25 +1,236 @@
 use std::io::{Read, Seek, SeekFrom};
-use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
+use windows::Win32::Globalization::{GetACP, MultiByteToWideChar, MB_ERR_INVALID_CHARS, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
 
 // ---------- reading documents for the preview: text, CSV, ZIP, XML, mail (no Windows UI here) ----------
 
-/// Bytes as text: a BOM decides, else UTF-8 if it is (a character cut at the end is fine), else the Korean
-/// ANSI code page, which is what Windows tools write here.
+/// How a text preview reads bytes. ANSI is a Windows code page (932, 949, or 1252).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextEncoding {
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+    Ansi(u32),
+}
+
+/// Bytes as text. A BOM wins, then UTF-16 without a BOM when the NUL pattern is clear, then valid
+/// UTF-8 (a character cut at the end is fine). Anything else is scored as CP932, CP949, or CP1252.
 pub(crate) fn decode_text(b: &[u8]) -> String {
-    if let Some(r) = b.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return String::from_utf8_lossy(r).into_owned();
+    decode_text_acp(b, system_acp())
+}
+
+pub(crate) fn decode_text_acp(b: &[u8], system_acp: u32) -> String {
+    match detect_encoding_acp(b, system_acp) {
+        TextEncoding::Utf8 => {
+            let b = b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(b);
+            match std::str::from_utf8(b) {
+                Ok(s) => s.to_string(),
+                Err(e) if e.error_len().is_none() => String::from_utf8_lossy(&b[..e.valid_up_to()]).into_owned(),
+                Err(_) => String::from_utf8_lossy(b).into_owned(),
+            }
+        }
+        TextEncoding::Utf16Le => utf16(b.strip_prefix(&[0xFF, 0xFE]).unwrap_or(b), false),
+        TextEncoding::Utf16Be => utf16(b.strip_prefix(&[0xFE, 0xFF]).unwrap_or(b), true),
+        TextEncoding::Ansi(cp) => ansi(b, cp),
     }
-    if let Some(r) = b.strip_prefix(&[0xFF, 0xFE]) {
-        return utf16(r, false);
+}
+
+/// Encoding of `b`. Ties between CP932, CP949, and CP1252 prefer `system_acp`.
+pub(crate) fn detect_encoding_acp(b: &[u8], system_acp: u32) -> TextEncoding {
+    if b.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return TextEncoding::Utf8;
     }
-    if let Some(r) = b.strip_prefix(&[0xFE, 0xFF]) {
-        return utf16(r, true);
+    if b.starts_with(&[0xFF, 0xFE]) {
+        return TextEncoding::Utf16Le;
     }
+    if b.starts_with(&[0xFE, 0xFF]) {
+        return TextEncoding::Utf16Be;
+    }
+    if let Some(be) = utf16_no_bom(b) {
+        return if be { TextEncoding::Utf16Be } else { TextEncoding::Utf16Le };
+    }
+    if utf8_text(b) {
+        return TextEncoding::Utf8;
+    }
+    TextEncoding::Ansi(choose_ansi(b, system_acp))
+}
+
+fn system_acp() -> u32 {
+    unsafe { GetACP() }
+}
+
+/// UTF-8, including a multibyte character sliced off at the end of a capped read.
+fn utf8_text(b: &[u8]) -> bool {
     match std::str::from_utf8(b) {
-        Ok(s) => s.to_string(),
-        Err(e) if e.error_len().is_none() => String::from_utf8_lossy(&b[..e.valid_up_to()]).into_owned(),
-        Err(_) => ansi(b, 949),
+        Ok(_) => true,
+        Err(e) => e.error_len().is_none(),
     }
+}
+
+/// `Some(true)` is UTF-16 BE, `Some(false)` is LE. Needs a strong NUL pattern and readable text,
+/// so a binary blob with a few zero bytes is not text.
+pub(crate) fn utf16_no_bom(b: &[u8]) -> Option<bool> {
+    let sample = &b[..b.len().min(4096)];
+    if sample.len() < 8 {
+        return None;
+    }
+    let pairs = sample.len() / 2;
+    let (mut even_nul, mut odd_nul) = (0, 0);
+    for (i, &c) in sample.iter().enumerate() {
+        if c == 0 {
+            if i % 2 == 0 { even_nul += 1 } else { odd_nul += 1 }
+        }
+    }
+    // 80% of one parity is NUL, and the other parity is almost never NUL.
+    let be = if odd_nul * 5 >= pairs * 4 && even_nul * 10 <= pairs {
+        false
+    } else if even_nul * 5 >= pairs * 4 && odd_nul * 10 <= pairs {
+        true
+    } else {
+        return None;
+    };
+    let text = utf16(&sample[..pairs * 2], be);
+    let n = text.chars().count();
+    if n < 2 {
+        return None;
+    }
+    let ok = text.chars().filter(|c| !c.is_control() || matches!(*c, '\n' | '\r' | '\t')).count();
+    (ok * 4 >= n * 3).then_some(be)
+}
+
+const ANSI_PAGES: [u32; 3] = [932, 949, 1252];
+
+/// Code page for bytes that are not Unicode. Invalid pages score `i32::MIN` and lose.
+/// Equal scores prefer `system_acp` when it is one of the tied pages.
+pub(crate) fn choose_ansi(b: &[u8], system_acp: u32) -> u32 {
+    let scores = ANSI_PAGES.map(|cp| (cp, score_cp(b, cp)));
+    pick_code_page(&scores, system_acp)
+}
+
+pub(crate) fn pick_code_page(scores: &[(u32, i32)], system_acp: u32) -> u32 {
+    let best = scores.iter().filter(|(_, s)| *s != i32::MIN).map(|(_, s)| *s).max();
+    let Some(best) = best else { return system_acp };
+    let tied: Vec<u32> = scores.iter().filter(|(_, s)| *s == best).map(|(cp, _)| *cp).collect();
+    if tied.contains(&system_acp) { system_acp } else { tied[0] }
+}
+
+fn score_cp(b: &[u8], cp: u32) -> i32 {
+    let Some(text) = mb_strict(b, cp) else { return i32::MIN };
+    let (sj, kr, latin) = byte_bias(b);
+    let bias = match cp {
+        932 => sj * 3,
+        949 => kr * 3,
+        1252 => latin * 3,
+        _ => 0,
+    };
+    script_score(&text, cp).saturating_add(bias)
+}
+
+/// Strict conversion. A lead byte sliced off the end of a capped read is dropped and tried again.
+fn mb_strict(b: &[u8], cp: u32) -> Option<String> {
+    try_mb(b, cp)
+        .or_else(|| (b.len() > 1).then(|| try_mb(&b[..b.len() - 1], cp)).flatten())
+        .or_else(|| (b.len() > 2).then(|| try_mb(&b[..b.len() - 2], cp)).flatten())
+}
+
+fn try_mb(b: &[u8], cp: u32) -> Option<String> {
+    if b.is_empty() {
+        return Some(String::new());
+    }
+    unsafe {
+        let n = MultiByteToWideChar(cp, MB_ERR_INVALID_CHARS, b, None);
+        if n <= 0 {
+            return None;
+        }
+        let mut w = vec![0u16; n as usize];
+        let n = MultiByteToWideChar(cp, MB_ERR_INVALID_CHARS, b, Some(&mut w));
+        if n <= 0 {
+            return None;
+        }
+        String::from_utf16(&w[..n as usize]).ok()
+    }
+}
+
+/// Byte-pattern votes: Shift-JIS kana, Hangul lead bytes, or a lone high byte (Western).
+fn byte_bias(b: &[u8]) -> (i32, i32, i32) {
+    let (mut sj, mut kr, mut latin, mut i) = (0, 0, 0, 0);
+    while i < b.len() {
+        let c = b[i];
+        if c < 0x80 {
+            i += 1;
+            continue;
+        }
+        let Some(t) = b.get(i + 1).copied() else {
+            latin += 1;
+            break;
+        };
+        let sjis_trail = (0x40..=0x7E).contains(&t) || (0x80..=0xFC).contains(&t);
+        let kr_trail = (0x41..=0x5A).contains(&t) || (0x61..=0x7A).contains(&t) || (0x81..=0xFE).contains(&t);
+        if matches!(c, 0x82 | 0x83) && sjis_trail {
+            sj += 4;
+            i += 2;
+            continue;
+        }
+        if (0xB0..=0xC8).contains(&c) && kr_trail {
+            kr += 4;
+            i += 2;
+            continue;
+        }
+        let sjis_lead = (0x81..=0x9F).contains(&c) || (0xE0..=0xFC).contains(&c);
+        if sjis_lead && sjis_trail {
+            sj += 1;
+        }
+        if (0x81..=0xFE).contains(&c) && kr_trail {
+            kr += 1;
+        }
+        if !sjis_lead && !(0x81..=0xFE).contains(&c) {
+            latin += 1;
+        }
+        i += 2;
+    }
+    (sj, kr, latin)
+}
+
+fn script_score(text: &str, cp: u32) -> i32 {
+    let (mut kana, mut hangul, mut han, mut latin, mut other) = (0, 0, 0, 0, 0);
+    for ch in text.chars() {
+        match ch {
+            '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9D}' => kana += 1,
+            '\u{AC00}'..='\u{D7A3}' | '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' => hangul += 1,
+            '\u{4E00}'..='\u{9FFF}' => han += 1,
+            '\u{0000}'..='\u{007F}' => latin += 1,
+            c if cp == 1252 && latin_high(c) => latin += 1,
+            _ => other += 1,
+        }
+    }
+    match cp {
+        932 => kana * 10 + han * 2 - hangul * 8 - other * 2,
+        949 => hangul * 10 + han * 2 - kana * 8 - other * 2,
+        1252 => latin - kana * 8 - hangul * 8 - han * 6 - other,
+        _ => i32::MIN,
+    }
+}
+
+fn latin_high(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00A0}'..='\u{00FF}'
+            | '\u{0152}'
+            | '\u{0153}'
+            | '\u{0160}'
+            | '\u{0161}'
+            | '\u{0178}'
+            | '\u{017D}'
+            | '\u{017E}'
+            | '\u{0192}'
+            | '\u{02C6}'
+            | '\u{02DC}'
+            | '\u{2013}'..='\u{2026}'
+            | '\u{2030}'
+            | '\u{2039}'
+            | '\u{203A}'
+            | '\u{20AC}'
+            | '\u{2122}'
+    )
 }
 
 pub(crate) fn utf16(b: &[u8], be: bool) -> String {
@@ -43,9 +254,9 @@ pub(crate) fn ansi(b: &[u8], cp: u32) -> String {
     }
 }
 
-/// Text, not a binary: no NUL in the first 8 KB (UTF-16 has a BOM, then NULs are its own).
+/// Text, not a binary: no NUL in the first 8 KB, unless the bytes are UTF-16 (BOM or a NUL pattern).
 pub(crate) fn looks_text(b: &[u8]) -> bool {
-    if b.starts_with(&[0xFF, 0xFE]) || b.starts_with(&[0xFE, 0xFF]) {
+    if b.starts_with(&[0xFF, 0xFE]) || b.starts_with(&[0xFE, 0xFF]) || utf16_no_bom(b).is_some() {
         return true;
     }
     let head = &b[..b.len().min(8192)];
@@ -865,6 +1076,88 @@ mod tests {
         let head = vec![("content-type".to_string(), "multipart/mixed; boundary=b0x".to_string())];
         let mut files = Vec::new();
         assert!(mime_body(&head, &body, &mut files).is_none());
+    }
+
+    fn encode_cp(cp: u32, s: &str) -> Vec<u8> {
+        use windows::Win32::Globalization::WideCharToMultiByte;
+        let w: Vec<u16> = s.encode_utf16().collect();
+        unsafe {
+            let n = WideCharToMultiByte(cp, 0, &w, None, None, None);
+            assert!(n > 0, "code page {cp} rejected {s:?}");
+            let mut b = vec![0u8; n as usize];
+            let n2 = WideCharToMultiByte(cp, 0, &w, Some(&mut b), None, None);
+            assert_eq!(n2, n);
+            b
+        }
+    }
+
+    #[test]
+    fn encoding_samples_for_each_case() {
+        let utf8 = "안녕하세요 café".as_bytes();
+        assert!(std::str::from_utf8(utf8).is_ok());
+        assert_eq!(detect_encoding_acp(utf8, 1252), TextEncoding::Utf8);
+        assert_eq!(decode_text_acp(utf8, 1252), "안녕하세요 café");
+
+        let bom = [&[0xEF, 0xBB, 0xBF][..], utf8].concat();
+        assert_eq!(detect_encoding_acp(&bom, 949), TextEncoding::Utf8);
+        assert_eq!(decode_text_acp(&bom, 949), "안녕하세요 café");
+
+        // A character cut at the end is still UTF-8, not a legacy page.
+        let cut = &"こんにちは".as_bytes()[.."こんにちは".len() - 1];
+        assert_eq!(detect_encoding_acp(cut, 932), TextEncoding::Utf8);
+
+        let kr = encode_cp(949, "안녕하세요, 파일 관리자");
+        assert!(std::str::from_utf8(&kr).is_err(), "sample must not be valid UTF-8");
+        assert_eq!(detect_encoding_acp(&kr, 1252), TextEncoding::Ansi(949));
+        assert_eq!(decode_text_acp(&kr, 1252), "안녕하세요, 파일 관리자");
+
+        let jp = encode_cp(932, "こんにちは、ファイル");
+        assert!(std::str::from_utf8(&jp).is_err());
+        assert_eq!(detect_encoding_acp(&jp, 1252), TextEncoding::Ansi(932));
+        assert_eq!(decode_text_acp(&jp, 1252), "こんにちは、ファイル");
+
+        let west = encode_cp(1252, "café — naïve \"quote\"");
+        assert!(std::str::from_utf8(&west).is_err());
+        assert_eq!(detect_encoding_acp(&west, 949), TextEncoding::Ansi(1252));
+        assert_eq!(decode_text_acp(&west, 949), "café — naïve \"quote\"");
+
+        let le = encode_utf16("Hello, preview", false);
+        assert!(le.starts_with(&[b'H', 0]));
+        assert_eq!(detect_encoding_acp(&le, 1252), TextEncoding::Utf16Le);
+        assert_eq!(decode_text_acp(&le, 1252), "Hello, preview");
+        assert!(looks_text(&le));
+
+        let be = encode_utf16("Hello, preview", true);
+        assert!(be.starts_with(&[0, b'H']));
+        assert_eq!(detect_encoding_acp(&be, 1252), TextEncoding::Utf16Be);
+        assert_eq!(decode_text_acp(&be, 1252), "Hello, preview");
+
+        let le_bom = [&[0xFF, 0xFE][..], le.as_slice()].concat();
+        assert_eq!(decode_text_acp(&le_bom, 1252), "Hello, preview");
+        let be_bom = [&[0xFE, 0xFF][..], be.as_slice()].concat();
+        assert_eq!(decode_text_acp(&be_bom, 1252), "Hello, preview");
+
+        // Equal scores keep the system ANSI page, whichever of the three it is.
+        let tied = [(932, 4), (949, 4), (1252, 4)];
+        assert_eq!(pick_code_page(&tied, 949), 949);
+        assert_eq!(pick_code_page(&tied, 932), 932);
+        assert_eq!(pick_code_page(&tied, 1252), 1252);
+        assert_eq!(pick_code_page(&[(932, 9), (949, 4), (1252, 4)], 1252), 932);
+        assert_eq!(pick_code_page(&[(932, 9), (949, 4), (1252, 9)], 1252), 1252);
+        assert_eq!(pick_code_page(&[(932, i32::MIN), (949, i32::MIN), (1252, i32::MIN)], 932), 932);
+
+        // No NUL pattern: a PNG signature is not UTF-16 text.
+        assert!(utf16_no_bom(b"\x89PNG\r\n\x1a\n").is_none());
+        assert!(!looks_text(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"));
+    }
+
+    fn encode_utf16(s: &str, be: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        for u in s.encode_utf16() {
+            let b = if be { u.to_be_bytes() } else { u.to_le_bytes() };
+            out.extend(b);
+        }
+        out
     }
 }
 #[cfg(test)]

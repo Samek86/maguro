@@ -976,10 +976,10 @@ mod tests {
         assert_eq!(filter_spec(" pdf; *.TXT ;"), "*pdf*;*.TXT");
         assert_eq!((human(10), human(1536), human(5 << 30)), ("10 B".into(), "1.5 KB".into(), "5.0 GB".into()));
 
-        // pane top bar: number, back, fwd, up, address, ⇄, filter left to right, nothing overlapping, inside the plate
+        // pane top bar: number, back, fwd, up, address, filter, favourite left to right, nothing overlapping, inside the plate
         for (w, dpi) in [(800, 96), (260, 96), (1200, 144)] {
             let p = pane_geo(w, 500, dpi, true);
-            let row = [p.num, p.btn[0], p.btn[1], p.btn[2], p.addr, p.btn[3], p.filt, p.fav];
+            let row = [p.num, p.btn[0], p.btn[1], p.btn[2], p.addr, p.filt, p.fav];
             assert!(row.windows(2).all(|x| x[0].right <= x[1].left), "{w}@{dpi}");
             assert!(p.num.right > p.num.left && p.fav.right <= w && p.view.top >= p.btn[0].bottom);
         }
@@ -992,12 +992,12 @@ mod tests {
                 let p = pane_geo(w, 500, dpi, true);
                 assert_eq!(p.num.right - p.num.left, s(PANE_NUM_W), "{w}@{dpi}");
                 assert_eq!(p.btn[0].left, p.num.right, "{w}@{dpi}");
-                let row = [p.num, p.btn[0], p.btn[1], p.btn[2], p.addr, p.btn[3], p.filt, p.fav];
+                let row = [p.num, p.btn[0], p.btn[1], p.btn[2], p.addr, p.filt, p.fav];
                 assert!(row.windows(2).all(|x| x[0].right <= x[1].left), "{w}@{dpi}");
-                let shown = p.btn[..3].iter().filter(|b| b.right > b.left).count() as i32;
+                let shown = p.btn.iter().filter(|b| b.right > b.left).count() as i32;
                 let gap = if shown > 0 { s(4) } else { 0 };
                 assert_eq!(p.addr.left, p.num.right + shown * s(24) + gap, "{w}@{dpi}");
-                for c in [p.btn[0], p.btn[1], p.btn[2], p.btn[3], p.addr, p.filt, p.fav] {
+                for c in [p.btn[0], p.btn[1], p.btn[2], p.addr, p.filt, p.fav] {
                     if c.right > c.left {
                         assert!(c.left >= p.num.right, "{w}@{dpi}");
                     }

@@ -60,12 +60,12 @@ pub(crate) fn paste_mode(srcs: &[String], dst: &str) -> Option<bool> {
     }
 }
 
-// The ⇄ menu's copy / move: like a paste, but a move into the folder the files already sit in is refused.
+// Copy or move, like a paste, but a move into the folder the files already sit in is refused.
 pub(crate) fn send_mode(srcs: &[String], dst: &str, mv: bool) -> Option<bool> {
     paste_mode(srcs, dst).filter(|&same| !(mv && same))
 }
 
-// The ⇄ menu sends a whole selection or nothing: never a partial list from a capped or unreadable read.
+// A send is the whole selection or nothing: never a partial list from a capped or unreadable read.
 pub(crate) const SEND_MAX: u32 = 10_000;
 
 #[derive(Debug, PartialEq)]
