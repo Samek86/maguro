@@ -1,6 +1,7 @@
 mod docparse;
 pub(crate) mod recent;
 mod imgjob;
+mod svg;
 mod jpeg;
 mod find;
 mod fsize;
@@ -9,6 +10,7 @@ mod nav;
 mod reconnect;
 mod pview;
 mod peek;
+mod prehost;
 mod preview;
 mod prevpane;
 mod ptabs;

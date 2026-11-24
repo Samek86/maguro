@@ -45,7 +45,8 @@ pub(crate) struct BodyScroll {
 
 /// Heading faces cached by the caller. Quick Look keeps them on its view; the preview pane
 /// keeps them in a thread-local so the shared scroll state can cross threads.
-pub(crate) type FaceCache = Option<(i32, [HFONT; 4])>;
+/// `(dpi, lfHeight)` so a zoomed body font does not reuse the faces built at 100%.
+pub(crate) type FaceCache = Option<((i32, i32), [HFONT; 4])>;
 
 /// Markdown lines with their look: headings, bullets, quotes, fenced code. Inline marks are dropped.
 pub(crate) fn md_lines(text: &str) -> Vec<(String, Style)> {
@@ -130,19 +131,25 @@ pub(crate) fn row_h(fh: i32, dpi: i32) -> i32 {
 }
 
 pub(crate) unsafe fn fonts(cache: &mut FaceCache, dpi: i32, base: HFONT) -> [HFONT; 4] {
-    if let Some((d, f)) = *cache {
-        if d == dpi {
+    let mut lf = LOGFONTW::default();
+    GetObjectW(base.into(), size_of::<LOGFONTW>() as i32, Some(&mut lf as *mut _ as _));
+    let key = (dpi, lf.lfHeight);
+    if let Some((k, f)) = *cache {
+        if k == key {
             return f;
         }
         for x in f {
             delete_font(x);
         }
     }
-    let mut lf = LOGFONTW::default();
-    GetObjectW(base.into(), size_of::<LOGFONTW>() as i32, Some(&mut lf as *mut _ as _));
     let f = preview_fonts(&lf);
-    *cache = Some((dpi, f));
+    *cache = Some((key, f));
     f
+}
+
+/// A body font scaled by `zoom` (1.0 returns `base` and does not own a new handle).
+pub(crate) unsafe fn font_at_zoom(base: HFONT, zoom: f64) -> (HFONT, bool) {
+    crate::ui::font_at_zoom(base, zoom)
 }
 
 pub(crate) unsafe fn clear_faces(cache: &mut FaceCache) {

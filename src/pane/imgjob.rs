@@ -69,6 +69,14 @@ fn decode_to_pix(path: &str, w: i32, h: i32, flags: u32) -> Result<Pix, i32> {
         }
     }
     unsafe {
+        // The bytes decide, not the extension and not the file association.
+        // Direct2D SVG, then WIC, then the shell thumbnail. The preview shows
+        // the source when every one of those fails.
+        if super::svg::looks_like_svg(&bytes) {
+            if let Some(pix) = super::svg::render_svg(&bytes, w, h) {
+                return Ok(pix);
+            }
+        }
         preview::decode_pic(&bytes, w, h)
             .map(|pix| apply_orient(&bytes, pix))
             .or_else(|| preview::shell_pic(&path, w, h, shell_flags(flags)))

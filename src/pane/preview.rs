@@ -53,7 +53,7 @@ const HANDLED: &[&str] = &[
     "odp", "vsd", "vsdx", "msg", "html", "htm", "mht", "mhtml", "xps", "oxps", "ttf", "otf", "ttc", "fon",
 ];
 const CODE: &[&str] = &[
-    "json", "jsonc", "json5", "ndjson", "geojson", "xml", "xaml", "xsd", "xsl", "xslt", "svg", "plist", "yaml", "yml", "toml", "ini", "cfg", "conf",
+    "json", "jsonc", "json5", "ndjson", "geojson", "xml", "xaml", "xsd", "xsl", "xslt", "plist", "yaml", "yml", "toml", "ini", "cfg", "conf",
     "config", "properties", "env", "reg", "inf", "rs", "py", "pyw", "ipynb", "js", "mjs", "cjs", "ts", "tsx", "jsx", "vue", "svelte", "java", "kt",
     "kts", "scala", "groovy", "gradle", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "fs", "vb", "go", "rb", "php", "pl", "pm", "lua", "r",
     "swift", "m", "mm", "dart", "sh", "bash", "zsh", "fish", "bat", "cmd", "ps1", "psm1", "psd1", "sql", "css", "scss", "sass", "less", "lock",
@@ -74,10 +74,44 @@ pub(crate) fn ext_of(path: &str) -> String {
 }
 
 // The registered preview handler of an extension; macro-enabled and show variants borrow their plain twin's.
+/// Types Maguro draws itself. A registered shell handler is not asked first for these:
+/// text, images, SVG, PDF, and office packages this process parses.
+/// Audio and video are not here: a registered handler is used when one exists, otherwise a thumbnail or a card.
+pub(crate) fn maguro_owns(ext: &str) -> bool {
+    if PICS.contains(&ext) || PLAIN.contains(&ext) || CODE.contains(&ext) {
+        return true;
+    }
+    if OFFICE_ZIP.contains(&ext) || ZIPS.contains(&ext) || PROGRAMS.contains(&ext) {
+        return true;
+    }
+    matches!(
+        ext,
+        "svg" | "pdf" | "csv" | "tsv" | "md" | "markdown" | "mdown" | "mkd" | "eml" | "hwp" | "hwpx" | "hwpt" | "psd" | "psb" | "url" | "website" | "lnk" | "xhtml"
+    )
+}
+
+/// Shell preview handler for a type Maguro does not draw, when one is registered and the file is small enough.
+/// `plain` means that handler already failed. `registered` is the lookup result, so tests skip the registry.
+/// Parsed spreadsheets never take the handler. `handlers_first` is the old "handler before Maguro" route.
+pub(crate) fn want_shell_handler(ext: &str, len: u64, plain: bool, registered: bool) -> bool {
+    shell_handler_wanted(ext, len, plain, registered, false)
+}
+
+pub(crate) fn shell_handler_wanted(ext: &str, len: u64, plain: bool, registered: bool, handlers_first: bool) -> bool {
+    if plain || !registered || len == 0 || len > HEAVY_MAX {
+        return false;
+    }
+    super::prehost::allow_shell_handler(ext, maguro_owns(ext), handlers_first)
+}
+
 pub(crate) fn handler_for(ext: &str) -> Option<GUID> {
+    // xlsx, xlsm, xltx, ods, csv, and tsv are drawn here. Do not resolve Excel's handler for them.
+    if super::prehost::maguro_spreadsheet(ext) {
+        return None;
+    }
     const PREVIEW: PCWSTR = w!("{8895b1c6-b41f-4c1c-a562-0d564250836f}");
     let twin = match ext {
-        "xlsm" | "xltx" | "xlsb" => "xlsx",
+        "xlsb" => "xlsx", // binary workbook; the parsed xlsx/xlsm/xltx types never reach this lookup
         "docm" | "dotx" => "docx",
         "pptm" | "ppsx" | "potx" | "pps" => "pptx",
         "mhtml" => "mht",
@@ -127,27 +161,46 @@ pub(crate) unsafe fn content(req: &PeekReq) -> Body {
             Err(msg) => image_fail(path, &msg),
         };
     }
-    if VIDEOS.contains(&e) {
-        return match super::imgjob::isolated_pic(path, req.w, req.h, (SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY).0 as u32) {
+    if e == "svg" {
+        // Rasterize large enough to zoom. The worker draws it; a failed render shows the source.
+        let side = req.w.max(req.h).clamp(512, super::svg::SVG_MAX_EDGE);
+        let flags = (SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK | SIIGBF_THUMBNAILONLY).0 as u32;
+        return match super::imgjob::isolated_pic(path, side, side, flags) {
             Ok(p) => Body::Pic(p),
-            Err(msg) => image_fail(path, &msg),
+            Err(_) => text_body(path, TextKind::Code).unwrap_or_else(|| unsafe { card(path, &[]) }),
         };
     }
-    if AUDIO.contains(&e) {
+    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let skip_handler = req.plain || super::prehost::handler_failure_blocks(path, super::prehost::mtime_key(meta.as_ref().and_then(|m| m.modified().ok())));
+    // Audio and video: a registered handler when the file is small enough, otherwise the old thumbnail or card.
+    if VIDEOS.contains(&e) || AUDIO.contains(&e) {
+        if want_shell_handler(e, len, skip_handler, true) {
+            if let Some(g) = handler_for(e) {
+                return Body::Handler(g);
+            }
+        }
+        if VIDEOS.contains(&e) {
+            return match super::imgjob::isolated_pic(path, req.w, req.h, (SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY).0 as u32) {
+                Ok(p) => Body::Pic(p),
+                Err(msg) => image_fail(path, &msg),
+            };
+        }
         return card(path, &[]);
     }
     let heavy = HANDLED.contains(&e) || OFFICE_ZIP.contains(&e) || matches!(e, "pdf" | "eml" | "hwp" | "hwpx" | "hwpt" | "psd" | "psb");
-    if heavy && meta.as_ref().is_some_and(|m| m.len() > HEAVY_MAX) {
+    if heavy && len > HEAVY_MAX {
         let note = (tr(crate::Key::Preview).to_string(), tr(crate::Key::SkippedLargerThan10Mb).to_string());
         return card(path, &[note]);
     }
-    if !req.plain && HANDLED.contains(&e) {
+    // Same order in Quick Look and the docked pane: Maguro's own preview for types it draws,
+    // otherwise any registered IPreviewHandler (not only the old extension list).
+    if want_shell_handler(e, len, skip_handler, true) {
         if let Some(g) = handler_for(e) {
             return Body::Handler(g);
         }
     }
     let found = match e {
-        "pdf" => pdf_first(path, req).or_else(|| (!req.plain).then(|| handler_for(e).map(Body::Handler)).flatten()),
+        "pdf" => pdf_first(path, req).or_else(|| (!skip_handler).then(|| handler_for(e).map(Body::Handler)).flatten()),
         "csv" | "tsv" => read_head(path, TEXT_MAX).filter(|(b, _)| looks_text(b)).map(|(b, cut)| {
             let text = decode_text(&b);
             let sep = if e == "tsv" { '\t' } else { csv_sep(&text) };
@@ -1139,6 +1192,33 @@ pub(crate) unsafe fn version_rows(path: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_handler_skips_types_maguro_draws() {
+        assert!(maguro_owns("png") && maguro_owns("svg") && maguro_owns("txt") && maguro_owns("rs"));
+        assert!(maguro_owns("pdf") && maguro_owns("docx") && maguro_owns("xlsx") && maguro_owns("pptx"));
+        assert!(maguro_owns("md") && !maguro_owns("mp4") && !maguro_owns("mp3") && !maguro_owns("wav"));
+        assert!(!maguro_owns("html") && !maguro_owns("dwg") && !maguro_owns("msg") && !maguro_owns("ttf"));
+        assert!(!want_shell_handler("png", 100, false, true));
+        assert!(want_shell_handler("mp4", 100, false, true));
+        assert!(want_shell_handler("mp3", 100, false, true));
+        assert!(!want_shell_handler("mp4", HEAVY_MAX + 1, false, true));
+        assert!(want_shell_handler("html", 100, false, true));
+        assert!(want_shell_handler("dwg", 100, false, true));
+        assert!(!want_shell_handler("dwg", 100, true, true));
+        assert!(!want_shell_handler("dwg", 0, false, true));
+        assert!(!want_shell_handler("html", HEAVY_MAX + 1, false, true));
+        assert!(!want_shell_handler("html", 100, false, false));
+        for ext in ["xlsx", "xlsm", "xltx", "ods", "csv", "tsv"] {
+            assert!(!shell_handler_wanted(ext, 100, false, true, true), "{ext}");
+            assert!(!shell_handler_wanted(ext, 100, false, true, false), "{ext}");
+        }
+        assert!(shell_handler_wanted("xls", 100, false, true, false));
+        assert!(shell_handler_wanted("xlsb", 100, false, true, true));
+        assert!(!shell_handler_wanted("xls", 100, true, true, true));
+        assert!(shell_handler_wanted("docx", 100, false, true, true));
+        assert!(!shell_handler_wanted("docx", 100, false, true, false));
+    }
 
     #[test]
     fn extension_of_a_path() {
