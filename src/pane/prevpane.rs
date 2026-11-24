@@ -385,9 +385,11 @@ pub(crate) unsafe fn run_preview(force: bool) {
     };
     drop_host(key);
     if path.is_empty() {
+        super::media::close(h);
         _ = InvalidateRect(Some(h), None, false);
         return;
     }
+    super::media::open(h, &path);
     enqueue(Work { hwnd: key, gen, path, w: bw, h: bh, skip_handler: false });
     _ = InvalidateRect(Some(h), None, false);
 }
@@ -400,6 +402,7 @@ pub(crate) unsafe fn preview_clear() {
     if h.0.is_null() {
         return;
     }
+    super::media::close(h);
     let key = key_of(h);
     let stop = {
         let mut map = slots();
@@ -427,6 +430,7 @@ pub(crate) unsafe fn preview_clear() {
     if stop {
         jobs().remove(&key);
         drop_host(key);
+        super::media::close(h);
         _ = InvalidateRect(Some(h), None, false);
     }
 }
@@ -444,6 +448,7 @@ pub(crate) unsafe fn retint_preview() {
     if host != 0 {
         super::theme_hwnd(HWND(host as _), dark);
     }
+    super::media::sync_theme(h);
     let handler = slots().get(&key_of(h)).is_some_and(|s| s.kind == Kind::Handler);
     if handler {
         run_preview(true);
@@ -1078,7 +1083,12 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_NCHITTEST if crate::nchit_passes_to_splitter(h, lp) => return LRESULT(HTTRANSPARENT as isize),
             WM_ERASEBKGND => return LRESULT(1),
             WM_PAINT => paint_preview(h),
-            WM_SIZE => sync_host(h),
+            WM_SIZE => {
+                sync_host(h);
+                place_media(h);
+            }
+            WM_TIMER if wp.0 == super::media::TIMER_MEDIA => super::media::tick(h),
+            super::media::WM_MEDIA => super::media::on_posted(h),
             WM_MOUSEACTIVATE => {
                 if let Some(slot) = slots().get_mut(&key_of(h)) {
                     slot.return_focus = false;
@@ -1087,13 +1097,15 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_LBUTTONDOWN => {
                 let (x, y) = lp_xy(lp);
-                if press_at(h, x, y) {
+                if super::media::pointer_down(h, x, y) || press_at(h, x, y) {
                     return LRESULT(0);
                 }
             }
             WM_MOUSEMOVE => {
                 let (x, y) = lp_xy(lp);
-                if slots().get(&key_of(h)).is_some_and(|s| s.bar_drag.is_some()) {
+                if super::media::pointer_move(h, x, y) {
+                    // Seek or volume drag owns the pointer.
+                } else if slots().get(&key_of(h)).is_some_and(|s| s.bar_drag.is_some()) {
                     drag_bar(h, y);
                 } else {
                     drag_sel(h, y);
@@ -1101,8 +1113,15 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
             WM_LBUTTONUP | WM_CAPTURECHANGED => {
+                if msg == WM_CAPTURECHANGED {
+                    super::media::pointer_cancel(h);
+                }
+                let media = msg == WM_LBUTTONUP && super::media::pointer_up(h);
                 if let Some(slot) = slots().get_mut(&key_of(h)) {
                     slot.bar_drag = None;
+                }
+                if media {
+                    return LRESULT(0);
                 }
                 if msg == WM_LBUTTONUP && GetCapture() == h {
                     _ = ReleaseCapture();
@@ -1120,7 +1139,17 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_KEYDOWN => {
                 let k = VIRTUAL_KEY(wp.0 as u16);
+                let repeat = lp.0 & (1 << 30) != 0;
                 let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32) < 0;
+                let shift = GetAsyncKeyState(VK_SHIFT.0 as i32) < 0;
+                let alt = GetAsyncKeyState(VK_MENU.0 as i32) < 0;
+                // Space is free here, so it pauses. Plain arrows still scroll the card.
+                if super::media::covers(h) {
+                    if let Some(cmd) = super::media::media_key(k.0, shift, ctrl, alt, false) {
+                        super::media::command(h, cmd, repeat);
+                        return LRESULT(0);
+                    }
+                }
                 let page = slots().get(&key_of(h)).map(|s| s.scroll.page_h.max(1)).unwrap_or(1);
                 let line = app(|a| a.fh.max(1) * 3);
                 if ctrl && k == VIRTUAL_KEY(b'C' as u16) {
@@ -1323,6 +1352,20 @@ unsafe fn paint_preview(h: HWND) {
         let gutter = s(12);
         let body = RECT { left: rc.left + pad, top: y, right: (rc.right - gutter).max(rc.left + pad), bottom: rc.bottom };
         slot.hit.body = body;
+        if super::media::covers(h) && slot.kind != Kind::Handler {
+            let area = RECT { left: rc.left, top: y, right: rc.right, bottom: rc.bottom };
+            let (content, bar) = super::media::split_content(area, dpi);
+            if super::media::has_video(h) {
+                fill(dc, content, pal().bg);
+                super::media::queue_place(h, content);
+            } else {
+                match slot.body.as_ref() {
+                    Some(Body::Card { icon, rows }) => paint_card(dc, content, icon.as_ref(), rows, font, dpi),
+                    _ => text(dc, content, tr(crate::Key::OpeningPreview), font, pal().sub, DT_CENTER),
+                }
+            }
+            super::media::paint_transport(dc, h, bar, font, dpi, accent);
+        } else {
         match slot.kind {
             Kind::Handler => fill(dc, RECT { top: y, ..rc }, pal().card),
             Kind::Opening => text(dc, body, tr(crate::Key::OpeningPreview), font, pal().sub, DT_CENTER),
@@ -1350,10 +1393,24 @@ unsafe fn paint_preview(h: HWND) {
                 paint_bar(dc, rc, body, slot, dpi, accent);
             }
         }
+        }
     });
+    super::media::apply_place(h);
     if sync {
         sync_host(h);
     }
+}
+
+/// Video child follows the area under the attribute header. Called on size, outside the paint borrow.
+unsafe fn place_media(h: HWND) {
+    if !super::media::has_video(h) {
+        return;
+    }
+    place_head(h);
+    let dpi = app(|a| a.dpi);
+    let (content, _) = super::media::split_content(body_rect(h), dpi);
+    super::media::queue_place(h, content);
+    super::media::apply_place(h);
 }
 
 unsafe fn paint_btn(dc: HDC, r: RECT, label: &str, font: HFONT, hot: bool, accent: u32) {

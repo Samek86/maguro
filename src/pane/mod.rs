@@ -10,6 +10,7 @@ mod reconnect;
 mod pview;
 mod peek;
 mod preview;
+mod media;
 mod prevpane;
 mod ptabs;
 mod select;

@@ -45,8 +45,7 @@ const PICS: &[&str] = &[
     "jpg", "jpeg", "jpe", "jfif", "png", "gif", "bmp", "dib", "tif", "tiff", "webp", "heic", "heif", "avif", "ico", "cur", "jxr", "wdp", "dds",
     "raw", "cr2", "cr3", "nef", "nrw", "arw", "dng", "orf", "rw2", "raf", "srw", "pef",
 ];
-const VIDEOS: &[&str] = &["mp4", "m4v", "mov", "avi", "wmv", "mkv", "webm", "mpg", "mpeg", "ts", "m2ts", "mts", "3gp", "flv", "asf"];
-const AUDIO: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "wma", "ogg", "opus", "aiff", "aif", "mid", "midi"];
+// Video and audio extensions live in media.rs. Playback uses them; a failed open falls back here.
 // shown by the Windows preview handler when there is one (Office, Outlook, the browser engine, fonts, a PDF reader)
 const HANDLED: &[&str] = &[
     "doc", "docx", "docm", "dot", "dotx", "rtf", "odt", "xls", "xlsx", "xlsm", "xlsb", "ods", "ppt", "pptx", "pptm", "pps", "ppsx",
@@ -127,13 +126,13 @@ pub(crate) unsafe fn content(req: &PeekReq) -> Body {
             Err(msg) => image_fail(path, &msg),
         };
     }
-    if VIDEOS.contains(&e) {
+    if super::media::is_video(e) {
         return match super::imgjob::isolated_pic(path, req.w, req.h, (SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY).0 as u32) {
             Ok(p) => Body::Pic(p),
             Err(msg) => image_fail(path, &msg),
         };
     }
-    if AUDIO.contains(&e) {
+    if super::media::is_audio(e) {
         return card(path, &[]);
     }
     let heavy = HANDLED.contains(&e) || OFFICE_ZIP.contains(&e) || matches!(e, "pdf" | "eml" | "hwp" | "hwpx" | "hwpt" | "psd" | "psb");
@@ -702,7 +701,7 @@ pub(crate) unsafe fn meta(path: &str, body: Option<&Body>) -> FileFacts {
     let image = PICS.contains(&e.as_str());
     if let Some(body) = body {
         match body {
-            Body::Pic(_) if VIDEOS.contains(&e.as_str()) => {
+            Body::Pic(_) if super::media::is_video(&e) => {
                 if let Some(ps) = &ps {
                     let (w, h) = (prop(ps, &PKEY_Video_FrameWidth), prop(ps, &PKEY_Video_FrameHeight));
                     if let (Some(w), Some(h)) = (w, h) {
