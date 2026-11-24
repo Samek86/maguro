@@ -654,12 +654,11 @@ pub(crate) struct MsgParts {
     pub(crate) body: String,
 }
 
-/// Property streams named `__substg1.0_PPPPTTTT`. Attachments live under `__attach_version1.0_*`.
+/// Property streams named `__substg1.0_PPPPTTTT`. The last four hex digits are the property type:
+/// `001F` is PT_UNICODE (UTF-16LE) and `001E` is PT_STRING8 (the message code page).
+/// Attachments live under `__attach_version1.0_*`.
 pub(crate) fn msg_parts(streams: &[(String, Vec<u8>)]) -> MsgParts {
-    let cp = streams.iter().find_map(|(n, b)| {
-        let (id, ty) = prop_id(n)?;
-        (id == 0x3FDE && ty == 0x0003 && b.len() >= 4).then(|| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }).unwrap_or(1252);
+    let cp = msg_codepage(streams);
     let text = |id: u16| prop_text(streams, id, cp);
     let mut from = text(0x0C1A);
     let email = text(0x0065);
@@ -697,6 +696,18 @@ pub(crate) fn msg_parts(streams: &[(String, Vec<u8>)]) -> MsgParts {
         })
     }).unwrap_or_default();
     MsgParts { subject: text(0x0037), from, to: text(0x0E04), cc: text(0x0E03), date, files, body: body.trim().to_string() }
+}
+
+/// PT_STRING8 uses PidTagMessageCodepage (`3FFD`). PidTagInternetCodepage (`3FDE`) is the fallback
+/// Outlook writes when the message code page is absent. `1252` is the last resort.
+fn msg_codepage(streams: &[(String, Vec<u8>)]) -> u32 {
+    let read = |id: u16| -> Option<u32> {
+        streams.iter().find_map(|(n, b)| {
+            let (pid, ty) = prop_id(n)?;
+            (pid == id && ty == 0x0003 && b.len() >= 4).then(|| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).filter(|&cp| cp != 0)
+        })
+    };
+    read(0x3FFD).or_else(|| read(0x3FDE)).unwrap_or(1252)
 }
 
 fn prop_id(name: &str) -> Option<(u16, u16)> {
@@ -1641,6 +1652,36 @@ mod tests {
         assert_eq!(m.date, "2023-11-14 22:13 UTC");
         assert_eq!(m.body, "body line");
         assert_eq!(m.files, vec!["notes.pdf".to_string()]);
+    }
+
+    /// PT_STRING8 (001E) follows PidTagMessageCodepage (3FFD). PidTagInternetCodepage (3FDE) is the fallback.
+    #[test]
+    fn msg_string8_uses_the_message_code_page() {
+        let streams = vec![
+            ("__substg1.0_0037001E".into(), vec![0xC7, 0xD1, 0xB1, 0xDB, 0]),
+            ("__substg1.0_3FFD0003".into(), 949u32.to_le_bytes().to_vec()),
+            ("__substg1.0_3FDE0003".into(), 1252u32.to_le_bytes().to_vec()),
+        ];
+        assert_eq!(msg_parts(&streams).subject, "한글");
+    }
+
+    #[test]
+    fn msg_string8_falls_back_to_the_internet_code_page() {
+        let streams = vec![
+            ("__substg1.0_0037001E".into(), b"Caf\xE9\0".to_vec()),
+            ("__substg1.0_3FDE0003".into(), 1252u32.to_le_bytes().to_vec()),
+        ];
+        assert_eq!(msg_parts(&streams).subject, "Café");
+    }
+
+    #[test]
+    fn msg_unicode_wins_over_string8() {
+        let streams = vec![
+            ("__substg1.0_0037001E".into(), b"ANSI\0".to_vec()),
+            ("__substg1.0_0037001F".into(), u16le("Unicode")),
+            ("__substg1.0_3FFD0003".into(), 1252u32.to_le_bytes().to_vec()),
+        ];
+        assert_eq!(msg_parts(&streams).subject, "Unicode");
     }
 
     fn put_octal(dst: &mut [u8], val: u64) {

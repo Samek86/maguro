@@ -1261,7 +1261,7 @@ fn ods_body(sheets: Vec<Sheet>) -> Option<Body> {
             out.push('\n');
         }
         for row in &s.rows {
-            let cells: Vec<String> = row.iter().map(|c| c.replace(['\n', '\r', '|'], " ")).collect();
+            let cells: Vec<String> = row.iter().map(|c| grid_cell_shown(c).replace('|', " ")).collect();
             out.push_str("| ");
             out.push_str(&cells.join(" | "));
             out.push_str(" |\n");
@@ -1559,6 +1559,36 @@ unsafe fn cab_files(path: &str) -> Option<(Vec<ListItem>, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_mail(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/mail").join(name)
+    }
+
+    #[test]
+    fn harbor_msg_sample_is_unicode_and_hello_msg_sample_is_ansi() {
+        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        let read = |name: &str| {
+            let path = sample_mail(name);
+            let streams = unsafe { msg_streams(path.to_str().unwrap()) }.unwrap_or_else(|| panic!("no streams in {}", path.display()));
+            msg_parts(&streams)
+        };
+        let harbor = read("harbor.msg");
+        assert_eq!(harbor.subject, "Harbor invoice");
+        assert_eq!(harbor.from, "Kim <kim@example.com>");
+        assert_eq!(harbor.to, "Lee");
+        assert_eq!(harbor.date, "2023-11-14 22:13 UTC");
+        assert_eq!(harbor.body, "Please pay the attached invoice.");
+        assert_eq!(harbor.files, vec!["bolts.pdf".to_string()]);
+        let hello = read("hello.msg");
+        assert_eq!(hello.subject, "Hello");
+        assert_eq!(hello.from, "Ada <ada@example.com>");
+        assert_eq!(hello.to, "Bao");
+        assert_eq!(hello.body, "Hello from Ada.");
+        assert_eq!(hello.files, vec!["notes.txt".to_string()]);
+        if com.is_ok() {
+            unsafe { CoUninitialize() };
+        }
+    }
 
     #[test]
     fn extension_of_a_path() {

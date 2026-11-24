@@ -358,16 +358,11 @@ unsafe fn layout(scroll: &mut BodyScroll, dc: HDC, gen: usize, width: i32, text:
                     rows.push(parse(&line.text));
                 }
             }
-            let mut widths = Vec::<i32>::new();
             let scale = |v: i32| v * dpi / 96;
-            for row in &rows {
-                for (col, cell) in row.iter().enumerate() {
-                    if widths.len() <= col {
-                        widths.push(scale(36));
-                    }
-                    widths[col] = widths[col].max((text_w(dc, cell, font) + scale(14)).min(scale(260)));
-                }
-            }
+            let rows: Vec<Vec<String>> = rows.into_iter().map(|r| r.into_iter().map(|c| super::docparse::grid_cell_shown(&c)).collect()).collect();
+            let inset = scale(7);
+            // Header is drawn bold, so it is measured bold. The pane width is not an input.
+            let widths = grid_column_widths(&rows, |cell, header| unsafe { text_w(dc, cell, if header { f[1] } else { font }) }, scale(36), scale(260), inset * 2 + scale(4));
             let rh = app(|a| a.fh) + scale(SPACE_8);
             let h = rh * rows.len() as i32;
             lines.push(Line { text: String::new(), style: st, y, h, no: no + 1, table: Some((rows, widths)), frags: Vec::new() });
@@ -614,6 +609,25 @@ pub(crate) unsafe fn paint_text(
     });
 }
 
+/// Column widths in pixels. `measure(text, header)` is the width of one cell; the header row is
+/// measured with `header == true` (the bold face). A column is the widest cell plus `pad_px`,
+/// at least `min_px` and at most `cap_px`. The view width is not an argument: a narrow pane
+/// scrolls sideways instead of squeezing every column into the window.
+pub(crate) fn grid_column_widths(rows: &[Vec<String>], mut measure: impl FnMut(&str, bool) -> i32, min_px: i32, cap_px: i32, pad_px: i32) -> Vec<i32> {
+    let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let min_px = min_px.max(0);
+    let cap_px = cap_px.max(min_px);
+    let mut widths = vec![min_px; cols];
+    for (k, row) in rows.iter().enumerate() {
+        let header = k == 0;
+        for (c, cell) in row.iter().enumerate().take(cols) {
+            let w = measure(cell, header).saturating_add(pad_px.max(0));
+            widths[c] = widths[c].max(w.min(cap_px).max(min_px));
+        }
+    }
+    widths
+}
+
 // A grid: column widths from the first rows' text, the first row as a header, scrolled both ways.
 pub(crate) unsafe fn paint_table(scroll: &mut BodyScroll, dc: HDC, area: RECT, rows: &[Vec<String>], cut: bool, font: HFONT, dpi: i32, faces: &mut FaceCache) {
     let s = |v: i32| v * dpi / 96;
@@ -623,13 +637,10 @@ pub(crate) unsafe fn paint_table(scroll: &mut BodyScroll, dc: HDC, area: RECT, r
         paint_center_meta(dc, area, tr(crate::Key::Empty), font);
         return;
     }
-    let mut widths = vec![s(36); cols];
-    for (k, r) in rows.iter().take(200).enumerate() {
-        for (c, cell) in r.iter().enumerate() {
-            let w = text_w(dc, cell, if k == 0 { f[1] } else { font }) + s(14);
-            widths[c] = widths[c].max(w.min(s(260)));
-        }
-    }
+    let measured: Vec<Vec<String>> = rows.iter().take(200).map(|r| r.iter().map(|c| super::docparse::grid_cell_shown(c)).collect()).collect();
+    let inset = s(7);
+    // Header bold, then the widest cell, capped. A narrow pane scrolls; it does not shrink a column.
+    let widths = grid_column_widths(&measured, |cell, header| unsafe { text_w(dc, cell, if header { f[1] } else { font }) }, s(36), s(260), inset * 2 + s(4));
     let num = text_w(dc, &rows.len().to_string(), font) + s(14);
     let rh = app(|a| a.fh) + s(SPACE_8);
     let total = rh * rows.len() as i32 + if cut { rh } else { 0 };
@@ -654,14 +665,21 @@ pub(crate) unsafe fn paint_table(scroll: &mut BodyScroll, dc: HDC, area: RECT, r
             let mut x = area.left + num - sx;
             for (c, w) in widths.iter().enumerate() {
                 if x + w > area.left + num && x < area.right {
-                    let cell = r.get(c).map(String::as_str).unwrap_or("");
-                    let cr = RECT { left: (x + s(7)).max(area.left + num), top, right: x + w - s(7), bottom: top + rh };
+                    let cell = super::docparse::grid_cell_shown(r.get(c).map(String::as_str).unwrap_or(""));
+                    let cr = RECT { left: x + inset, top, right: x + w - inset, bottom: top + rh };
                     let face = if k == 0 { f[1] } else { font };
                     let right = k > 0 && !cell.is_empty() && cell.replace(',', "").parse::<f64>().is_ok();
+                    // The rect is the full column, so a short header is not ellipsized just because
+                    // the pane is narrower. The clip keeps the text out of the row-number gutter.
+                    let saved = SaveDC(dc);
+                    IntersectClipRect(dc, (area.left + num).max(x), top, (x + w).min(area.right), top + rh);
                     if right {
-                        text(dc, cr, cell, face, pal().text, DT_RIGHT);
+                        text(dc, cr, &cell, face, pal().text, DT_RIGHT);
                     } else {
-                        paint_label(dc, cr, cell, face);
+                        paint_label(dc, cr, &cell, face);
+                    }
+                    if saved != 0 {
+                        let _ = RestoreDC(dc, saved);
                     }
                     fill(dc, RECT { left: x + w - 1, top, right: x + w, bottom: top + rh }, pal().line);
                 }
@@ -722,6 +740,26 @@ mod tests {
         assert_eq!(selected_text("one\ntwo\nthree", &lines, Some((2, 3))), "two\nthree");
         assert_eq!(selected_text("one\ntwo\nthree", &lines, Some((3, 1))), "one\ntwo\nthree");
         assert_eq!(selected_text("all", &lines, Some((9, 9))), "all");
+    }
+
+    #[test]
+    fn grid_columns_fit_the_bold_header_and_do_not_shrink_to_the_view() {
+        // "Cost" bold is wider than "12.5". "Paint" is wider than "Item". A 40px pane must not change either.
+        let rows = vec![vec!["Item".into(), "Cost".into()], vec!["Paint".into(), "12.5".into()]];
+        let widths = grid_column_widths(&rows, |text, header| match (text, header) {
+            ("Item", true) => 30,
+            ("Item", false) => 24,
+            ("Paint", _) => 36,
+            ("Cost", true) => 32,
+            ("Cost", false) => 26,
+            ("12.5", _) => 22,
+            _ => 0,
+        }, 36, 260, 18);
+        assert_eq!(widths, vec![54, 50]);
+        assert!(widths.iter().sum::<i32>() > 40);
+        let long = grid_column_widths(&[vec!["x".repeat(80)]], |text, _| text.len() as i32 * 10, 36, 260, 18);
+        assert_eq!(long, vec![260]);
+        assert_eq!(grid_column_widths(&[vec![String::new()]], |_, _| 0, 36, 260, 18), vec![36]);
     }
 
     #[test]

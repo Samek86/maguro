@@ -53,6 +53,29 @@ pub(crate) fn looks_text(b: &[u8]) -> bool {
     !head.contains(&0) && ctl * 50 <= head.len()
 }
 
+/// A grid cell as one line. An embedded break is a visible separator, because the cell is drawn
+/// with `DT_SINGLELINE`, which would otherwise drop the break and glue the two sides together.
+pub(crate) fn grid_cell_shown(s: &str) -> String {
+    if !s.contains(['\n', '\r']) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 4);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push_str(" ⏎ ");
+        } else if c == '\n' {
+            out.push_str(" ⏎ ");
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// CSV / TSV rows: quoted fields may hold the separator, "" and line breaks. At most `max` rows.
 pub(crate) fn csv_rows(text: &str, sep: char, max: usize) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
@@ -735,6 +758,9 @@ mod tests {
         let rows = csv_rows("a,\"b,c\",\"d \"\"q\"\"\"\r\n1,2\n", ',', 100);
         assert_eq!(rows, vec![vec!["a", "b,c", "d \"q\""], vec!["1", "2"]]);
         assert_eq!(csv_rows("x\n\"multi\nline\",y", ',', 100)[1], vec!["multi\nline", "y"]);
+        assert_eq!(grid_cell_shown("line one\nline two"), "line one ⏎ line two");
+        assert_eq!(grid_cell_shown("line one\r\nline two"), "line one ⏎ line two");
+        assert_eq!(grid_cell_shown("plain"), "plain");
         assert_eq!(csv_rows("1\n2\n3\n", ',', 2).len(), 2);
         assert_eq!((csv_sep("a;b;c\n"), csv_sep("a,b;c\n")), (';', ','));
     }
