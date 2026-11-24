@@ -18,9 +18,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Media::MediaFoundation::{
-    MFPCreateMediaPlayer, MFStartup, IMFPMediaPlayer, IMFPMediaPlayerCallback, IMFPMediaPlayerCallback_Impl, MFP_EVENT_HEADER, MFP_EVENT_TYPE_ERROR,
-    MFP_EVENT_TYPE_MEDIAITEM_SET, MFP_EVENT_TYPE_PAUSE, MFP_EVENT_TYPE_PLAY, MFP_EVENT_TYPE_PLAYBACK_ENDED, MFP_MEDIAPLAYER_STATE_PLAYING, MFP_OPTION_NONE,
-    MFP_POSITIONTYPE_100NS, MFSTARTUP_FULL, MFVideoARMode_PreservePicture, MF_VERSION,
+    IMFVideoDisplayControl, IMFPMediaPlayer, IMFPMediaPlayerCallback, IMFPMediaPlayerCallback_Impl, MFPCreateMediaPlayer, MFGetService, MFStartup, MFP_EVENT_HEADER,
+    MFP_EVENT_TYPE_ERROR, MFP_EVENT_TYPE_FRAME_STEP, MFP_EVENT_TYPE_MEDIAITEM_SET, MFP_EVENT_TYPE_PAUSE, MFP_EVENT_TYPE_PLAY, MFP_EVENT_TYPE_PLAYBACK_ENDED,
+    MFP_EVENT_TYPE_POSITION_SET, MFP_MEDIAPLAYER_STATE_PLAYING, MFP_MEDIAPLAYER_STATE_STOPPED, MFP_OPTION_NONE, MFP_POSITIONTYPE_100NS, MFSTARTUP_FULL,
+    MFVideoARMode_PreservePicture, MFVideoRenderPrefs_DoNotRepaintOnStop, MF_VERSION, MR_VIDEO_RENDER_SERVICE,
 };
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
 use windows::Win32::System::Variant::{VT_I8, VT_UI8};
@@ -42,6 +43,10 @@ const TIMER_MS: u32 = 200;
 pub(crate) const HNS_PER_SEC: i64 = 10_000_000;
 pub(crate) const SEEK_STEP: i64 = 5 * HNS_PER_SEC;
 const VOLUME_STEP: f32 = 0.05;
+/// Pause this close to the end. MFPlay clears the picture when the natural end stops the session.
+pub(crate) const END_GUARD: i64 = 80 * HNS_PER_SEC / 1000;
+/// After the media item is set, keep re-asserting the video rect. MFPlay can move the child on start.
+const STICK_MS: u64 = 800;
 
 const ICON_PLAY: &str = "\u{E768}";
 const ICON_PAUSE: &str = "\u{E769}";
@@ -143,6 +148,54 @@ pub(crate) fn split_content(area: RECT, dpi: i32) -> (RECT, RECT) {
     let h = transport_height(dpi).min(span);
     let top = area.bottom - h;
     (RECT { bottom: top, ..area }, RECT { top, ..area })
+}
+
+/// Push `area` down so its top is at or below `header_bottom`. The video child
+/// must not cover the attribute header.
+pub(crate) fn below_header(header_bottom: i32, area: RECT) -> RECT {
+    let bottom = area.bottom.max(area.top);
+    let top = area.top.max(header_bottom).min(bottom);
+    RECT { top, ..area }
+}
+
+/// Where playback sits relative to the end of the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EndChoice {
+    /// Keep the decoder at `pos`.
+    Play { pos: i64 },
+    /// Pause on a real frame. `player` is the decoder; `shown` is the clock (the duration).
+    Hold { player: i64, shown: i64 },
+}
+
+/// `Hold` once `pos` is inside the end guard, so the session never reaches the clear-on-stop.
+pub(crate) fn end_choice(pos: i64, dur: i64) -> EndChoice {
+    let pos = pos.max(0);
+    if dur > END_GUARD && pos >= dur - END_GUARD {
+        EndChoice::Hold { player: dur - END_GUARD, shown: dur }
+    } else {
+        EndChoice::Play { pos }
+    }
+}
+
+/// The session already stopped at the end and rewound. Park on the last frame, or the first if the clip is shorter than the guard.
+pub(crate) fn after_end(dur: i64) -> EndChoice {
+    if dur <= 0 {
+        EndChoice::Hold { player: 0, shown: 0 }
+    } else if dur <= END_GUARD {
+        EndChoice::Hold { player: 0, shown: dur }
+    } else {
+        EndChoice::Hold { player: dur - END_GUARD, shown: dur }
+    }
+}
+
+/// Stage height for an audio card drawn above the transport.
+/// `rows` property lines, plus two spare lines so a wrapped path still clears the bar.
+/// `icon` is the album-art side. `inset_v` is the padding above and below the card.
+pub(crate) fn audio_stage_height(rows: i32, row_h: i32, icon: i32, transport: i32, inset_v: i32) -> i32 {
+    let row_h = row_h.max(0);
+    let text = row_h.saturating_mul(rows.max(1)).saturating_add(row_h.saturating_mul(2));
+    let block = text.max(icon.max(0));
+    inset_v.max(0).saturating_add(block).saturating_add(transport.max(0))
 }
 
 pub(crate) fn transport_geom(bar: RECT, dpi: i32) -> TransportGeom {
@@ -318,6 +371,12 @@ struct Slot {
     failed: bool,
     ready: bool,
     playing: bool,
+    /// Paused on the last frame. The clock shows the duration. Play starts over at 0.
+    holding: bool,
+    /// Seek back onto a frame after MFPlay has already cleared the picture.
+    want_still: bool,
+    /// One restore seek per end, so a second end event cannot loop.
+    restore_used: bool,
     muted: bool,
     volume: f32,
     pos: i64,
@@ -329,6 +388,14 @@ struct Slot {
     bar: RECT,
     pending: Option<RECT>,
     placed: RECT,
+    /// The video child may be visible. Until then WM_WINDOWPOSCHANGING keeps it hidden.
+    shown: bool,
+    /// Re-apply `placed` even when the rect has not changed (MFPlay moves the child on start).
+    force_place: bool,
+    /// The view should place the video and repaint the header.
+    relayout: bool,
+    /// Re-assert the video rect until this instant. `None` once it has passed.
+    stick_until: Option<std::time::Instant>,
 }
 
 fn slots() -> &'static std::cell::RefCell<HashMap<isize, Slot>> {
@@ -428,6 +495,9 @@ pub(crate) unsafe fn open(host: HWND, path: &str) {
             failed: false,
             ready: false,
             playing: false,
+            holding: false,
+            want_still: false,
+            restore_used: false,
             muted,
             volume,
             pos: 0,
@@ -439,6 +509,10 @@ pub(crate) unsafe fn open(host: HWND, path: &str) {
             bar: RECT::default(),
             pending: None,
             placed: RECT::default(),
+            shown: false,
+            force_place: false,
+            relayout: false,
+            stick_until: None,
         },
     );
     let cb: IMFPMediaPlayerCallback = Cb { host: key, gen }.into();
@@ -502,7 +576,17 @@ pub(crate) unsafe fn tick(host: HWND) {
         return;
     }
     refresh(host);
+    arm_clock(host);
     invalidate_bar(host);
+}
+
+/// `true` when the view should place the video child again and repaint the header.
+pub(crate) unsafe fn take_relayout(host: HWND) -> bool {
+    let mut map = slots().borrow_mut();
+    let Some(slot) = map.get_mut(&key_of(host)) else { return false };
+    let due = slot.relayout;
+    slot.relayout = false;
+    due
 }
 
 pub(crate) unsafe fn command(host: HWND, cmd: MediaCmd, repeat: bool) {
@@ -516,7 +600,14 @@ pub(crate) unsafe fn command(host: HWND, cmd: MediaCmd, repeat: bool) {
         let player = slot.player.clone();
         let act = match cmd {
             MediaCmd::Toggle => {
-                if slot.playing {
+                if slot.holding {
+                    slot.holding = false;
+                    slot.want_still = false;
+                    slot.restore_used = false;
+                    slot.playing = true;
+                    slot.pos = 0;
+                    Act::Replay
+                } else if slot.playing {
                     slot.playing = false;
                     Act::Pause
                 } else {
@@ -524,16 +615,8 @@ pub(crate) unsafe fn command(host: HWND, cmd: MediaCmd, repeat: bool) {
                     Act::Play
                 }
             }
-            MediaCmd::SeekBack => {
-                let pos = seek_step(slot.pos, slot.dur, -SEEK_STEP);
-                slot.pos = pos;
-                Act::Seek(pos)
-            }
-            MediaCmd::SeekFwd => {
-                let pos = seek_step(slot.pos, slot.dur, SEEK_STEP);
-                slot.pos = pos;
-                Act::Seek(pos)
-            }
+            MediaCmd::SeekBack => choose_seek(slot, seek_step(slot.pos, slot.dur, -SEEK_STEP)),
+            MediaCmd::SeekFwd => choose_seek(slot, seek_step(slot.pos, slot.dur, SEEK_STEP)),
             MediaCmd::VolumeUp => {
                 slot.volume = volume_set(slot.volume, VOLUME_STEP);
                 slot.muted = false;
@@ -580,10 +663,20 @@ pub(crate) unsafe fn apply_place(host: HWND) {
         let mut map = slots().borrow_mut();
         let Some(slot) = map.get_mut(&key) else { return };
         let Some(rect) = slot.pending.take() else { return };
-        if rect_eq(slot.placed, rect) {
+        let force = slot.force_place;
+        slot.force_place = false;
+        if !force && slot.shown && rect_eq(slot.placed, rect) {
             return;
         }
         slot.placed = rect;
+        if !slot.shown {
+            // The child becomes visible only once the header is final. Pin it there
+            // for a short while: MFPlay moves the window again as the first frame arrives.
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(STICK_MS);
+            slot.stick_until = Some(slot.stick_until.map(|t| t.max(until)).unwrap_or(until));
+            slot.relayout = true;
+        }
+        slot.shown = true;
         (slot.video, rect, slot.player.clone())
     };
     if video.0.is_null() || !IsWindow(Some(video)).as_bool() {
@@ -591,11 +684,53 @@ pub(crate) unsafe fn apply_place(host: HWND) {
     }
     let w = (rect.right - rect.left).max(1);
     let h = (rect.bottom - rect.top).max(1);
+    // NOREDRAW so this does not nest a paint. The caller invalidates the header before BeginPaint.
     let _ = SetWindowPos(video, None, rect.left, rect.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_SHOWWINDOW);
     if let Some(p) = player {
         let _ = p.UpdateVideo();
     }
     let _ = InvalidateRect(Some(video), None, false);
+    repaint_header(host);
+}
+
+/// Keep the video child hidden until the header height is final. A window shown
+/// on the one-line opening header stays on top of the lines that arrive later,
+/// and WS_CLIPCHILDREN then skips those lines.
+pub(crate) unsafe fn hide_video(host: HWND) {
+    let key = key_of(host);
+    let video = {
+        let mut map = slots().borrow_mut();
+        let Some(slot) = map.get_mut(&key) else { return };
+        if slot.kind != MediaKind::Video {
+            return;
+        }
+        slot.shown = false;
+        slot.placed = RECT::default();
+        slot.pending = None;
+        slot.force_place = false;
+        slot.video
+    };
+    if video.0.is_null() || !IsWindow(Some(video)).as_bool() {
+        return;
+    }
+    let vis = IsWindowVisible(video).as_bool();
+    let _ = SetWindowPos(video, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_HIDEWINDOW);
+    if vis {
+        let _ = InvalidateRect(Some(host), None, false);
+    }
+}
+
+/// Repaint the strip above the video child. Call before BeginPaint when the child just moved.
+pub(crate) unsafe fn repaint_header(host: HWND) {
+    let placed = slots().borrow().get(&key_of(host)).map(|s| s.placed).unwrap_or_default();
+    let mut rc = RECT::default();
+    let _ = GetClientRect(host, &mut rc);
+    if live(placed) {
+        rc.bottom = placed.top.max(rc.top);
+    }
+    if rc.bottom > rc.top {
+        let _ = InvalidateRect(Some(host), Some(&rc), false);
+    }
 }
 
 pub(crate) unsafe fn paint_transport(dc: HDC, host: HWND, bar: RECT, font: HFONT, dpi: i32, accent: u32) {
@@ -703,8 +838,32 @@ enum Act {
     Play,
     Pause,
     Seek(i64),
+    /// Seek to the start and play. Used after the end-of-file hold.
+    Replay,
+    /// Seek onto a frame and pause. `want_still` then steps that frame into the window.
+    Hold(i64),
     Volume(f32),
     Mute(bool),
+}
+
+/// Seek, and pause before the natural end so the picture is not cleared.
+fn choose_seek(slot: &mut Slot, pos: i64) -> Act {
+    match end_choice(pos, slot.dur) {
+        EndChoice::Hold { player, shown } => {
+            slot.holding = true;
+            slot.playing = false;
+            slot.pos = shown;
+            slot.want_still = slot.kind == MediaKind::Video;
+            Act::Hold(player)
+        }
+        EndChoice::Play { pos } => {
+            slot.holding = false;
+            slot.want_still = false;
+            slot.restore_used = false;
+            slot.pos = pos;
+            Act::Seek(pos)
+        }
+    }
 }
 
 unsafe fn run_act(player: &IMFPMediaPlayer, act: Act) {
@@ -716,6 +875,14 @@ unsafe fn run_act(player: &IMFPMediaPlayer, act: Act) {
             let _ = player.Pause();
         }
         Act::Seek(pos) => write_hns(player, pos),
+        Act::Replay => {
+            write_hns(player, 0);
+            let _ = player.Play();
+        }
+        Act::Hold(pos) => {
+            write_hns(player, pos);
+            let _ = player.Pause();
+        }
         Act::Volume(v) => {
             let _ = player.SetMute(false);
             let _ = player.SetVolume(v);
@@ -733,11 +900,7 @@ unsafe fn set_ratio(host: HWND, part: Part, x: i32) {
         let Some(slot) = map.get_mut(&key) else { return };
         let player = slot.player.clone();
         let act = match part {
-            Part::Seek => {
-                let pos = seek_target(slot.dur, ratio_along(slot.geom.seek, x));
-                slot.pos = pos;
-                Act::Seek(pos)
-            }
+            Part::Seek => choose_seek(slot, seek_target(slot.dur, ratio_along(slot.geom.seek, x))),
             Part::Volume => {
                 let v = ratio_along(slot.geom.volume, x);
                 slot.volume = v;
@@ -754,22 +917,102 @@ unsafe fn set_ratio(host: HWND, part: Part, x: i32) {
     invalidate_bar(host);
 }
 
+enum Park {
+    /// The frame on screen is the last one. Pausing keeps it; stopping would clear it.
+    Pause,
+    /// The session already rewound and cleared. Seek back onto a frame.
+    Restore(i64),
+}
+
 unsafe fn refresh(host: HWND) {
     let key = key_of(host);
     let player = slots().borrow().get(&key).and_then(|s| s.player.clone());
     let Some(player) = player else { return };
     let pos = read_hns(&player, false);
     let dur = read_hns(&player, true);
-    let playing = player.GetState().ok() == Some(MFP_MEDIAPLAYER_STATE_PLAYING);
-    if let Some(slot) = slots().borrow_mut().get_mut(&key) {
-        if let Some(pos) = pos {
-            slot.pos = pos;
-        }
+    let state = player.GetState().ok();
+    let playing = state == Some(MFP_MEDIAPLAYER_STATE_PLAYING);
+    let stopped = state == Some(MFP_MEDIAPLAYER_STATE_STOPPED);
+    let park = {
+        let mut map = slots().borrow_mut();
+        let Some(slot) = map.get_mut(&key) else { return };
         if let Some(dur) = dur {
-            slot.dur = dur;
+            if dur > slot.dur {
+                slot.dur = dur;
+            }
         }
-        slot.playing = playing;
+        let dur = slot.dur;
+        let was_playing = slot.playing;
+        let mut park = None;
+        if !slot.holding {
+            if let Some(pos) = pos {
+                slot.pos = pos;
+            }
+            slot.playing = playing;
+            let near_end = playing && matches!(end_choice(slot.pos, dur), EndChoice::Hold { .. });
+            // A natural end rewinds to 0 and reports stopped. A user pause stays paused.
+            let rewound = was_playing && stopped && dur > 0 && slot.pos <= END_GUARD;
+            if near_end {
+                if let EndChoice::Hold { shown, .. } = end_choice(slot.pos, dur) {
+                    slot.holding = true;
+                    slot.playing = false;
+                    slot.pos = shown;
+                    park = Some(Park::Pause);
+                }
+            } else if rewound && !slot.restore_used {
+                if let EndChoice::Hold { player, shown } = after_end(dur) {
+                    slot.holding = true;
+                    slot.playing = false;
+                    slot.pos = shown;
+                    slot.restore_used = true;
+                    slot.want_still = slot.kind == MediaKind::Video;
+                    park = Some(Park::Restore(player));
+                }
+            }
+        } else {
+            slot.playing = false;
+            if slot.pos <= 0 && dur > 0 {
+                slot.pos = dur;
+            }
+        }
+        let now = std::time::Instant::now();
+        if slot.kind == MediaKind::Video && slot.stick_until.is_some_and(|t| now < t) {
+            slot.force_place = true;
+            slot.relayout = true;
+        } else {
+            slot.stick_until = None;
+        }
+        park
+    };
+    match park {
+        Some(Park::Pause) => {
+            let _ = player.Pause();
+        }
+        Some(Park::Restore(pos)) => {
+            write_hns(&player, pos);
+            let _ = player.Pause();
+        }
+        None => {}
     }
+}
+
+unsafe fn arm_clock(host: HWND) {
+    let (playing, holding, pos, dur) = {
+        let map = slots().borrow();
+        let Some(slot) = map.get(&key_of(host)) else { return };
+        (slot.playing, slot.holding, slot.pos, slot.dur)
+    };
+    let ms = if playing && !holding && dur > pos {
+        let remain_ms = ((dur - pos) / (HNS_PER_SEC / 1000)).max(0) as u32;
+        if remain_ms >= TIMER_MS {
+            TIMER_MS
+        } else {
+            remain_ms.saturating_sub((END_GUARD / (HNS_PER_SEC / 1000)) as u32).max(15)
+        }
+    } else {
+        TIMER_MS
+    };
+    let _ = SetTimer(Some(host), TIMER_MEDIA, ms, None);
 }
 
 unsafe fn apply_events() {
@@ -809,6 +1052,7 @@ unsafe fn apply_one(host: HWND, ev: Ev) {
         if let Some(p) = player {
             let _ = p.SetAspectRatioMode(MFVideoARMode_PreservePicture.0 as u32);
             let _ = p.SetBorderColor(cref(pal().bg));
+            keep_last_frame(&p);
             let vol = slots().borrow().get(&key).map(|s| s.volume).unwrap_or(1.0);
             let muted = slots().borrow().get(&key).map(|s| s.muted).unwrap_or(false);
             let _ = p.SetVolume(vol);
@@ -817,24 +1061,85 @@ unsafe fn apply_one(host: HWND, ev: Ev) {
         }
         if let Some(slot) = slots().borrow_mut().get_mut(&key) {
             slot.ready = true;
+            if slot.kind == MediaKind::Video {
+                // The child is often moved as the first frame appears. Re-place it under the header.
+                slot.force_place = true;
+                slot.relayout = true;
+                slot.stick_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(STICK_MS));
+            }
         }
         refresh(host);
         let _ = InvalidateRect(Some(host), None, false);
         return;
     }
+    if ev.kind == MFP_EVENT_TYPE_POSITION_SET.0 || ev.kind == MFP_EVENT_TYPE_FRAME_STEP.0 {
+        let (player, still) = {
+            let mut map = slots().borrow_mut();
+            let Some(slot) = map.get_mut(&key) else { return };
+            let still = slot.want_still && ev.kind == MFP_EVENT_TYPE_POSITION_SET.0;
+            if still {
+                slot.want_still = false;
+            }
+            (slot.player.clone(), still && slot.kind == MediaKind::Video)
+        };
+        if let Some(p) = player {
+            if still {
+                let _ = p.FrameStep();
+            }
+            let _ = p.UpdateVideo();
+        }
+        invalidate_bar(host);
+        return;
+    }
     if ev.kind == MFP_EVENT_TYPE_PLAY.0 {
         if let Some(slot) = slots().borrow_mut().get_mut(&key) {
-            slot.playing = true;
+            if !slot.holding {
+                slot.playing = true;
+            }
         }
-    } else if ev.kind == MFP_EVENT_TYPE_PAUSE.0 || ev.kind == MFP_EVENT_TYPE_PLAYBACK_ENDED.0 {
+    } else if ev.kind == MFP_EVENT_TYPE_PAUSE.0 {
         if let Some(slot) = slots().borrow_mut().get_mut(&key) {
             slot.playing = false;
-            if ev.kind == MFP_EVENT_TYPE_PLAYBACK_ENDED.0 && slot.dur > 0 {
-                slot.pos = slot.dur;
+        }
+    } else if ev.kind == MFP_EVENT_TYPE_PLAYBACK_ENDED.0 {
+        let restore = {
+            let mut map = slots().borrow_mut();
+            let Some(slot) = map.get_mut(&key) else { return };
+            slot.playing = false;
+            match after_end(slot.dur) {
+                EndChoice::Hold { player, shown } => {
+                    slot.holding = true;
+                    slot.pos = shown;
+                    if slot.restore_used {
+                        None
+                    } else {
+                        slot.restore_used = true;
+                        slot.want_still = slot.kind == MediaKind::Video;
+                        Some(player)
+                    }
+                }
+                EndChoice::Play { .. } => None,
+            }
+        };
+        if let Some(pos) = restore {
+            if let Some(p) = slots().borrow().get(&key).and_then(|s| s.player.clone()) {
+                write_hns(&p, pos);
+                let _ = p.Pause();
             }
         }
     }
     invalidate_bar(host);
+}
+
+/// Ask the EVR not to paint the border colour over the last frame when playback stops.
+unsafe fn keep_last_frame(player: &IMFPMediaPlayer) {
+    let mut ptr = std::ptr::null_mut();
+    if MFGetService(player, &MR_VIDEO_RENDER_SERVICE, &IMFVideoDisplayControl::IID, &mut ptr).is_err() || ptr.is_null() {
+        return;
+    }
+    let display: IMFVideoDisplayControl = IMFVideoDisplayControl::from_raw(ptr);
+    let cur = display.GetRenderingPrefs().unwrap_or(0);
+    let _ = display.SetRenderingPrefs(cur | MFVideoRenderPrefs_DoNotRepaintOnStop.0 as u32);
 }
 
 unsafe fn fail(host: HWND) {
@@ -943,7 +1248,7 @@ fn ensure_class() {
             lpfnWndProc: Some(vid_proc),
             hInstance: hinst,
             hCursor: arrow,
-            hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
+            hbrBackground: HBRUSH(GetStockObject(NULL_BRUSH).0),
             lpszClassName: w!("MaguroMediaVid"),
             ..Default::default()
         });
@@ -979,6 +1284,23 @@ fn vid_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
             WM_ERASEBKGND => return LRESULT(1),
+            WM_WINDOWPOSCHANGING => {
+                // MFPlay repositions this child to the top of the parent when playback starts.
+                // Keep it hidden until the header is final, then pin it to the rect under that header.
+                let pos = &mut *(lp.0 as *mut WINDOWPOS);
+                let parent = GetParent(h).unwrap_or_default();
+                let (shown, placed) = slots().borrow().get(&key_of(parent)).map(|s| (s.shown, s.placed)).unwrap_or((false, RECT::default()));
+                if !shown {
+                    pos.flags = SET_WINDOW_POS_FLAGS(pos.flags.0 & !SWP_SHOWWINDOW.0) | SWP_HIDEWINDOW;
+                } else if live(placed) {
+                    pos.x = placed.left;
+                    pos.y = placed.top;
+                    pos.cx = (placed.right - placed.left).max(1);
+                    pos.cy = (placed.bottom - placed.top).max(1);
+                    pos.flags = SET_WINDOW_POS_FLAGS(pos.flags.0 & !SWP_NOMOVE.0 & !SWP_NOSIZE.0);
+                }
+                return LRESULT(0);
+            }
             WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                 let parent = GetParent(h).unwrap_or_default();
@@ -1182,6 +1504,49 @@ mod tests {
         assert_eq!(media_key(b'K' as u16, false, false, true, true), None);
         assert_eq!(media_key(space, false, false, false, false), Some(MediaCmd::Toggle));
         assert_eq!(media_key(space, true, false, false, false), None);
+    }
+
+    #[test]
+    fn end_holds_the_last_frame_and_play_starts_over() {
+        let dur = 3 * HNS_PER_SEC;
+        assert_eq!(end_choice(0, dur), EndChoice::Play { pos: 0 });
+        assert_eq!(end_choice(dur / 2, dur), EndChoice::Play { pos: dur / 2 });
+        assert_eq!(end_choice(dur - END_GUARD - 1, dur), EndChoice::Play { pos: dur - END_GUARD - 1 });
+        assert_eq!(end_choice(dur - END_GUARD, dur), EndChoice::Hold { player: dur - END_GUARD, shown: dur });
+        assert_eq!(end_choice(dur, dur), EndChoice::Hold { player: dur - END_GUARD, shown: dur });
+        assert_eq!(after_end(dur), EndChoice::Hold { player: dur - END_GUARD, shown: dur });
+        // Shorter than the guard: the only picture is the first frame, and the clock stays at the end.
+        assert_eq!(after_end(END_GUARD / 2), EndChoice::Hold { player: 0, shown: END_GUARD / 2 });
+        assert_eq!(after_end(0), EndChoice::Hold { player: 0, shown: 0 });
+        // A user pause near the start is not the end, so it must not hold.
+        assert_eq!(end_choice(0, dur), EndChoice::Play { pos: 0 });
+    }
+
+    #[test]
+    fn video_rect_stays_below_the_header() {
+        let pane = RECT { left: 0, top: 0, right: 320, bottom: 800 };
+        let placed = below_header(72, pane);
+        assert!(placed.top >= 72, "video covers the header at {}", placed.top);
+        assert_eq!((placed.left, placed.right, placed.bottom), (0, 320, 800));
+        let under = RECT { left: 4, top: 90, right: 300, bottom: 700 };
+        assert_eq!(below_header(72, under), under);
+        // A header taller than the area pins the child to the bottom instead of a negative height.
+        let pushed = below_header(900, pane);
+        assert_eq!(pushed.top, pushed.bottom);
+        assert!(pushed.top >= 72);
+    }
+
+    #[test]
+    fn audio_card_stage_clears_the_transport() {
+        let row_h = 24;
+        let rows = 8; // title, artist, album, length, bitrate, size, created, folder
+        let transport = 40;
+        let inset = 12;
+        let stage = audio_stage_height(rows, row_h, 160, transport, inset);
+        let room = stage - transport - inset;
+        let stack = row_h * rows + row_h * 2;
+        assert!(room >= stack, "card room {room} is shorter than the rows {stack}");
+        assert!(stage >= 160 + inset + transport);
     }
 
     #[test]

@@ -821,14 +821,26 @@ unsafe fn remember_peek(h: HWND, kind: PeekKind) {
 
 /// First result for this file: fit, or take the remembered size. Later pages, a maximize,
 /// and a size the user already set for this kind leave the window alone.
+/// Window height that keeps an audio card's rows above the transport.
+fn audio_peek_height(rows: i32, dpi: i32, fh: i32, limit_h: i32) -> i32 {
+    let s = |v: i32| v * dpi.max(1) / 96;
+    let row_h = fh.max(1).saturating_add(s(8));
+    let stage = super::media::audio_stage_height(rows, row_h, s(160), super::media::transport_height(dpi), s(8) + s(4));
+    stage.saturating_add(peek_chrome(dpi, false).h).min(limit_h.max(0))
+}
+
 unsafe fn fit_on_result(h: HWND, gen: usize) {
-    let (kind, source) = {
+    let (kind, source, card_rows) = {
         let j = peek_job();
         if j.gen != gen {
             return;
         }
         let Some(done) = j.done.as_ref() else { return };
-        (PeekKind::of(&done.body), fit_source(&done.body))
+        let card_rows = match &done.body {
+            Body::Card { rows, .. } => Some(rows.len() as i32),
+            _ => None,
+        };
+        (PeekKind::of(&done.body), fit_source(&done.body), card_rows)
     };
     let first = view(|v| {
         if v.fit_gen == gen {
@@ -859,12 +871,19 @@ unsafe fn fit_on_result(h: HWND, gen: usize) {
         };
         (user, v.maximized)
     });
-    let dpi = app(|a| a.dpi);
+    let (dpi, fh) = app(|a| (a.dpi, a.fh));
     let b = main_bounds();
     let limit = open_limit(&b);
     let remembered = remembered_dip(kind).map(|(w, h)| PeekSize { w: dip_to_px(w, dpi), h: dip_to_px(h, dpi) });
     let fitted = fitted_px(source, dpi, limit);
-    let Some(size) = pick_open_size(remembered, user_resized, maximized, fitted) else { return };
+    let Some(mut size) = pick_open_size(remembered, user_resized, maximized, fitted) else { return };
+    // The transport sits in the stage. A remembered or text-fitted height does not
+    // include it, so the last property row (Created) would land under the bar.
+    if let Some(rows) = card_rows {
+        if !maximized && super::media::covers(h) && !super::media::has_video(h) {
+            size.h = size.h.max(audio_peek_height(rows, dpi, fh, limit.h));
+        }
+    }
     place_peek(h, size);
 }
 
@@ -2459,32 +2478,62 @@ unsafe fn clip(dc: HDC, r: RECT, draw: impl FnOnce()) {
 }
 
 
+/// One property row. `text_h` is the measured value. A wrapped value may use up to three lines.
+pub(crate) fn card_row_span(text_h: i32, row_h: i32, pad: i32) -> i32 {
+    let row_h = row_h.max(0);
+    let pad = pad.max(0);
+    let lo = row_h - pad;
+    let hi = row_h.saturating_mul(3).saturating_sub(pad);
+    let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+    text_h.clamp(lo, hi).saturating_add(pad)
+}
+
+/// Top of the property stack. Center it when it fits; pin it to the top when it does not,
+/// so the last row stays inside the area instead of sliding under the transport.
+pub(crate) fn card_stack_top(area_top: i32, area_h: i32, stack_h: i32) -> i32 {
+    let area_h = area_h.max(0);
+    let stack_h = stack_h.max(0);
+    if area_h == 0 || stack_h >= area_h {
+        area_top
+    } else {
+        area_top + (area_h - stack_h) / 2
+    }
+}
+
 // Big icon (or thumbnail) on the left, the facts beside it.
 pub(crate) unsafe fn paint_card(dc: HDC, area: RECT, icon: Option<&Pix>, rows: &[(String, String)], font: HFONT, dpi: i32) {
     let s = |v: i32| v * dpi / 96;
     // drawn at its own size (only shrunk if it doesn't fit): scaling an icon blurs and fringes it
-    let side = icon.map_or(s(96), |p| p.w.max(p.h)).min((area.right - area.left) / 3).min(area.bottom - area.top);
+    let side = icon.map_or(s(96), |p| p.w.max(p.h)).min((area.right - area.left) / 3).min((area.bottom - area.top).max(0));
     // icon and facts as one block, centred
     let lw = rows.iter().map(|(l, _)| super::pview::text_w(dc, l, font)).max().unwrap_or(0) + s(16);
     let vw = rows.iter().map(|(_, v)| super::pview::text_w(dc, v, font)).max().unwrap_or(0);
     let block = side + s(32) + lw + vw;
     let x0 = area.left + ((area.right - area.left - block) / 2).max(s(8));
+    let left = x0 + side + s(32);
+    let rh = app(|a| a.fh) + s(8);
+    let pad = s(8);
+    let ink = ui_tokens().text;
+    let measure = RECT { left: left + lw, top: 0, right: area.right.max(left + lw), bottom: rh.saturating_mul(3) };
+    let spans: Vec<i32> = rows.iter().map(|(_, value)| card_row_span(wrap_text(dc, measure, value, font, ink, true).1, rh, pad)).collect();
+    let stack = spans.iter().fold(0i32, |n, h| n.saturating_add(*h));
+    let saved = SaveDC(dc);
+    let _ = IntersectClipRect(dc, area.left, area.top, area.right, area.bottom);
     if let Some(p) = icon {
         let k = (side as f32 / p.w.max(p.h) as f32).min(1.0);
         let (dw, dh) = ((p.w as f32 * k) as i32, (p.h as f32 * k) as i32);
-        let (x, y) = (x0 + (side - dw) / 2, area.top + (area.bottom - area.top - dh) / 2);
+        let (x, y) = (x0 + (side - dw) / 2, area.top + ((area.bottom - area.top) - dh).max(0) / 2);
         blit_bgra(dc, RECT { left: x, top: y, right: x + dw, bottom: y + dh }, p.w, p.h, &p.bgra);
     }
-    let left = x0 + side + s(32);
-    let rh = app(|a| a.fh) + s(8);
-    let mut y = area.top + ((area.bottom - area.top) - rh * rows.len() as i32).max(0) / 2;
-    let ink = ui_tokens().text;
-    for (label, value) in rows {
+    let mut y = card_stack_top(area.top, (area.bottom - area.top).max(0), stack);
+    for ((label, value), span) in rows.iter().zip(spans) {
         paint_meta(dc, RECT { left, top: y, right: left + lw, bottom: y + rh }, label, font);
-        let v = RECT { left: left + lw, top: y + s(4), right: area.right, bottom: y + rh * 3 };
-        let (_, th) = wrap_text(dc, v, value, font, ink, true);
+        let v = RECT { left: left + lw, top: y + s(4), right: area.right, bottom: y + span };
         wrap_text_ellipsis(dc, v, value, font, ink, false);
-        y += th.clamp(rh - s(8), rh * 3 - s(8)) + s(8);
+        y += span;
+    }
+    if saved != 0 {
+        let _ = RestoreDC(dc, saved);
     }
 }
 
@@ -2526,6 +2575,9 @@ fn chrome_visual(which: Hot, hot: Hot, down: Hot) -> ButtonVisual {
 }
 
 pub(crate) unsafe fn paint_peek(h: HWND) {
+    // Place the video child before BeginPaint so it is not still covering the header
+    // when WS_CLIPCHILDREN clips this paint.
+    place_media(h);
     let (dpi, name, ilist, accent) = app(|a| (a.dpi, a.peek_name.clone(), a.ilist.clone(), a.s.accent_now()));
     let (hosted, hover, hot, down, maximized, zoom) = view(|v| (v.hosted, v.hover, v.hot, v.btn_down, v.maximized, zoom_or_fit(v.zoom)));
     let font = body_font();
@@ -3065,8 +3117,20 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 _ = KillTimer(Some(h), TIMER_PEEK_ZOOM);
                 request_pdf_zoom(h);
             }
-            WM_TIMER if wp.0 == super::media::TIMER_MEDIA => super::media::tick(h),
-            super::media::WM_MEDIA => super::media::on_posted(h),
+            WM_TIMER if wp.0 == super::media::TIMER_MEDIA => {
+                super::media::tick(h);
+                if super::media::take_relayout(h) {
+                    place_media(h);
+                    super::media::repaint_header(h);
+                }
+            }
+            super::media::WM_MEDIA => {
+                super::media::on_posted(h);
+                if super::media::take_relayout(h) {
+                    place_media(h);
+                    super::media::repaint_header(h);
+                }
+            }
             WM_PEEK_ZOOM => {
                 // Pixels only. Fitting the window here would fight a size the user already set.
                 if peek_job().gen == wp.0 {
@@ -3833,6 +3897,27 @@ mod tests {
             assert!(!in_header(window, &g, g.max.left + 2, g.max.top + 2, peek_grip(dpi)));
             assert!(!in_header(window, &g, 2, g.title.top + 8, peek_grip(dpi)));
         }
+    }
+
+    #[test]
+    fn audio_card_rows_sit_above_the_transport() {
+        let dpi = 96;
+        let fh = 16;
+        let rows = 8;
+        let window = audio_peek_height(rows, dpi, fh, 4000);
+        let stage = window - peek_chrome(dpi, false).h;
+        let transport = crate::pane::media::transport_height(dpi);
+        let inset = 12;
+        let room = stage - transport - inset;
+        let row_h = fh + 8;
+        let text = row_h * rows + row_h * 2;
+        assert!(room >= text, "room {room} is shorter than the property stack {text}");
+        assert_eq!(card_stack_top(10, room, text), 10);
+        assert_eq!(card_stack_top(4, 80, 40), 24);
+        assert_eq!(card_stack_top(4, 40, 80), 4);
+        assert_eq!(card_row_span(10, 24, 8), 24);
+        assert_eq!(card_row_span(20, 24, 8), 28);
+        assert_eq!(card_row_span(100, 24, 8), 72);
     }
 
     #[test]

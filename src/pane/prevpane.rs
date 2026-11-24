@@ -1087,8 +1087,20 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 sync_host(h);
                 place_media(h);
             }
-            WM_TIMER if wp.0 == super::media::TIMER_MEDIA => super::media::tick(h),
-            super::media::WM_MEDIA => super::media::on_posted(h),
+            WM_TIMER if wp.0 == super::media::TIMER_MEDIA => {
+                super::media::tick(h);
+                if super::media::take_relayout(h) {
+                    place_media(h);
+                    super::media::repaint_header(h);
+                }
+            }
+            super::media::WM_MEDIA => {
+                super::media::on_posted(h);
+                if super::media::take_relayout(h) {
+                    place_media(h);
+                    super::media::repaint_header(h);
+                }
+            }
             WM_MOUSEACTIVATE => {
                 if let Some(slot) = slots().get_mut(&key_of(h)) {
                     slot.return_focus = false;
@@ -1270,6 +1282,9 @@ unsafe fn hover_btn(h: HWND, x: i32, y: i32) {
 }
 
 unsafe fn paint_preview(h: HWND) {
+    // Move or hide the video child before BeginPaint. WS_CLIPCHILDREN would otherwise
+    // skip header lines the child still covers, and SWP_NOREDRAW would not ask for another paint.
+    place_media(h);
     let key = key_of(h);
     let (font, dpi, fh, accent, ilist) = app(|a| (a.font, a.dpi, a.fh, a.s.accent_now(), a.ilist.clone()));
     let mut sync = false;
@@ -1357,7 +1372,11 @@ unsafe fn paint_preview(h: HWND) {
             let (content, bar) = super::media::split_content(area, dpi);
             if super::media::has_video(h) {
                 fill(dc, content, pal().bg);
-                super::media::queue_place(h, content);
+                // Opening still has a one-line header. Showing the child now covers the
+                // lines that arrive with the file facts, and the clip never paints them.
+                if slot.kind == Kind::Shown {
+                    super::media::queue_place(h, super::media::below_header(y, content));
+                }
             } else {
                 match slot.body.as_ref() {
                     Some(Body::Card { icon, rows }) => paint_card(dc, content, icon.as_ref(), rows, font, dpi),
@@ -1401,15 +1420,24 @@ unsafe fn paint_preview(h: HWND) {
     }
 }
 
-/// Video child follows the area under the attribute header. Called on size, outside the paint borrow.
+/// Video child follows the area under the attribute header. Called on size, and before a paint.
 unsafe fn place_media(h: HWND) {
     if !super::media::has_video(h) {
         return;
     }
+    // Facts (type, size, dimensions, duration) arrive after the player starts.
+    // Until they do, the header is only the file name. Keep the child hidden so it
+    // cannot cover the lines that are about to be added.
+    let ready = slots().get(&key_of(h)).is_some_and(|s| s.kind == Kind::Shown);
+    if !ready {
+        super::media::hide_video(h);
+        return;
+    }
     place_head(h);
     let dpi = app(|a| a.dpi);
+    let head = slots().get(&key_of(h)).map(|s| s.head_h).unwrap_or(0);
     let (content, _) = super::media::split_content(body_rect(h), dpi);
-    super::media::queue_place(h, content);
+    super::media::queue_place(h, super::media::below_header(head, content));
     super::media::apply_place(h);
 }
 
