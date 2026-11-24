@@ -1718,7 +1718,7 @@ mod tests {
     use super::*;
 
     fn sample_mail(name: &str) -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/mail").join(name)
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mail").join(name)
     }
 
     #[test]

@@ -1659,7 +1659,8 @@ mod tests {
     fn video_child_is_on_screen_before_playback() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
-            let sample = r"C:\WORK\CARGO_TARGET\itemdlg-design\f3-media\samples\video-portrait.mp4";
+            let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/video-portrait.mp4");
+            let sample = sample_path.to_str().unwrap();
             assert!(std::path::Path::new(sample).is_file(), "missing {sample}");
             let probe = test_host();
             let Ok(module) = GetModuleHandleW(None) else { return };

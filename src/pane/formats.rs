@@ -2333,7 +2333,7 @@ mod tests {
     }
 
     fn sample_image(name: &str) -> Vec<u8> {
-        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/images").join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/images").join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
     }
 
     /// gradient.dds is 32×24, so a fit that refuses to scale up leaves it a speck. The 256² files must decode whole.
@@ -2421,7 +2421,7 @@ mod tests {
     }
 
     fn sample_mail(name: &str) -> Vec<u8> {
-        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/mail").join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mail").join(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
     }
 
     #[test]
@@ -2530,7 +2530,7 @@ mod tests {
     #[test]
     fn outlook_msg_sample_has_unicode_ansi_recipients_and_an_attachment() {
         let bytes = outlook_cfb();
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/mail/outlook.msg");
+        let path = std::env::temp_dir().join("maguro-test-outlook.msg");
         std::fs::write(&path, &bytes).unwrap();
         let read = std::fs::read(&path).unwrap();
         assert_eq!(read, bytes);
