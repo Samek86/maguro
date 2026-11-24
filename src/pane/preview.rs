@@ -3,6 +3,7 @@ use crate::ui::*;
 use crate::session::*;
 use crate::i18n::*;
 use super::docparse::*;
+use super::formats::*;
 use super::peek::{fix_alpha, PeekReq, Pix};
 use windows::Win32::Storage::EnhancedStorage::*;
 use windows::Win32::Storage::FileSystem::{FileTimeToLocalFileTime, GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, FILE_FLAGS_AND_ATTRIBUTES};
@@ -31,9 +32,17 @@ pub(crate) enum Body {
     Pages { pages: Vec<Pix>, total: u32 }, // PDF pages as pictures, the rest added while they render
     Text { text: String, kind: TextKind, cut: bool },
     Table { rows: Vec<Vec<String>>, cut: bool },
-    List { head: String, rows: Vec<(String, String)> }, // folder or archive contents: name, size
-    Handler(GUID),                                       // a Windows preview handler shows it (on the UI thread)
+    List { head: String, rows: Vec<ListItem> }, // folder or archive contents
+    Handler(GUID),                              // a Windows preview handler shows it (on the UI thread)
     Card { icon: Option<Pix>, rows: Vec<(String, String)> },
+}
+
+/// One row of a folder or archive listing. `date` is empty when the source has none; the list hides that column then.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListItem {
+    pub(crate) name: String,
+    pub(crate) size: String,
+    pub(crate) date: String,
 }
 
 const TEXT_MAX: usize = 512 * 1024;
@@ -49,8 +58,8 @@ const PICS: &[&str] = &[
 // information view when Media Foundation and the handler fallback both decline.
 // shown by the Windows preview handler when there is one (Office, Outlook, the browser engine, fonts, a PDF reader)
 const HANDLED: &[&str] = &[
-    "doc", "docx", "docm", "dot", "dotx", "rtf", "odt", "xls", "xlsx", "xlsm", "xlsb", "ods", "ppt", "pptx", "pptm", "pps", "ppsx",
-    "odp", "vsd", "vsdx", "msg", "html", "htm", "mht", "mhtml", "xps", "oxps", "ttf", "otf", "ttc", "fon",
+    "doc", "docx", "docm", "dot", "dotx", "xls", "xlsx", "xlsm", "xlsb", "ppt", "pptx", "pptm", "pps", "ppsx",
+    "odp", "vsd", "vsdx", "html", "htm", "mht", "mhtml", "xps", "oxps", "ttf", "otf", "ttc", "fon",
 ];
 const CODE: &[&str] = &[
     "json", "jsonc", "json5", "ndjson", "geojson", "xml", "xaml", "xsd", "xsl", "xslt", "plist", "yaml", "yml", "toml", "ini", "cfg", "conf",
@@ -61,7 +70,7 @@ const CODE: &[&str] = &[
     "ahk", "au3", "nsi", "iss", "csproj", "vcxproj", "sln", "props", "targets", "manifest", "rc", "def", "proto", "graphql", "tf", "hcl",
 ];
 const PLAIN: &[&str] = &["txt", "text", "log", "nfo", "srt", "vtt", "ass", "sub", "lrc", "me", "readme", "1st", "asc", "out", "err"];
-const ZIPS: &[&str] = &["zip", "jar", "war", "apk", "aab", "nupkg", "vsix", "whl", "xpi", "crx", "appx", "msix", "kmz", "epub", "cbz", "3mf", "sketch"];
+const ZIPS: &[&str] = &["zip", "jar", "war", "apk", "aab", "nupkg", "vsix", "whl", "xpi", "crx", "appx", "msix", "kmz", "cbz", "3mf", "sketch"];
 const OFFICE_ZIP: &[&str] = &["docx", "docm", "dotx", "xlsx", "xlsm", "xltx", "pptx", "pptm", "ppsx", "potx", "odt", "ods", "odp"];
 const PROGRAMS: &[&str] = &["exe", "dll", "sys", "ocx", "cpl", "scr", "msi", "mui", "drv", "efi"];
 
@@ -87,7 +96,10 @@ pub(crate) fn maguro_owns(ext: &str) -> bool {
     }
     matches!(
         ext,
-        "svg" | "pdf" | "csv" | "tsv" | "md" | "markdown" | "mdown" | "mkd" | "eml" | "hwp" | "hwpx" | "hwpt" | "psd" | "psb" | "url" | "website" | "lnk" | "xhtml"
+        "svg" | "pdf" | "csv" | "tsv" | "md" | "markdown" | "mdown" | "mkd"
+            | "rtf" | "epub" | "eml" | "msg"
+            | "tar" | "tgz" | "gz" | "cab"
+            | "hwp" | "hwpx" | "hwpt" | "psd" | "psb" | "url" | "website" | "lnk" | "xhtml"
     )
 }
 
@@ -286,7 +298,8 @@ pub(crate) unsafe fn content(req: &PeekReq) -> Body {
         }
         return card(path, &[]);
     }
-    let heavy = HANDLED.contains(&e) || OFFICE_ZIP.contains(&e) || matches!(e, "pdf" | "eml" | "hwp" | "hwpx" | "hwpt" | "psd" | "psb");
+    // Parsed mail, RTF and EPUB are drawn here, so a huge file gets the card instead of a long read.
+    let heavy = HANDLED.contains(&e) || OFFICE_ZIP.contains(&e) || matches!(e, "pdf" | "eml" | "msg" | "rtf" | "epub" | "hwp" | "hwpx" | "hwpt" | "psd" | "psb");
     if heavy && len > HEAVY_MAX {
         let note = (tr(crate::Key::Preview).to_string(), tr(crate::Key::SkippedLargerThan10Mb).to_string());
         return card(path, &[note]);
@@ -303,9 +316,16 @@ pub(crate) unsafe fn content(req: &PeekReq) -> Body {
         "csv" | "tsv" => read_head(path, TEXT_MAX).filter(|(b, _)| looks_text(b)).map(|(b, cut)| {
             let text = decode_text(&b);
             let sep = if e == "tsv" { '\t' } else { csv_sep(&text) };
-            Body::Table { rows: csv_rows(&text, sep, 2000), cut }
+            Body::Table { rows: cap_columns(csv_rows(&text, sep, 2000)), cut }
         }),
         "md" | "markdown" | "mdown" | "mkd" => text_body(path, TextKind::Markdown),
+        "rtf" => read_head(path, 4 << 20).map(|(b, cut)| Body::Text { text: rtf_text(&b), kind: TextKind::Plain, cut }),
+        "epub" => epub_preview(path),
+        "msg" => msg_preview(path),
+        "tar" => tar_preview(path),
+        "tgz" => gzip_tar_preview(path),
+        "gz" => gz_preview(path),
+        "cab" => cab_preview(path),
         e if PLAIN.contains(&e) => text_body(path, TextKind::Plain),
         e if CODE.contains(&e) => text_body(path, TextKind::Code),
         // A registered handler is tried above. With none, or after it fails (`plain`), show the source.
@@ -384,9 +404,32 @@ pub(crate) unsafe fn bitmap_pix(bmp: HBITMAP) -> Option<Pix> {
 
 /// Picture bytes (PNG, JPEG, GIF, BMP ...) decoded by WIC, shrunk to fit w x h.
 pub(crate) unsafe fn decode_pic(bytes: &[u8], w: i32, h: i32) -> Option<Pix> {
+    if let Some((iw, ih, mut bgra)) = decode_dds(bytes).or_else(|| decode_ico(bytes)) {
+        fix_alpha(&mut bgra);
+        return Some(fit_bgra(iw, ih, bgra, w, h));
+    }
     let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
     let stream = SHCreateMemStream(Some(bytes))?;
-    let frame = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?.GetFrame(0).ok()?;
+    let decoder = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
+    let ico = bytes.len() > 4 && bytes[0] == 0 && bytes[1] == 0 && matches!(bytes[2], 1 | 2) && bytes[3] == 0;
+    let count = if ico { decoder.GetFrameCount().unwrap_or(1).clamp(1, 64) } else { 1 };
+    let mut best = 0u32;
+    let mut best_area = 0u64;
+    if count > 1 {
+        for i in 0..count {
+            if let Ok(frame) = decoder.GetFrame(i) {
+                let (mut sw, mut sh) = (0u32, 0u32);
+                if frame.GetSize(&mut sw, &mut sh).is_ok() {
+                    let area = sw as u64 * sh as u64;
+                    if area > best_area {
+                        best_area = area;
+                        best = i;
+                    }
+                }
+            }
+        }
+    }
+    let frame = decoder.GetFrame(best).ok()?;
     let (mut sw, mut sh) = (0u32, 0u32);
     frame.GetSize(&mut sw, &mut sh).ok()?;
     if sw == 0 || sh == 0 || sw > 16_384 || sh > 16_384 {
@@ -415,6 +458,34 @@ pub(crate) unsafe fn decode_pic(bytes: &[u8], w: i32, h: i32) -> Option<Pix> {
     let mut bgra = vec![0u8; nbytes];
     conv.CopyPixels(std::ptr::null(), stride, &mut bgra).ok()?;
     Some(Pix::new(dw as i32, dh as i32, bgra))
+}
+
+fn fit_bgra(sw: i32, sh: i32, src: Vec<u8>, max_w: i32, max_h: i32) -> Pix {
+    let sw = sw.max(1);
+    let sh = sh.max(1);
+    let k = (max_w.max(1) as f64 / sw as f64).min(max_h.max(1) as f64 / sh as f64).min(1.0);
+    if k > 0.99 {
+        return Pix::new(sw, sh, src);
+    }
+    let dw = ((sw as f64) * k).max(1.0) as usize;
+    let dh = ((sh as f64) * k).max(1.0) as usize;
+    let swu = sw as usize;
+    let shu = sh as usize;
+    let mut out = vec![0u8; dw * dh * 4];
+    for y in 0..dh {
+        let sy = ((y as f64) / k).round() as usize;
+        let sy = sy.min(shu - 1);
+        for x in 0..dw {
+            let sx = ((x as f64) / k).round() as usize;
+            let sx = sx.min(swu - 1);
+            let s = (sy * swu + sx) * 4;
+            let d = (y * dw + x) * 4;
+            if s + 4 <= src.len() {
+                out[d..d + 4].copy_from_slice(&src[s..s + 4]);
+            }
+        }
+    }
+    Pix::new(dw as i32, dh as i32, out)
 }
 
 // Photoshop keeps a small JPEG (image resource 1036) for file browsers.
@@ -947,7 +1018,12 @@ fn folder_list(path: &str) -> Body {
     let total: u64 = files.iter().map(|(_, s)| s).sum();
     let head = tf(crate::Key::FolderListHead, &[("dirs", &dirs.len().to_string()), ("files", &files.len().to_string()), ("size", &human(total))]);
     let folder = tr(crate::Key::Folder);
-    let rows = dirs.into_iter().map(|d| (d, folder.to_string())).chain(files.into_iter().map(|(n, s)| (n, human(s)))).take(2000).collect();
+    let rows = dirs
+        .into_iter()
+        .map(|d| ListItem { name: d, size: folder.to_string(), date: String::new() })
+        .chain(files.into_iter().map(|(n, s)| ListItem { name: n, size: human(s), date: String::new() }))
+        .take(2000)
+        .collect();
     Body::List { head, rows }
 }
 
@@ -957,7 +1033,10 @@ fn zip_list(path: &str) -> Option<Body> {
     let files: Vec<&ZipEntry> = es.iter().filter(|e| !e.is_dir()).collect();
     let total: u64 = files.iter().map(|e| e.size).sum();
     let head = tf(crate::Key::ZipListHead, &[("files", &files.len().to_string()), ("size", &human(total))]);
-    Some(Body::List { head, rows: files.iter().take(5000).map(|e| (e.name.clone(), human(e.size))).collect() })
+    Some(Body::List {
+        head,
+        rows: files.iter().take(5000).map(|e| ListItem { name: e.name.clone(), size: human(e.size), date: e.modified.clone() }).collect(),
+    })
 }
 
 // ---------- documents read without their programs ----------
@@ -978,6 +1057,17 @@ fn office_text(path: &str, ext: &str) -> Option<Body> {
             })?;
             let rows = xlsx_rows(&sheet, &strings, 2000, 60);
             return Some(Body::Table { rows, cut: false });
+        }
+        "odt" => {
+            let text = odt_text(&part("content.xml")?);
+            if text.is_empty() {
+                return None;
+            }
+            return Some(Body::Text { text, kind: TextKind::Document, cut: false });
+        }
+        "ods" => {
+            let sheets = ods_sheets(&part("content.xml")?, 2000, 64);
+            return ods_body(sheets);
         }
         "pptx" | "pptm" | "ppsx" | "potx" => {
             let mut slides: Vec<(usize, String)> = es
@@ -1216,9 +1306,12 @@ pub(crate) unsafe fn card(path: &str, extra: &[(String, String)]) -> Body {
 
 fn url_card(path: &str) -> Option<Body> {
     let (b, _) = read_head(path, 64 * 1024)?;
-    let text = decode_text(&b);
-    let url = text.lines().find_map(|l| l.trim().strip_prefix("URL=").map(str::to_string))?;
-    Some(unsafe { card(path, &[("URL".into(), url)]) })
+    let (url, icon) = url_fields(&decode_text(&b))?;
+    let mut rows = vec![(tr(crate::Key::PreviewUrl).into(), url)];
+    if let Some(icon) = icon {
+        rows.push((tr(crate::Key::PreviewIcon).into(), icon));
+    }
+    Some(unsafe { card(path, &rows) })
 }
 
 unsafe fn lnk_card(path: &str) -> Body {
@@ -1242,6 +1335,13 @@ unsafe fn lnk_card(path: &str) -> Body {
             buf[0] = 0;
             if link.GetDescription(&mut buf).is_ok() && buf[0] != 0 {
                 rows.push((tr(crate::Key::Comment).into(), s(&buf)));
+            }
+            buf[0] = 0;
+            let mut index = 0i32;
+            if link.GetIconLocation(&mut buf, &mut index).is_ok() && buf[0] != 0 {
+                let icon = s(&buf);
+                let value = if index == 0 { icon } else { format!("{icon}, {index}") };
+                rows.push((tr(crate::Key::PreviewIcon).into(), value));
             }
         }
     }
@@ -1288,16 +1388,377 @@ pub(crate) unsafe fn version_rows(path: &str) -> Vec<(String, String)> {
     rows
 }
 
+fn ods_body(sheets: Vec<Sheet>) -> Option<Body> {
+    let sheets: Vec<Sheet> = sheets.into_iter().filter(|s| !s.rows.is_empty()).collect();
+    if sheets.is_empty() {
+        return None;
+    }
+    let cut = sheets.iter().any(|s| s.cut);
+    if sheets.len() == 1 {
+        return Some(Body::Table { rows: sheets.into_iter().next()?.rows, cut });
+    }
+    let mut out = String::new();
+    for s in &sheets {
+        if !s.name.is_empty() {
+            out.push_str(&s.name);
+            out.push('\n');
+        }
+        for row in &s.rows {
+            let cells: Vec<String> = row.iter().map(|c| grid_cell_shown(c).replace('|', " ")).collect();
+            out.push_str("| ");
+            out.push_str(&cells.join(" | "));
+            out.push_str(" |\n");
+        }
+        out.push('\n');
+    }
+    Some(Body::Text { text: out.trim().to_string(), kind: TextKind::Document, cut })
+}
+
+fn epub_preview(path: &str) -> Option<Body> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let (plan, body, cut) = epub_body(&mut f, TEXT_MAX)?;
+    let mut text = String::new();
+    if !plan.title.is_empty() {
+        text.push_str(&format!("{}: {}\n", tr(crate::Key::PropTitle), plan.title));
+    }
+    if !plan.author.is_empty() {
+        text.push_str(&format!("{}: {}\n", tr(crate::Key::PropAuthor), plan.author));
+    }
+    if !text.is_empty() && !body.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(&body);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(Body::Text { text, kind: TextKind::Plain, cut })
+}
+
+fn msg_preview(path: &str) -> Option<Body> {
+    let streams = msg_file_streams(path)?;
+    let parts = msg_parts(&streams);
+    if parts.subject.is_empty() && parts.from.is_empty() && parts.to.is_empty() && parts.body.is_empty() && parts.files.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for (label, value) in [
+        (crate::Key::EmlSubject, parts.subject.as_str()),
+        (crate::Key::EmlFrom, parts.from.as_str()),
+        (crate::Key::EmlTo, parts.to.as_str()),
+        (crate::Key::EmlCc, parts.cc.as_str()),
+        (crate::Key::EmlDate, parts.date.as_str()),
+    ] {
+        if !value.is_empty() {
+            out.push_str(&format!("{}: {value}\n", tr(label)));
+        }
+    }
+    if !parts.files.is_empty() {
+        out.push_str(&format!("{}: {}\n", tr(crate::Key::EmlAttachments), parts.files.join(", ")));
+    }
+    out.push('\n');
+    out.push_str(&parts.body);
+    Some(Body::Text { text: out, kind: TextKind::Plain, cut: false })
+}
+
+fn msg_file_streams(path: &str) -> Option<Vec<(String, Vec<u8>)>> {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Some(streams) = cfb_streams(&bytes) {
+            if !streams.is_empty() {
+                return Some(streams);
+            }
+        }
+    }
+    unsafe { msg_streams(path) }
+}
+
+unsafe fn msg_streams(path: &str) -> Option<Vec<(String, Vec<u8>)>> {
+    let stg = open_storage(path)?;
+    let mut out = Vec::new();
+    collect_streams(&stg, "", &mut out, 0);
+    (!out.is_empty()).then_some(out)
+}
+
+unsafe fn open_storage(path: &str) -> Option<IStorage> {
+    let name = HSTRING::from(path);
+    for mode in [STGM_READ | STGM_SHARE_DENY_WRITE, STGM_READ | STGM_SHARE_DENY_NONE] {
+        let mut p: *mut std::ffi::c_void = std::ptr::null_mut();
+        if StgOpenStorageEx(&name, mode, STGFMT_STORAGE, 0, None, None, &IStorage::IID, &mut p).is_ok() && !p.is_null() {
+            return Some(IStorage::from_raw(p));
+        }
+    }
+    None
+}
+
+unsafe fn collect_streams(stg: &IStorage, prefix: &str, out: &mut Vec<(String, Vec<u8>)>, depth: u32) {
+    if depth > 3 || out.len() > 400 {
+        return;
+    }
+    let Ok(en) = stg.EnumElements(None, None, None) else { return };
+    loop {
+        let mut stat: STATSTG = std::mem::zeroed();
+        let mut got = [stat];
+        let mut n = 0u32;
+        if en.Next(&mut got, Some(&mut n)).is_err() || n == 0 {
+            break;
+        }
+        stat = got[0];
+        let name = stat_name(&stat);
+        if !stat.pwcsName.0.is_null() {
+            CoTaskMemFree(Some(stat.pwcsName.0 as _));
+        }
+        if name.is_empty() {
+            continue;
+        }
+        let full = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        if stat.r#type == STGTY_STREAM.0 as u32 {
+            if let Some(bytes) = read_storage_stream(stg, &name) {
+                out.push((full, bytes));
+            }
+        } else if stat.r#type == STGTY_STORAGE.0 as u32 && {
+            let lower = name.to_ascii_lowercase();
+            lower.contains("attach") || lower.contains("recip")
+        } {
+            if let Ok(child) = stg.OpenStorage(&HSTRING::from(&name), None, STGM_READ | STGM_SHARE_EXCLUSIVE, std::ptr::null(), 0) {
+                collect_streams(&child, &full, out, depth + 1);
+            }
+        }
+    }
+}
+
+unsafe fn stat_name(stat: &STATSTG) -> String {
+    if stat.pwcsName.0.is_null() {
+        return String::new();
+    }
+    let mut n = 0usize;
+    while n < 1024 && *stat.pwcsName.0.add(n) != 0 {
+        n += 1;
+    }
+    String::from_utf16_lossy(std::slice::from_raw_parts(stat.pwcsName.0, n))
+}
+
+unsafe fn read_storage_stream(stg: &IStorage, name: &str) -> Option<Vec<u8>> {
+    let st = stg
+        .OpenStream(&HSTRING::from(name), None, STGM_READ | STGM_SHARE_EXCLUSIVE, 0)
+        .or_else(|_| stg.OpenStream(&HSTRING::from(name), None, STGM_READ | STGM_SHARE_DENY_NONE, 0))
+        .ok()?;
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let mut n = 0u32;
+        if st.Read(buf.as_mut_ptr() as _, buf.len() as u32, Some(&mut n)).is_err() || n == 0 || out.len() >= 2 << 20 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn tar_preview(path: &str) -> Option<Body> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let (entries, cut) = tar_entries(&mut f, 5000)?;
+    Some(archive_list(entries, cut))
+}
+
+fn gzip_tar_preview(path: &str) -> Option<Body> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = vec![0u8; 65_536.min(f.metadata().ok()?.len() as usize)];
+    f.read_exact(&mut head).ok()?;
+    let meta = gzip_meta(&head)?;
+    f.seek(SeekFrom::Start(meta.data_at as u64)).ok()?;
+    let mut inf = CapInflate::new(f, 32 << 20);
+    let (entries, mut cut) = tar_entries_read(&mut inf, 5000, 32 << 20)?;
+    cut |= inf.hit_cap();
+    Some(archive_list(entries, cut))
+}
+
+fn gz_preview(path: &str) -> Option<Body> {
+    use std::io::{Read, Seek, SeekFrom};
+    let name = file_name(path);
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        return gzip_tar_preview(path);
+    }
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut head = vec![0u8; 65_536.min(len as usize)];
+    f.read_exact(&mut head).ok()?;
+    let meta = gzip_meta(&head)?;
+    if meta.name.to_ascii_lowercase().ends_with(".tar") {
+        return gzip_tar_preview(path);
+    }
+    let mut size = 0u64;
+    if len >= 4 {
+        f.seek(SeekFrom::End(-4)).ok()?;
+        let mut b = [0u8; 4];
+        if f.read_exact(&mut b).is_ok() {
+            size = gzip_isize(&b).unwrap_or(0) as u64;
+        }
+    }
+    let shown = if meta.name.is_empty() { gz_stem(&name) } else { meta.name };
+    let date = if meta.mtime == 0 { String::new() } else { unix_when(meta.mtime as u64) };
+    let summary = tf(crate::Key::ZipListHead, &[("files", "1"), ("size", &human(size))]);
+    let head = format!("{} — {summary}", tr(crate::Key::PreviewOriginal));
+    let rows = vec![ListItem { name: shown, size: human(size), date }];
+    Some(Body::List { head, rows })
+}
+
+fn gz_stem(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    match lower.strip_suffix(".gz") {
+        Some(rest) => name[..rest.len()].to_string(),
+        None => name.to_string(),
+    }
+}
+
+fn archive_list(entries: Vec<TarEntry>, cut: bool) -> Body {
+    let files = entries.iter().filter(|e| !e.dir).count();
+    let total: u64 = entries.iter().filter(|e| !e.dir).map(|e| e.size).sum();
+    let head = tf(crate::Key::ZipListHead, &[("files", &files.to_string()), ("size", &human(total))]);
+    let mut rows: Vec<ListItem> = entries
+        .into_iter()
+        .take(5000)
+        .map(|e| ListItem {
+            name: e.name,
+            size: if e.dir { tr(crate::Key::Folder).into() } else { human(e.size) },
+            date: e.modified,
+        })
+        .collect();
+    if cut {
+        rows.push(ListItem { name: tr(crate::Key::MoreRowsNotShown).into(), size: String::new(), date: String::new() });
+    }
+    Body::List { head, rows }
+}
+
+fn cab_preview(path: &str) -> Option<Body> {
+    let (rows, cut) = unsafe { cab_files(path) }?;
+    let files = rows.len();
+    let head = tf(crate::Key::ZipListHead, &[("files", &files.to_string()), ("size", "")]);
+    let mut rows = rows;
+    if cut {
+        rows.push(ListItem { name: tr(crate::Key::MoreRowsNotShown).into(), size: String::new(), date: String::new() });
+    }
+    Some(Body::List { head, rows })
+}
+
+#[repr(C)]
+struct FileInCab {
+    name: PCWSTR,
+    size: u32,
+    error: u32,
+    dos_date: u16,
+    dos_time: u16,
+    attribs: u16,
+    full: [u16; 260],
+}
+
+struct CabBag {
+    rows: Vec<ListItem>,
+    cut: bool,
+}
+
+unsafe extern "system" fn cab_cb(ctx: *mut std::ffi::c_void, note: u32, p1: usize, _p2: usize) -> u32 {
+    const INFO: u32 = 0x10;
+    const FILE: u32 = 0x11;
+    const SKIP: u32 = 2;
+    if note == INFO {
+        return 0;
+    }
+    if note != FILE || ctx.is_null() || p1 == 0 {
+        return SKIP;
+    }
+    let bag = &mut *(ctx as *mut CabBag);
+    if bag.rows.len() >= 5000 {
+        bag.cut = true;
+        return SKIP;
+    }
+    let info = &*(p1 as *const FileInCab);
+    let name = wide_z(info.name.0);
+    if !name.is_empty() {
+        bag.rows.push(ListItem { name, size: human(info.size as u64), date: dos_when(info.dos_date, info.dos_time) });
+    }
+    SKIP
+}
+
+fn wide_z(p: *const u16) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe {
+        let mut n = 0usize;
+        while n < 4096 && *p.add(n) != 0 {
+            n += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+    }
+}
+
+#[link(name = "setupapi")]
+extern "system" {
+    fn SetupIterateCabinetW(
+        file: PCWSTR,
+        reserved: u32,
+        handler: Option<unsafe extern "system" fn(*mut std::ffi::c_void, u32, usize, usize) -> u32>,
+        ctx: *mut std::ffi::c_void,
+    ) -> i32;
+}
+
+unsafe fn cab_files(path: &str) -> Option<(Vec<ListItem>, bool)> {
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut bag = CabBag { rows: Vec::new(), cut: false };
+    let ok = SetupIterateCabinetW(PCWSTR(wide.as_ptr()), 0, Some(cab_cb), &mut bag as *mut _ as *mut _);
+    if ok == 0 && bag.rows.is_empty() {
+        return None;
+    }
+    Some((bag.rows, bag.cut))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_mail(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../samples/mail").join(name)
+    }
+
+    #[test]
+    fn harbor_msg_sample_is_unicode_and_hello_msg_sample_is_ansi() {
+        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        let read = |name: &str| {
+            let path = sample_mail(name);
+            let streams = msg_file_streams(path.to_str().unwrap()).unwrap_or_else(|| panic!("no streams in {}", path.display()));
+            msg_parts(&streams)
+        };
+        let harbor = read("harbor.msg");
+        assert_eq!(harbor.subject, "Harbor invoice");
+        assert_eq!(harbor.from, "Kim <kim@example.com>");
+        assert_eq!(harbor.to, "Lee");
+        assert_eq!(harbor.date, "2023-11-14 22:13 UTC");
+        assert_eq!(harbor.body, "Please pay the attached invoice.");
+        assert_eq!(harbor.files, vec!["bolts.pdf".to_string()]);
+        let hello = read("hello.msg");
+        assert_eq!(hello.subject, "Hello");
+        assert_eq!(hello.from, "Ada <ada@example.com>");
+        assert_eq!(hello.to, "Bao");
+        assert_eq!(hello.body, "Hello from Ada.");
+        assert_eq!(hello.files, vec!["notes.txt".to_string()]);
+        if com.is_ok() {
+            unsafe { CoUninitialize() };
+        }
+    }
 
     #[test]
     fn shell_handler_skips_types_maguro_draws() {
         assert!(maguro_owns("png") && maguro_owns("svg") && maguro_owns("txt") && maguro_owns("rs"));
         assert!(maguro_owns("pdf") && maguro_owns("docx") && maguro_owns("xlsx") && maguro_owns("pptx"));
         assert!(maguro_owns("md") && !maguro_owns("mp4") && !maguro_owns("mp3") && !maguro_owns("wav"));
-        assert!(!maguro_owns("html") && !maguro_owns("dwg") && !maguro_owns("msg") && !maguro_owns("ttf"));
+        assert!(!maguro_owns("html") && !maguro_owns("dwg") && !maguro_owns("ttf"));
+        // Formats this branch draws stay on Maguro in both views. Audio and video stay off this list
+        // so Media Foundation is tried first. msg is drawn here, not handed to Outlook.
+        for ext in ["rtf", "epub", "eml", "msg", "tar", "tgz", "gz", "cab", "webp", "heic", "avif", "ico", "dds", "lnk", "url"] {
+            assert!(maguro_owns(ext), "{ext}");
+            assert!(!want_shell_handler(ext, 100, false, true), "{ext}");
+        }
         assert!(!want_shell_handler("png", 100, false, true));
         assert!(!want_shell_handler("mp4", 100, false, true));
         assert!(!want_shell_handler("mp3", 100, false, true));

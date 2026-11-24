@@ -1214,7 +1214,7 @@ unsafe fn open_row(h: HWND, x: i32, y: i32) {
         let Some(Body::List { rows, .. }) = slot.body.as_ref() else { return };
         let rh = row_h(fh, dpi);
         let Some(i) = list_row_at(slot.scroll.y, slot.hit.body.top, y, rh, rows.len()) else { return };
-        let name = rows[i].0.clone();
+        let name = rows[i].name.clone();
         join_child(&slot.path, &name)
     };
     let Some(path) = jump else { return };
@@ -1748,6 +1748,7 @@ unsafe fn paint_folder_head(dc: HDC, rc: RECT, slot: &mut Slot, font: HFONT, dpi
     (bottom, pad)
 }
 
+/// Same letterbox as Quick Look ([`image_fit_px`]): up or down, aspect kept. Zoom is a multiple of that fit.
 unsafe fn paint_fit(dc: HDC, area: RECT, p: &Pix, zoom: f64, scroll: &mut BodyScroll) {
     let bw = (area.right - area.left).max(1);
     let bh = (area.bottom - area.top).max(1);
@@ -1781,13 +1782,18 @@ unsafe fn paint_pages(scroll: &mut BodyScroll, dc: HDC, area: RECT, pages: &[Pix
         y += s(28);
     }
     pview::clamp_scroll(scroll, y, (area.bottom - area.top).max(0));
+    let widest = boxes.iter().map(|(_, w, _)| *w).max().unwrap_or(0);
+    scroll.page_w = width.max(1);
+    scroll.max_x = (widest - width).max(0);
+    scroll.x = scroll.x.clamp(0, scroll.max_x);
     let sy = scroll.y;
+    let sx = scroll.x;
     for (p, (top, w, h)) in pages.iter().zip(boxes.iter().copied()) {
         let top = area.top + top - sy;
         if top + h < area.top || top > area.bottom {
             continue;
         }
-        let x = area.left + (width - w) / 2;
+        let x = if w <= width { area.left + (width - w) / 2 } else { area.left - sx };
         blit_bgra(dc, RECT { left: x, top, right: x + w, bottom: top + h }, p.w, p.h, &p.bgra);
         frame(dc, RECT { left: x - 1, top: top - 1, right: x + w + 1, bottom: top + h + 1 }, 1, pal().line);
     }
@@ -1841,7 +1847,7 @@ fn preview_host_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
 #[cfg(test)]
 mod tests {
     use super::{band, cap_lines, folder_block_facts, folder_chrome, slot_head_height, Kind, Slot, Total};
-    use crate::pane::preview::{Body, TextKind};
+    use crate::pane::preview::{Body, ListItem, TextKind};
 
     #[test]
     fn header_caps_extra_lines() {
@@ -1871,7 +1877,7 @@ mod tests {
         folder.facts.extra = "2 folders, 10 files, 1.2 MB".into();
         folder.facts.modified = "Modified 2026-11-01".into();
         folder.facts.created = "Created 2026-01-01".into();
-        folder.body = Some(Body::List { head: "2 folders, 10 files, 1.2 MB".into(), rows: vec![("a.jpg".into(), "1 KB".into())] });
+        folder.body = Some(Body::List { head: "2 folders, 10 files, 1.2 MB".into(), rows: vec![ListItem { name: "a.jpg".into(), size: "1 KB".into(), date: String::new() }] });
         folder.total = Total::Pending;
         let facts = folder_block_facts(&folder);
         assert_eq!(

@@ -1992,6 +1992,7 @@ unsafe fn handler_ready(h: HWND, gen: usize, ok: bool) {
 }
 
 // Text, tables and lists live in pview so the preview pane paints the same bodies.
+#[cfg(test)]
 pub(crate) use super::pview::{md_lines, Style};
 
 // ---------- scrollbar ----------
@@ -2291,11 +2292,10 @@ unsafe fn step_by_wheel(raw: i32) {
 }
 
 // ---------- zoom (images and PDF pages) ----------
-// Stored as a multiple of the fit size: 1.0 draws what the preview drew before zoom existed
-// (an image letterboxed in the stage, never enlarged; a PDF page fitted to the stage width,
-// stacked from the top). The header shows that multiple — "150%" is 1.5× fit, and the wheel
-// range is 10%..800%. It is not a percent of the file's pixels: the bitmap is already a fitted
-// render, and a PDF re-render would make a bitmap-pixel percent jump.
+// Stored as a multiple of the fit size: 1.0 letterboxes the picture in the stage (scaled up or
+// down, aspect kept) or fits a PDF page to the stage width, stacked from the top. The header
+// shows that multiple — "150%" is 1.5× fit, and the wheel range is 10%..800%. It is not a
+// percent of the file's pixels.
 
 pub(crate) const ZOOM_MIN: f64 = 0.10;
 pub(crate) const ZOOM_MAX: f64 = 8.0;
@@ -2381,13 +2381,18 @@ pub(crate) fn scaled(n: i32, zoom: f64) -> i32 {
     ((n as f64) * z).round().max(1.0) as i32
 }
 
-/// Fit an image into the stage the way paint used to: letterboxed, never enlarged.
+/// Letterbox the picture in the stage. Scales up and down and keeps the aspect ratio.
+///
+/// DDS and ICO are decoded at their own pixel size. A JPEG is often already resampled to the
+/// request, so a cap at 1 left a 32×24 DDS as a speck while a large photo filled the pane.
 pub(crate) fn image_fit_px(nat_w: i32, nat_h: i32, stage_w: i32, stage_h: i32) -> (i32, i32) {
     if nat_w <= 0 || nat_h <= 0 || stage_w <= 0 || stage_h <= 0 {
         return (0, 0);
     }
-    let k = (stage_w as f32 / nat_w as f32).min(stage_h as f32 / nat_h as f32).min(1.0);
-    ((nat_w as f32 * k) as i32, (nat_h as f32 * k) as i32)
+    let k = (stage_w as f64 / nat_w as f64).min(stage_h as f64 / nat_h as f64);
+    let w = ((nat_w as f64) * k).round().max(1.0) as i32;
+    let h = ((nat_h as f64) * k).round().max(1.0) as i32;
+    (w, h)
 }
 
 /// Fit one PDF page to the stage width, but never wider than its fit-render. Zoom 1 matches paint_pages.
@@ -2947,7 +2952,7 @@ pub(crate) unsafe fn paint_peek(h: HWND) {
         let (zfont, zowned) = super::pview::font_at_zoom(font, zoom);
         match j.done.as_ref().map(|p| &p.body) {
             Some(Body::Pic(p)) => {
-                // Fit letterboxes and never enlarges. Zoom is a multiple of that; at 1.0 the rect matches the old one.
+                // Fit letterboxes, scaling up or down. Zoom is a multiple of that; at 1.0 the rect is the fit.
                 let st = g.stage;
                 let (vw, vh) = ((st.right - st.left).max(0), (st.bottom - st.top).max(0));
                 let (nw, nh) = p.lay();
@@ -3096,7 +3101,8 @@ unsafe fn bars_now(h: HWND) -> (Option<BarNow>, Option<BarNow>) {
     let stage = geo_of(h).stage;
     view(|v| {
         let show_v = v.max_y > 0 && v.page_h > 0;
-        let show_h = !is_fit(v.zoom) && v.max_x > 0 && v.page_w > 0;
+        // Pictures grow this bar only while zoomed (fit keeps max_x at 0). Tables and long lines set it too.
+        let show_h = v.max_x > 0 && v.page_w > 0;
         let (vr, hr) = peek_scroll_rects(stage, dpi, show_v, show_h);
         let min_thumb = thumb_min(dpi);
         let vert = vr.and_then(|rects| {
@@ -3931,11 +3937,16 @@ mod tests {
 
     #[test]
     fn markdown_lines() {
-        let l = md_lines("# T\n\nsome **bold** `x`\n- a\n  - b\n> q\n```\ncode **\n```\n---");
-        let styles: Vec<Style> = l.iter().map(|x| x.1).collect();
+        let l = md_lines("# T\n\nsome **bold** `x`\n- a\n  - b\n> q\n```\ncode **\n```\n---\n1. n\n[Maguro](https://example.com)");
+        let styles: Vec<Style> = l.iter().map(|x| x.style).collect();
         use Style::*;
-        assert_eq!(styles, vec![H1, Plain, Plain, Bullet, Bullet, Quote, Mono, Quote]);
-        assert_eq!((l[2].0.as_str(), l[3].0.as_str(), l[4].0.as_str(), l[6].0.as_str()), ("some bold x", "• a", "    • b", "code **"));
+        assert_eq!(styles, vec![H1, Plain, Plain, Bullet, Bullet, Quote, Code, Quote, Bullet, Plain]);
+        assert_eq!(l[2].text, "some bold x");
+        assert!(l[2].runs.iter().any(|r| r.bold && r.text == "bold"));
+        assert!(l[2].runs.iter().any(|r| r.code && r.text == "x"));
+        assert_eq!((l[3].text.as_str(), l[4].text.as_str(), l[6].text.as_str()), ("• a", "    • b", "code **"));
+        assert_eq!(l[8].text, "1. n");
+        assert_eq!(l[9].text, "Maguro (https://example.com)");
     }
 
     #[test]
@@ -4377,9 +4388,11 @@ mod tests {
         assert!(peek_resize_wants_pdf(ZOOM_MIN));
         assert!(peek_resize_wants_pdf(ZOOM_MAX));
 
-        // Fit never enlarges; a wide picture is width-bound.
-        assert_eq!(image_fit_px(100, 50, 400, 400), (100, 50));
+        // The picture scales to the stage both ways. A wide one is width-bound; a square one is height-bound.
+        assert_eq!(image_fit_px(100, 50, 400, 400), (400, 200));
         assert_eq!(image_fit_px(1000, 500, 200, 200), (200, 100));
+        assert_eq!(image_fit_px(32, 24, 800, 600), (800, 600));
+        assert_eq!(image_fit_px(256, 256, 100, 80), (80, 80));
         assert_eq!(page_fit_size(800, 1000, 400), (400, 500));
         assert_eq!(page_fit_size(100, 50, 400), (100, 50));
         assert_eq!(page_fit_size(0, 10, 100), (0, 0));

@@ -1,4 +1,5 @@
 mod docparse;
+mod formats;
 pub(crate) mod recent;
 mod imgjob;
 mod svg;

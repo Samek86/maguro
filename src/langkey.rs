@@ -970,11 +970,14 @@ pub(crate) enum Key {
     UninstallConfirmPortable,
     UninstallCouldNotStart,
     UninstallRefused,
+    PreviewIcon,
+    PreviewUrl,
+    PreviewOriginal,
 }
 
-pub(crate) const KEY_COUNT: usize = 963;
+pub(crate) const KEY_COUNT: usize = 966;
 
-const _: () = assert!((Key::UninstallRefused as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::PreviewOriginal as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1940,6 +1943,9 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "This deletes Maguro's settings files in {folder}, removes the use-as-default-folder-app registration, and deletes maguro.exe ({exe}). Other files in that folder are left as they are.\n\nMaguro will close.",
     "Could not start uninstall.",
     "Uninstall was cancelled. The settings folder is not %APPDATA%\\Maguro.",
+    "Icon",
+    "URL",
+    "Original name",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2906,4 +2912,7 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "uninstall_confirm_portable",
     "uninstall_could_not_start",
     "uninstall_refused",
+    "preview_icon",
+    "preview_url",
+    "preview_original",
 ];
