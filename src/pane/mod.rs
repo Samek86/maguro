@@ -12,6 +12,7 @@ mod pview;
 mod peek;
 mod prehost;
 mod preview;
+mod media;
 mod prevpane;
 mod ptabs;
 mod select;

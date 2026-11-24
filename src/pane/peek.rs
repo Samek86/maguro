@@ -614,6 +614,8 @@ pub(crate) struct PeekView {
     pub(crate) edge_at: Option<Instant>, // the wheel reached the top / bottom then
     pub(crate) wheel: i32, // wheel delta toward the next file step (120 a notch)
     pub(crate) hosted: Option<usize>, // generation a preview handler is showing
+    /// This Quick Look generation fell back to a handler after Media Foundation failed.
+    media_fallback: Option<usize>,
     pub(crate) host_win: Option<HWND>, // the picture area's child window the handler draws in
     pub(crate) hover: bool,            // the mouse is over the popup: ‹ › show
     pub(crate) hot: Hot,
@@ -835,14 +837,26 @@ unsafe fn remember_peek(h: HWND, kind: PeekKind) {
 
 /// First result for this file: fit, or take the remembered size. Later pages, a maximize,
 /// and a size the user already set for this kind leave the window alone.
+/// Window height that keeps an audio card's rows above the transport.
+fn audio_peek_height(rows: i32, dpi: i32, fh: i32, limit_h: i32) -> i32 {
+    let s = |v: i32| v * dpi.max(1) / 96;
+    let row_h = fh.max(1).saturating_add(s(8));
+    let stage = super::media::audio_stage_height(rows, row_h, s(160), super::media::transport_height(dpi), s(8) + s(4));
+    stage.saturating_add(peek_chrome(dpi, false).h).min(limit_h.max(0))
+}
+
 unsafe fn fit_on_result(h: HWND, gen: usize) {
-    let (kind, source) = {
+    let (kind, source, card_rows) = {
         let j = peek_job();
         if j.gen != gen {
             return;
         }
         let Some(done) = j.done.as_ref() else { return };
-        (PeekKind::of(&done.body), fit_source(&done.body))
+        let card_rows = match &done.body {
+            Body::Card { rows, .. } => Some(rows.len() as i32),
+            _ => None,
+        };
+        (PeekKind::of(&done.body), fit_source(&done.body), card_rows)
     };
     let first = view(|v| {
         if v.fit_gen == gen {
@@ -873,12 +887,19 @@ unsafe fn fit_on_result(h: HWND, gen: usize) {
         };
         (user, v.maximized)
     });
-    let dpi = app(|a| a.dpi);
+    let (dpi, fh) = app(|a| (a.dpi, a.fh));
     let b = main_bounds();
     let limit = open_limit(&b);
     let remembered = remembered_dip(kind).map(|(w, h)| PeekSize { w: dip_to_px(w, dpi), h: dip_to_px(h, dpi) });
     let fitted = fitted_px(source, dpi, limit);
-    let Some(size) = pick_open_size(remembered, user_resized, maximized, fitted) else { return };
+    let Some(mut size) = pick_open_size(remembered, user_resized, maximized, fitted) else { return };
+    // The transport sits in the stage. A remembered or text-fitted height does not
+    // include it, so the last property row (Created) would land under the bar.
+    if let Some(rows) = card_rows {
+        if !maximized && super::media::covers(h) && !super::media::has_video(h) {
+            size.h = size.h.max(audio_peek_height(rows, dpi, fh, limit.h));
+        }
+    }
     place_peek(h, size);
 }
 
@@ -971,8 +992,10 @@ unsafe fn show_path(path: &str, plain: bool) {
     unload_handler();
     drop_zoom(h);
     reset_scroll();
+    view(|v| v.media_fallback = None);
     let (w, ht) = request_stage(h);
     want_peek(Some(PeekReq { path: path.to_string(), w, h: ht, hwnd: h.0 as isize, plain }));
+    open_media(h, path, plain, peek_job().gen as u64);
     _ = InvalidateRect(Some(h), None, false);
 }
 
@@ -988,6 +1011,7 @@ pub(crate) unsafe fn retint_peek() {
     if let Some(host) = view(|v| v.host_win) {
         super::theme_hwnd(host, dark);
     }
+    super::media::sync_theme(h);
     _ = InvalidateRect(Some(h), None, true);
     if HOST_GEN.load(Ordering::SeqCst) != 0 {
         load_peek(false);
@@ -1008,13 +1032,18 @@ pub(crate) unsafe fn load_peek(plain: bool) {
     unload_handler();
     drop_zoom(h);
     reset_scroll();
+    view(|v| v.media_fallback = None);
     let it = fv.GetItem::<IShellItem>(fv.GetFocusedItem().unwrap_or(-1)).ok();
     let shown = |kind| it.as_ref().and_then(|it| it.GetDisplayName(kind).ok()).map(|p| pwstr(p));
     app(|a| a.peek_name = shown(SIGDN_NORMALDISPLAY).unwrap_or_default());
     let (w, ht) = request_stage(h);
     match shown(SIGDN_FILESYSPATH).or_else(|| shown(SIGDN_DESKTOPABSOLUTEPARSING)) {
-        Some(path) => want_peek(Some(PeekReq { path, w, h: ht, hwnd: h.0 as isize, plain })),
+        Some(path) => {
+            want_peek(Some(PeekReq { path: path.clone(), w, h: ht, hwnd: h.0 as isize, plain }));
+            open_media(h, &path, plain, peek_job().gen as u64);
+        }
         None => {
+            super::media::close(h);
             let gen = {
                 let mut j = peek_job();
                 j.want(None);
@@ -1782,6 +1811,15 @@ unsafe fn start_handler(h: HWND, gen: usize) {
             _ => return,
         }
     };
+    begin_handler(h, gen, clsid, path);
+}
+
+/// Start a preview handler for this generation. A media fallback calls this with the
+/// registered CLSID after Media Foundation refuses the file. The worker path calls it too.
+unsafe fn begin_handler(h: HWND, gen: usize, clsid: GUID, path: String) {
+    if peek_job().gen != gen {
+        return;
+    }
     if HOST_GEN.swap(gen, Ordering::SeqCst) == gen {
         return;
     }
@@ -2734,32 +2772,62 @@ unsafe fn clip(dc: HDC, r: RECT, draw: impl FnOnce()) {
 }
 
 
+/// One property row. `text_h` is the measured value. A wrapped value may use up to three lines.
+pub(crate) fn card_row_span(text_h: i32, row_h: i32, pad: i32) -> i32 {
+    let row_h = row_h.max(0);
+    let pad = pad.max(0);
+    let lo = row_h - pad;
+    let hi = row_h.saturating_mul(3).saturating_sub(pad);
+    let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+    text_h.clamp(lo, hi).saturating_add(pad)
+}
+
+/// Top of the property stack. Center it when it fits; pin it to the top when it does not,
+/// so the last row stays inside the area instead of sliding under the transport.
+pub(crate) fn card_stack_top(area_top: i32, area_h: i32, stack_h: i32) -> i32 {
+    let area_h = area_h.max(0);
+    let stack_h = stack_h.max(0);
+    if area_h == 0 || stack_h >= area_h {
+        area_top
+    } else {
+        area_top + (area_h - stack_h) / 2
+    }
+}
+
 // Big icon (or thumbnail) on the left, the facts beside it.
 pub(crate) unsafe fn paint_card(dc: HDC, area: RECT, icon: Option<&Pix>, rows: &[(String, String)], font: HFONT, dpi: i32) {
     let s = |v: i32| v * dpi / 96;
     // drawn at its own size (only shrunk if it doesn't fit): scaling an icon blurs and fringes it
-    let side = icon.map_or(s(96), |p| p.w.max(p.h)).min((area.right - area.left) / 3).min(area.bottom - area.top);
+    let side = icon.map_or(s(96), |p| p.w.max(p.h)).min((area.right - area.left) / 3).min((area.bottom - area.top).max(0));
     // icon and facts as one block, centred
     let lw = rows.iter().map(|(l, _)| super::pview::text_w(dc, l, font)).max().unwrap_or(0) + s(16);
     let vw = rows.iter().map(|(_, v)| super::pview::text_w(dc, v, font)).max().unwrap_or(0);
     let block = side + s(32) + lw + vw;
     let x0 = area.left + ((area.right - area.left - block) / 2).max(s(8));
+    let left = x0 + side + s(32);
+    let rh = app(|a| a.fh) + s(8);
+    let pad = s(8);
+    let ink = ui_tokens().text;
+    let measure = RECT { left: left + lw, top: 0, right: area.right.max(left + lw), bottom: rh.saturating_mul(3) };
+    let spans: Vec<i32> = rows.iter().map(|(_, value)| card_row_span(wrap_text(dc, measure, value, font, ink, true).1, rh, pad)).collect();
+    let stack = spans.iter().fold(0i32, |n, h| n.saturating_add(*h));
+    let saved = SaveDC(dc);
+    let _ = IntersectClipRect(dc, area.left, area.top, area.right, area.bottom);
     if let Some(p) = icon {
         let k = (side as f32 / p.w.max(p.h) as f32).min(1.0);
         let (dw, dh) = ((p.w as f32 * k) as i32, (p.h as f32 * k) as i32);
-        let (x, y) = (x0 + (side - dw) / 2, area.top + (area.bottom - area.top - dh) / 2);
+        let (x, y) = (x0 + (side - dw) / 2, area.top + ((area.bottom - area.top) - dh).max(0) / 2);
         blit_bgra(dc, RECT { left: x, top: y, right: x + dw, bottom: y + dh }, p.w, p.h, &p.bgra);
     }
-    let left = x0 + side + s(32);
-    let rh = app(|a| a.fh) + s(8);
-    let mut y = area.top + ((area.bottom - area.top) - rh * rows.len() as i32).max(0) / 2;
-    let ink = ui_tokens().text;
-    for (label, value) in rows {
+    let mut y = card_stack_top(area.top, (area.bottom - area.top).max(0), stack);
+    for ((label, value), span) in rows.iter().zip(spans) {
         paint_meta(dc, RECT { left, top: y, right: left + lw, bottom: y + rh }, label, font);
-        let v = RECT { left: left + lw, top: y + s(4), right: area.right, bottom: y + rh * 3 };
-        let (_, th) = wrap_text(dc, v, value, font, ink, true);
+        let v = RECT { left: left + lw, top: y + s(4), right: area.right, bottom: y + span };
         wrap_text_ellipsis(dc, v, value, font, ink, false);
-        y += th.clamp(rh - s(8), rh * 3 - s(8)) + s(8);
+        y += span;
+    }
+    if saved != 0 {
+        let _ = RestoreDC(dc, saved);
     }
 }
 
@@ -2801,6 +2869,9 @@ fn chrome_visual(which: Hot, hot: Hot, down: Hot) -> ButtonVisual {
 }
 
 pub(crate) unsafe fn paint_peek(h: HWND) {
+    // Place the video child before BeginPaint so it is not still covering the header
+    // when WS_CLIPCHILDREN clips this paint.
+    place_media(h);
     let (dpi, name, ilist, accent) = app(|a| (a.dpi, a.peek_name.clone(), a.ilist.clone(), a.s.accent_now()));
     let (hosted, hover, hot, down, maximized, zoom) = view(|v| (v.hosted, v.hover, v.hot, v.btn_down, v.maximized, zoom_or_fit(v.zoom)));
     let font = body_font();
@@ -2832,7 +2903,10 @@ pub(crate) unsafe fn paint_peek(h: HWND) {
             }
             let joined = if rows.is_empty() { p.meta.join("   ·   ") } else { rows.join(" · ") };
             let shown = match &p.body {
-                Body::Pic(_) | Body::Pages { .. } | Body::Text { .. } | Body::Document { .. } | Body::Table { .. } | Body::List { .. } => {
+                // A live player covers the stage, so the header keeps the file facts.
+                Body::Pic(_) | Body::Pages { .. } | Body::Text { .. } | Body::Document { .. } | Body::Table { .. } | Body::List { .. }
+                    if !super::media::covers(h) =>
+                {
                     zoom_label(&joined, zoom_pct(zoom))
                 }
                 _ => joined,
@@ -2843,10 +2917,33 @@ pub(crate) unsafe fn paint_peek(h: HWND) {
         let glyph = if maximized { ICON_RESTORE } else { ICON_MAX };
         paint_button(dc, g.max, ButtonKind::Icon, chrome_visual(Hot::Max, hot, down), glyph, glyphs, dpi, ground, FocusRing::Outside);
         paint_button(dc, g.close, ButtonKind::Icon, chrome_visual(Hot::Close, hot, down), ICON_CLOSE, glyphs, dpi, ground, FocusRing::Outside);
-        // content: pictures and pages on the stage; everything else on a shared card
+        // content: pictures and pages on the stage; everything else on a shared card.
+        // A live player covers the stage: video in a child window, audio on the card, controls along the bottom.
         let plate = || {
             crate::ui::paint_card(dc, g.stage, dpi);
         };
+        if super::media::covers(h) {
+            let (content, bar) = super::media::split_content(g.stage, dpi);
+            if super::media::has_video(h) {
+                fill(dc, content, pal().bg);
+                super::media::queue_place(h, super::media::video_dest(g.stage, g.stage.top, dpi));
+            } else {
+                let s = |v: i32| v * dpi / 96;
+                let inset = RECT {
+                    left: content.left + s(12),
+                    top: content.top + s(8),
+                    right: (content.right - s(12)).max(content.left),
+                    bottom: (content.bottom - s(4)).max(content.top),
+                };
+                crate::ui::paint_card(dc, inset, dpi);
+                match j.done.as_ref().map(|p| &p.body) {
+                    Some(Body::Card { icon, rows }) => paint_card(dc, inset, icon.as_ref(), rows, font, dpi),
+                    _ => paint_center_meta(dc, inset, tr(crate::Key::Loading), font),
+                }
+            }
+            drop(j);
+            super::media::paint_transport(dc, h, bar, font, dpi, accent);
+        } else {
         let (zfont, zowned) = super::pview::font_at_zoom(font, zoom);
         match j.done.as_ref().map(|p| &p.body) {
             Some(Body::Pic(p)) => {
@@ -2905,6 +3002,7 @@ pub(crate) unsafe fn paint_peek(h: HWND) {
             delete_font(zfont);
         }
         drop(j);
+        }
         paint_bars(dc, h, accent);
         // ‹ › while the mouse is over the popup
         if hover {
@@ -2914,6 +3012,54 @@ pub(crate) unsafe fn paint_peek(h: HWND) {
         // Last, so nothing drawn above covers it. Content rects stay inside this thickness.
         frame(dc, rc, peek_edge(dpi), accent);
     });
+    super::media::apply_place(h);
+}
+
+/// Video child follows the stage above the transport. Called on size, outside the paint borrow.
+unsafe fn place_media(h: HWND) {
+    if !super::media::has_video(h) {
+        return;
+    }
+    let dest = peek_video_dest(h);
+    if !super::media::reveal_video(dest) {
+        return;
+    }
+    super::media::queue_place(h, dest);
+    super::media::apply_place(h);
+}
+
+/// Stage rect the player should bind to. The stage is already under the Quick Look header.
+unsafe fn peek_video_dest(h: HWND) -> RECT {
+    let mut rc = RECT::default();
+    let _ = GetClientRect(h, &mut rc);
+    let dpi = app(|a| a.dpi);
+    let stage = peek_geo(rc, dpi).stage;
+    super::media::video_dest(stage, stage.top, dpi)
+}
+
+/// Start playback. Media Foundation is first for audio and video. `skip_handler` is the
+/// reload after that handler fallback failed, and then the player stays closed.
+/// The video child is sized before the player binds. `view_gen` is the Quick Look generation.
+unsafe fn open_media(h: HWND, path: &str, skip_handler: bool, view_gen: u64) {
+    if media_playback_for(path, skip_handler) {
+        super::media::open_bound(h, path, Some(peek_video_dest(h)), view_gen);
+        follow_media_failure(h, view_gen);
+    } else {
+        super::media::close(h);
+    }
+}
+
+/// Media Foundation refused this file. Start the registered handler, or leave the info view.
+/// A generation that is no longer current is ignored.
+unsafe fn follow_media_failure(h: HWND, current: u64) {
+    let Some(fail) = super::media::take_open_failure(h) else { return };
+    match media_failure_follow(&fail.path, fail.view_gen, current) {
+        MediaFollow::Handler(clsid) => {
+            view(|v| v.media_fallback = Some(current as usize));
+            begin_handler(h, current as usize, clsid, fail.path);
+        }
+        MediaFollow::Info | MediaFollow::Ignore => {}
+    }
 }
 
 // Wheel, PgUp / PgDn, Home / End, and Up / Down scroll. Shift+wheel moves sideways (tables, code).
@@ -3299,6 +3445,7 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 // which is what breaks a fitted picture. Erase stays off; paint is buffered,
                 // so the full invalidate does not flash. A sharper PDF is requested only while zoomed.
                 sync_host(h);
+                place_media(h);
                 _ = InvalidateRect(Some(h), None, false);
                 if peek_resize_wants_pdf(view(|v| v.zoom)) {
                     schedule_pdf_zoom(h);
@@ -3307,6 +3454,21 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_TIMER if wp.0 == TIMER_PEEK_ZOOM => {
                 _ = KillTimer(Some(h), TIMER_PEEK_ZOOM);
                 request_pdf_zoom(h);
+            }
+            WM_TIMER if wp.0 == super::media::TIMER_MEDIA => {
+                super::media::tick(h);
+                if super::media::take_relayout(h) {
+                    place_media(h);
+                    super::media::repaint_header(h);
+                }
+            }
+            super::media::WM_MEDIA => {
+                super::media::on_posted(h);
+                follow_media_failure(h, peek_job().gen as u64);
+                if super::media::take_relayout(h) {
+                    place_media(h);
+                    super::media::repaint_header(h);
+                }
             }
             WM_PEEK_ZOOM => {
                 // Pixels only. Fitting the window here would fight a size the user already set.
@@ -3365,6 +3527,28 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
             WM_PEEK_DONE => {
+                // The worker's body wins over the early guess. A handler stops the player
+                // before the window is fitted; Maguro's own thumbnail or card starts it,
+                // so an audio card is tall enough for the transport on the first frame.
+                let follow = {
+                    let j = peek_job();
+                    if j.gen != wp.0 {
+                        None
+                    } else {
+                        let handler = j.done.as_ref().is_some_and(|p| matches!(p.body, Body::Handler(_)));
+                        let plain = j.req.as_ref().is_some_and(|r| r.plain);
+                        j.req.as_ref().map(|r| (handler, plain, r.path.clone()))
+                    }
+                };
+                if let Some((handler, plain, path)) = follow {
+                    let fallback = view(|v| v.media_fallback) == Some(wp.0);
+                    if handler {
+                        super::media::close(h);
+                    } else if !fallback && !super::media::covers(h) && media_playback_for(&path, plain) {
+                        super::media::open_bound(h, &path, Some(peek_video_dest(h)), wp.0 as u64);
+                        follow_media_failure(h, wp.0 as u64);
+                    }
+                }
                 // Size before the content paints, so the first frame is already the fitted window.
                 fit_on_result(h, wp.0);
                 start_handler(h, wp.0);
@@ -3377,7 +3561,9 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_PEEK_RECLAIM => reclaim_foreground(h),
             WM_MOUSEMOVE => {
                 let (x, y) = lp_xy(lp);
-                if let Some((px, py)) = view(|v| v.pan_pt) {
+                if super::media::pointer_move(h, x, y) {
+                    // Seek or volume drag owns the pointer.
+                } else if let Some((px, py)) = view(|v| v.pan_pt) {
                     let (dx, dy) = (x - px, y - py);
                     if view(|v| v.pan_drag) || dx.abs() + dy.abs() >= 4 {
                         view(|v| {
@@ -3434,7 +3620,9 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             WM_LBUTTONDOWN => {
                 let (x, y) = lp_xy(lp);
-                if press_bar(h, x, y) {
+                if super::media::pointer_down(h, x, y) {
+                    // The transport took the click and the capture.
+                } else if press_bar(h, x, y) {
                     view(|v| {
                         v.bar_down = true;
                         v.btn_down = Hot::None;
@@ -3485,7 +3673,7 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 } else if bar_under(h, x, y) {
                     // On the bar: not a content double-click, so zoom stays where it is.
                     view(|v| v.suppress_up = true);
-                } else if inside(g.stage, x, y) && zoom_shape().is_some() {
+                } else if inside(g.stage, x, y) && zoom_shape().is_some() && !super::media::covers(h) {
                     view(|v| v.suppress_up = true);
                     set_zoom(h, 1.0, Some((x - g.stage.left, y - g.stage.top)));
                 }
@@ -3493,6 +3681,9 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             // ×, the maximise mark, and ‹ › act on a click; the content itself never closes the preview.
             // a press that started on the bar is a scroll, even if the pointer has slid onto ›
             WM_LBUTTONUP => {
+                if super::media::pointer_up(h) {
+                    // Transport click or drag. It is not a chrome button.
+                } else {
                 let (suppress, on_bar, dragged, panned, pressed, selecting) = view(|v| {
                     let suppress = std::mem::replace(&mut v.suppress_up, false);
                     let on = v.bar_down;
@@ -3523,8 +3714,10 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 if pressed {
                     _ = InvalidateRect(Some(h), None, false);
                 }
+                }
             }
             WM_CAPTURECHANGED => {
+                super::media::pointer_cancel(h);
                 let pressed = view(|v| {
                     (v.bar_drag, v.hbar_drag, v.bar_down, v.drag_pt) = (None, None, false, None);
                     v.pan_pt = None;
@@ -3538,7 +3731,7 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             // Ctrl zooms a picture or PDF about the cursor. Shift still scrolls sideways. Plain wheel is unchanged.
             WM_MOUSEWHEEL if (wp.0 & 0xffff) as u32 & MK_CONTROL.0 != 0 => {
-                if zoom_shape().is_some() {
+                if zoom_shape().is_some() && !super::media::covers(h) {
                     let mut pt = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
                     _ = ScreenToClient(h, &mut pt);
                     let st = geo_of(h).stage;
@@ -3562,17 +3755,24 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32) < 0;
                 let shift = GetAsyncKeyState(VK_SHIFT.0 as i32) < 0;
                 let alt = GetAsyncKeyState(VK_MENU.0 as i32) < 0;
-                let zoomed = ctrl && !alt && zoom_cmd(k.0).is_some_and(|cmd| {
+                // Space still closes. Plain arrows still step or scroll. K/J/L/M and Shift+arrows play.
+                // Zoom and text keys stay with the phase 1 preview, and they do not run over the player.
+                let played = super::media::covers(h)
+                    && super::media::media_key(k.0, shift, ctrl, alt, true).is_some_and(|cmd| {
+                        super::media::command(h, cmd, repeat);
+                        true
+                    });
+                let zoomed = !played && !super::media::covers(h) && ctrl && !alt && zoom_cmd(k.0).is_some_and(|cmd| {
                     set_zoom(h, zoom_after(view(|v| v.zoom), cmd), None);
                     true
                 });
-                let edited = ctrl && !alt && !shift && (k.0 == b'A' as u16 || k.0 == b'C' as u16);
+                let edited = !played && !super::media::covers(h) && ctrl && !alt && !shift && (k.0 == b'A' as u16 || k.0 == b'C' as u16);
                 if edited && k.0 == b'A' as u16 {
                     select_all_peek(h);
                 } else if edited {
                     copy_peek(h);
                 }
-                if !zoomed && !edited {
+                if !played && !zoomed && !edited {
                     match k {
                         // a held F3 only opens it; its repeats must not close it again
                         VK_ESCAPE | VK_SPACE | VK_F3 if !repeat => close_peek(h),
@@ -3625,6 +3825,7 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
             WM_DESTROY => {
+                super::media::close(h);
                 crate::pane::marks_overlay::note_peek(false);
                 let from_find = FROM_FIND.load(Ordering::SeqCst);
                 let i = app(|a| a.peek_pane);
@@ -3654,6 +3855,21 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_keys_do_not_take_zoom_or_quick_look_chrome() {
+        let space = VK_SPACE.0;
+        let left = VK_LEFT.0;
+        // Quick Look: Space closes, plain Left steps. The pane: Space pauses.
+        assert!(crate::pane::media::media_key(space, false, false, false, true).is_none());
+        assert_eq!(crate::pane::media::media_key(space, false, false, false, false), Some(crate::pane::media::MediaCmd::Toggle));
+        assert!(crate::pane::media::media_key(left, false, false, false, true).is_none());
+        assert_eq!(crate::pane::media::media_key(left, true, false, false, true), Some(crate::pane::media::MediaCmd::SeekBack));
+        // Ctrl+= zooms. The player does not claim it, and K is not a zoom key.
+        assert!(crate::pane::media::media_key(VK_OEM_PLUS.0, false, true, false, true).is_none());
+        assert_eq!(zoom_cmd(VK_OEM_PLUS.0), Some(ZoomCmd::In));
+        assert_eq!(zoom_cmd(b'K' as u16), None);
+    }
 
     #[test]
     fn peek_enter_opens_the_file_on_screen() {
@@ -4093,6 +4309,27 @@ mod tests {
             assert!(!in_header(window, &g, g.max.left + 2, g.max.top + 2, peek_grip(dpi)));
             assert!(!in_header(window, &g, 2, g.title.top + 8, peek_grip(dpi)));
         }
+    }
+
+    #[test]
+    fn audio_card_rows_sit_above_the_transport() {
+        let dpi = 96;
+        let fh = 16;
+        let rows = 8;
+        let window = audio_peek_height(rows, dpi, fh, 4000);
+        let stage = window - peek_chrome(dpi, false).h;
+        let transport = crate::pane::media::transport_height(dpi);
+        let inset = 12;
+        let room = stage - transport - inset;
+        let row_h = fh + 8;
+        let text = row_h * rows + row_h * 2;
+        assert!(room >= text, "room {room} is shorter than the property stack {text}");
+        assert_eq!(card_stack_top(10, room, text), 10);
+        assert_eq!(card_stack_top(4, 80, 40), 24);
+        assert_eq!(card_stack_top(4, 40, 80), 4);
+        assert_eq!(card_row_span(10, 24, 8), 24);
+        assert_eq!(card_row_span(20, 24, 8), 28);
+        assert_eq!(card_row_span(100, 24, 8), 72);
     }
 
     #[test]
