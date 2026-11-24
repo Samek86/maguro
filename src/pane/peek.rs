@@ -976,7 +976,7 @@ unsafe fn show_path(path: &str, plain: bool) {
     unload_handler();
     drop_zoom(h);
     reset_scroll();
-    super::media::open(h, path);
+    open_media(h, path);
     let (w, ht) = request_stage(h);
     want_peek(Some(PeekReq { path: path.to_string(), w, h: ht, hwnd: h.0 as isize, plain }));
     _ = InvalidateRect(Some(h), None, false);
@@ -1021,7 +1021,7 @@ pub(crate) unsafe fn load_peek(plain: bool) {
     let (w, ht) = request_stage(h);
     match shown(SIGDN_FILESYSPATH).or_else(|| shown(SIGDN_DESKTOPABSOLUTEPARSING)) {
         Some(path) => {
-            super::media::open(h, &path);
+            open_media(h, &path);
             want_peek(Some(PeekReq { path, w, h: ht, hwnd: h.0 as isize, plain }));
         }
         None => {
@@ -2627,7 +2627,7 @@ pub(crate) unsafe fn paint_peek(h: HWND) {
             let (content, bar) = super::media::split_content(g.stage, dpi);
             if super::media::has_video(h) {
                 fill(dc, content, pal().bg);
-                super::media::queue_place(h, content);
+                super::media::queue_place(h, super::media::video_dest(g.stage, g.stage.top, dpi));
             } else {
                 let s = |v: i32| v * dpi / 96;
                 let inset = RECT {
@@ -2716,12 +2716,25 @@ unsafe fn place_media(h: HWND) {
     if !super::media::has_video(h) {
         return;
     }
+    let dest = peek_video_dest(h);
+    if !super::media::reveal_video(dest) {
+        return;
+    }
+    super::media::queue_place(h, dest);
+    super::media::apply_place(h);
+}
+
+/// Stage rect the player should bind to. The stage is already under the Quick Look header.
+unsafe fn peek_video_dest(h: HWND) -> RECT {
     let mut rc = RECT::default();
     let _ = GetClientRect(h, &mut rc);
     let dpi = app(|a| a.dpi);
-    let (content, _) = super::media::split_content(peek_geo(rc, dpi).stage, dpi);
-    super::media::queue_place(h, content);
-    super::media::apply_place(h);
+    let stage = peek_geo(rc, dpi).stage;
+    super::media::video_dest(stage, stage.top, dpi)
+}
+
+unsafe fn open_media(h: HWND, path: &str) {
+    super::media::open_in(h, path, Some(peek_video_dest(h)));
 }
 
 // Wheel, PgUp / PgDn, Home / End, and Up / Down scroll. Shift+wheel moves sideways (tables, code).

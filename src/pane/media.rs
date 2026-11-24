@@ -158,6 +158,27 @@ pub(crate) fn below_header(header_bottom: i32, area: RECT) -> RECT {
     RECT { top, ..area }
 }
 
+/// Where the video child sits: under the attribute header, above the transport.
+///
+/// `header_bottom` is a y inside `area` (the full preview client, or Quick Look's
+/// stage). Pass `area.top` when `area` is already below the header.
+/// The child fills this rect; Media Foundation letterboxes inside it.
+pub(crate) fn video_dest(area: RECT, header_bottom: i32, dpi: i32) -> RECT {
+    let (content, _) = split_content(below_header(header_bottom, area), dpi);
+    content
+}
+
+/// The picture is shown as soon as `dest` has area.
+///
+/// Alt+P used to wait until the preview job had published file facts. Until then
+/// the child stayed hidden, the pane filled this rect with its background, and the
+/// video area was solid black while the transport already showed the duration.
+/// Quick Look never waited. Facts only change `dest` (a taller header). They do
+/// not decide whether a frame may be on screen.
+pub(crate) fn reveal_video(dest: RECT) -> bool {
+    live(dest)
+}
+
 /// Where playback sits relative to the end of the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EndChoice {
@@ -462,7 +483,19 @@ pub(crate) fn has_video(host: HWND) -> bool {
 }
 
 /// Open `path` when it is audio or video. Anything else releases a player this view still holds.
+/// Tests use this. The views pass a video rect through [`open_in`].
+#[cfg(test)]
 pub(crate) unsafe fn open(host: HWND, path: &str) {
+    open_in(host, path, None);
+}
+
+/// Like [`open`], and for video show the child at `dest` before the player is created.
+///
+/// MFPlay binds the EVR to the HWND it is given. A window that is still 8×8 and
+/// hidden at that moment presents nothing, and a later paint of the pane is all
+/// the user sees. `dest` is the rect from [`video_dest`]. `None` leaves placement
+/// to the view (audio, or a host that does not have a size yet).
+pub(crate) unsafe fn open_in(host: HWND, path: &str, dest: Option<RECT>) {
     let ext = super::preview::ext_of(path);
     let Some(kind) = media_kind(&ext) else {
         close(host);
@@ -480,7 +513,8 @@ pub(crate) unsafe fn open(host: HWND, path: &str) {
     }
     ensure_mf();
     let gen = GEN.fetch_add(1, Ordering::Relaxed);
-    let video = if kind == MediaKind::Video { create_video(host) } else { HWND::default() };
+    let dest = dest.filter(|r| reveal_video(*r));
+    let video = if kind == MediaKind::Video { create_video(host, dest.unwrap_or_default()) } else { HWND::default() };
     if kind == MediaKind::Video && video.0.is_null() {
         return;
     }
@@ -515,6 +549,11 @@ pub(crate) unsafe fn open(host: HWND, path: &str) {
             stick_until: None,
         },
     );
+    // Size and show the child before MFPlay binds the renderer to it.
+    if let Some(dest) = dest {
+        queue_place(host, dest);
+        apply_place(host);
+    }
     let cb: IMFPMediaPlayerCallback = Cb { host: key, gen }.into();
     let mut made: Option<IMFPMediaPlayer> = None;
     let hwnd = if video.0.is_null() { None } else { Some(video) };
@@ -1255,19 +1294,24 @@ fn ensure_class() {
     });
 }
 
-unsafe fn create_video(parent: HWND) -> HWND {
+unsafe fn create_video(parent: HWND, dest: RECT) -> HWND {
     ensure_class();
     let Ok(module) = GetModuleHandleW(None) else { return HWND::default() };
     let hinst: HINSTANCE = module.into();
+    let (x, y, w, h) = if live(dest) {
+        (dest.left, dest.top, (dest.right - dest.left).max(1), (dest.bottom - dest.top).max(1))
+    } else {
+        (0, 0, 8, 8)
+    };
     CreateWindowExW(
         WINDOW_EX_STYLE(0),
         w!("MaguroMediaVid"),
         w!(""),
         WS_CHILD | WS_CLIPSIBLINGS,
-        0,
-        0,
-        8,
-        8,
+        x,
+        y,
+        w,
+        h,
         Some(parent),
         None,
         Some(hinst),
@@ -1286,7 +1330,8 @@ fn vid_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_ERASEBKGND => return LRESULT(1),
             WM_WINDOWPOSCHANGING => {
                 // MFPlay repositions this child to the top of the parent when playback starts.
-                // Keep it hidden until the header is final, then pin it to the rect under that header.
+                // Hide it only until the view has published a rect. After that, pin it there
+                // so a later header (file facts) is not covered and the picture is not shoved to 0,0.
                 let pos = &mut *(lp.0 as *mut WINDOWPOS);
                 let parent = GetParent(h).unwrap_or_default();
                 let (shown, placed) = slots().borrow().get(&key_of(parent)).map(|s| (s.shown, s.placed)).unwrap_or((false, RECT::default()));
@@ -1534,6 +1579,94 @@ mod tests {
         let pushed = below_header(900, pane);
         assert_eq!(pushed.top, pushed.bottom);
         assert!(pushed.top >= 72);
+    }
+
+    #[test]
+    fn picture_shows_before_header_facts_and_tracks_the_pane() {
+        let pane = RECT { left: 0, top: 0, right: 360, bottom: 700 };
+        // One line of the file name. Type, size, and dimensions have not arrived.
+        // Waiting for them used to keep the child hidden, so this rect stayed the pane fill.
+        let early = video_dest(pane, 28, 96);
+        assert!(reveal_video(early), "hidden child leaves a solid black video area");
+        assert!(early.top >= 28, "picture covers the name at {}", early.top);
+        assert_eq!(early.bottom, 700 - transport_height(96));
+        assert_eq!((early.left, early.right), (0, 360));
+        assert!(early.bottom - early.top > 200);
+
+        // Facts grow the header. The child moves down and the transport stays put.
+        let later = video_dest(pane, 96, 96);
+        assert!(reveal_video(later));
+        assert!(later.top >= 96);
+        assert!(later.top > early.top);
+        assert_eq!(later.bottom, early.bottom);
+        assert!(later.bottom > later.top);
+
+        // Resizing the pane resizes the child. MFPlay letterboxes inside that rect.
+        let wide = video_dest(RECT { right: 800, bottom: 900, ..pane }, 96, 96);
+        assert_eq!(wide.right - wide.left, 800);
+        assert!(wide.bottom - wide.top > later.bottom - later.top);
+        assert_eq!(wide.bottom, 900 - transport_height(96));
+
+        // Quick Look passes a stage that is already under its header.
+        let stage = RECT { left: 40, top: 48, right: 600, bottom: 500 };
+        let f3 = video_dest(stage, stage.top, 96);
+        assert_eq!(f3.top, stage.top);
+        assert_eq!(f3.bottom, stage.bottom - transport_height(96));
+        assert!(reveal_video(f3));
+
+        // No room under the header: do not show a 1×1 child over the transport.
+        let crushed = video_dest(RECT { left: 0, top: 0, right: 200, bottom: 36 }, 40, 96);
+        assert!(!reveal_video(crushed));
+        assert!(crushed.bottom <= crushed.top);
+    }
+
+    #[test]
+    fn video_child_is_on_screen_before_playback() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            let sample = r"C:\WORK\CARGO_TARGET\itemdlg-design\f3-media\samples\video-portrait.mp4";
+            assert!(std::path::Path::new(sample).is_file(), "missing {sample}");
+            let probe = test_host();
+            let Ok(module) = GetModuleHandleW(None) else { return };
+            let hinst: HINSTANCE = module.into();
+            let host = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("MaguroMediaTest"),
+                w!(""),
+                WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
+                40,
+                40,
+                400,
+                300,
+                None,
+                None,
+                Some(hinst),
+                None,
+            )
+            .unwrap_or_default();
+            assert!(!host.0.is_null() && !probe.0.is_null(), "host window");
+            let client = RECT { left: 0, top: 0, right: 400, bottom: 300 };
+            // Header is only the file name. The preview job has not published facts.
+            let dest = video_dest(client, 32, 96);
+            assert!(reveal_video(dest));
+            open_in(host, sample, Some(dest));
+            let (shown, placed, video, failed) = {
+                let map = slots().borrow();
+                let s = map.get(&key_of(host)).expect("player slot");
+                (s.shown, s.placed, s.video, s.failed)
+            };
+            assert!(!failed, "player failed before the first frame");
+            assert!(shown, "child stays hidden, so the pane fill is all that shows");
+            assert_eq!(placed, dest);
+            assert!(IsWindowVisible(video).as_bool(), "video HWND is hidden");
+            let mut wr = RECT::default();
+            let _ = GetClientRect(video, &mut wr);
+            assert_eq!((wr.right - wr.left, wr.bottom - wr.top), (dest.right - dest.left, dest.bottom - dest.top));
+            close(host);
+            assert!(!covers(host), "close releases the player");
+            let _ = DestroyWindow(host);
+            let _ = DestroyWindow(probe);
+        }
     }
 
     #[test]

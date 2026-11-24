@@ -389,7 +389,10 @@ pub(crate) unsafe fn run_preview(force: bool) {
         _ = InvalidateRect(Some(h), None, false);
         return;
     }
-    super::media::open(h, &path);
+    // Show the picture under the current header before MFPlay binds the renderer.
+    // Waiting for the preview job left the child hidden and this rect solid black.
+    place_head(h);
+    super::media::open_in(h, &path, Some(pane_video_dest(h)));
     enqueue(Work { hwnd: key, gen, path, w: bw, h: bh, skip_handler: false });
     _ = InvalidateRect(Some(h), None, false);
 }
@@ -718,6 +721,9 @@ unsafe fn on_ready(h: HWND, gen: u64) {
             // The total line is part of the folder block, so measure after it is armed.
             place_head(h);
             give_back(h);
+            // Facts make the header taller. Move the picture before the paint, or the
+            // child still covers the new lines and WS_CLIPCHILDREN never draws them.
+            place_media(h);
             _ = InvalidateRect(Some(h), None, false);
         }
         Ready::Miss => on_ready_miss(h, gen),
@@ -1372,11 +1378,10 @@ unsafe fn paint_preview(h: HWND) {
             let (content, bar) = super::media::split_content(area, dpi);
             if super::media::has_video(h) {
                 fill(dc, content, pal().bg);
-                // Opening still has a one-line header. Showing the child now covers the
-                // lines that arrive with the file facts, and the clip never paints them.
-                if slot.kind == Kind::Shown {
-                    super::media::queue_place(h, super::media::below_header(y, content));
-                }
+                // Same rect place_media published before BeginPaint. A taller header
+                // moves the child; it is not kept hidden until the preview job finishes.
+                let dest = super::media::video_dest(RECT { bottom: rc.bottom, top: rc.top, ..rc }, y, dpi);
+                super::media::queue_place(h, dest);
             } else {
                 match slot.body.as_ref() {
                     Some(Body::Card { icon, rows }) => paint_card(dc, content, icon.as_ref(), rows, font, dpi),
@@ -1421,24 +1426,28 @@ unsafe fn paint_preview(h: HWND) {
 }
 
 /// Video child follows the area under the attribute header. Called on size, and before a paint.
+/// The child is shown as soon as that rect has area, including while the header is still
+/// only the file name. Hiding it until the preview job finished left a solid black fill.
 unsafe fn place_media(h: HWND) {
     if !super::media::has_video(h) {
         return;
     }
-    // Facts (type, size, dimensions, duration) arrive after the player starts.
-    // Until they do, the header is only the file name. Keep the child hidden so it
-    // cannot cover the lines that are about to be added.
-    let ready = slots().get(&key_of(h)).is_some_and(|s| s.kind == Kind::Shown);
-    if !ready {
+    place_head(h);
+    let dest = pane_video_dest(h);
+    if !super::media::reveal_video(dest) {
         super::media::hide_video(h);
         return;
     }
-    place_head(h);
+    super::media::queue_place(h, dest);
+    super::media::apply_place(h);
+}
+
+unsafe fn pane_video_dest(h: HWND) -> RECT {
+    let mut rc = RECT::default();
+    let _ = GetClientRect(h, &mut rc);
     let dpi = app(|a| a.dpi);
     let head = slots().get(&key_of(h)).map(|s| s.head_h).unwrap_or(0);
-    let (content, _) = super::media::split_content(body_rect(h), dpi);
-    super::media::queue_place(h, super::media::below_header(head, content));
-    super::media::apply_place(h);
+    super::media::video_dest(rc, head, dpi)
 }
 
 unsafe fn paint_btn(dc: HDC, r: RECT, label: &str, font: HFONT, hot: bool, accent: u32) {
