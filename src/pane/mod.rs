@@ -10,6 +10,7 @@ mod nav;
 mod reconnect;
 mod pview;
 mod peek;
+mod prehost;
 mod preview;
 mod prevpane;
 mod ptabs;

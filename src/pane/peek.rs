@@ -1,15 +1,20 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::imports::*;
 use crate::app::*;
 use crate::ui::*;
 use crate::i18n::*;
+use super::prehost::{
+    child_process, classify_activate, close_after_deferral, drive_host, foreground_process, handler_signal, init_kinds, note_handler_failure, reclaim_foreground,
+    release_host_window, remember_handler_pid, should_reclaim, CloseLook, ComUninit, HandlerSession, HandlerSignal, HostCtl, HostDone, HostRun, InitKind, WM_HOST_UNLOAD,
+};
 use super::preview::*;
 use super::{focus_find_list, focus_view, peek_find_neighbour, peek_find_select_path, step_find_sel};
 use windows::Win32::Graphics::Dwm::{DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY};
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::Controls::ILD_NORMAL;
 use windows::Win32::UI::Controls::{TTF_ABSOLUTE, TTF_TRACK, TTM_POP, TTM_TRACKACTIVATE};
 use windows::Win32::UI::Shell::PropertiesSystem::{IInitializeWithFile, IInitializeWithStream};
@@ -39,6 +44,7 @@ pub(crate) const WM_PEEK_DONE: u32 = WM_APP + 45; // wParam = generation; the pi
 pub(crate) const WM_PEEK_LOST: u32 = WM_APP + 51; // the preview went inactive: close it unless it is active again
 pub(crate) const WM_PEEK_HOSTED: u32 = WM_APP + 52; // wParam = generation, lParam = 1 shown / 0 failed
 const WM_PEEK_HOST_SIZE: u32 = WM_APP + 53; // thread message: the host window changed size
+const WM_PEEK_RECLAIM: u32 = WM_APP + 55; // the handler process took the foreground; take it back
 const WM_PEEK_ZOOM: u32 = WM_APP + 54; // wParam = generation; a PDF page was re-rendered for zoom. Does not resize.
 const WM_PEEK_DELETED: u32 = WM_APP + 56; // wParam = 1 success / 0 cancel-or-fail; apply AFTER_DEL
 
@@ -1052,6 +1058,7 @@ pub(crate) unsafe fn step_peek(prev: bool) {
 pub(crate) unsafe fn close_peek(h: HWND) {
     let i = app(|a| a.peek_pane);
     let from_find = FROM_FIND.load(Ordering::SeqCst);
+    unload_handler();
     _ = DestroyWindow(h);
     if !(from_find && focus_find_list(i)) {
         focus_view(i);
@@ -1373,6 +1380,7 @@ unsafe fn close_peek_after_open(h: HWND) {
     let from_find = FROM_FIND.load(Ordering::SeqCst);
     HOLD_PEEK.store(false, Ordering::SeqCst);
     if IsWindow(Some(h)).as_bool() {
+        unload_handler();
         _ = DestroyWindow(h);
     }
     // WM_DESTROY arms the find-hide timer because focus left the result list.
@@ -1537,13 +1545,13 @@ fn host_area(gen: usize) -> Option<(u64, RECT)> {
     (b.gen == gen && b.w > 0 && b.h > 0).then_some((b.seq, RECT { left: 0, top: 0, right: b.w, bottom: b.h }))
 }
 
-unsafe fn apply_host_rect(ph: &IPreviewHandler, gen: usize, seen: &mut u64) {
-    let Some((seq, area)) = host_area(gen) else { return };
+unsafe fn apply_host_rect(ph: &IPreviewHandler, gen: usize, seen: &mut u64) -> Result<()> {
+    let Some((seq, area)) = host_area(gen) else { return Ok(()) };
     if seq == *seen {
-        return;
+        return Ok(());
     }
     *seen = seq;
-    _ = ph.SetRect(&area);
+    ph.SetRect(&area)
 }
 
 /// Move the handler's child to the plate. The host thread applies the same rect via SetRect.
@@ -1568,14 +1576,43 @@ unsafe fn sync_host(h: HWND) {
     }
 }
 
+static HOST_LIVE: Mutex<Option<Arc<HostCtl>>> = Mutex::new(None);
+static UNLOAD_BUSY: AtomicBool = AtomicBool::new(false);
+
+fn host_live() -> std::sync::MutexGuard<'static, Option<Arc<HostCtl>>> {
+    HOST_LIVE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn current_handler_pid() -> u32 {
+    host_live().as_ref().map(|c| c.handler_pid.load(Ordering::Acquire)).unwrap_or(0)
+}
+
+fn handler_is_loading() -> bool {
+    host_live().as_ref().is_some_and(|c| c.loading.load(Ordering::Acquire))
+}
+
+/// Ask the host thread to `Unload` before the host window is destroyed.
+/// A handler that does not finish within `HOST_UNLOAD_WAIT_MS` is detached and abandoned.
 pub(crate) unsafe fn unload_handler() {
+    if UNLOAD_BUSY.swap(true, Ordering::SeqCst) {
+        if let Some(ctl) = host_live().clone() {
+            ctl.unload.store(true, Ordering::Release);
+            let tid = HOST_TID.load(Ordering::SeqCst) as u32;
+            if tid != 0 {
+                _ = PostThreadMessageW(tid, WM_HOST_UNLOAD, WPARAM(0), LPARAM(0));
+            }
+        }
+        return;
+    }
     HOST_GEN.store(0, Ordering::SeqCst);
-    if let Some(w) = view(|v| {
+    let ctl = host_live().take();
+    let win = view(|v| {
         v.hosted = None;
         v.host_win.take()
-    }) {
-        _ = DestroyWindow(w); // the handler's window goes with it, even while it is still starting
-    }
+    });
+    let tid = HOST_TID.load(Ordering::SeqCst) as u32;
+    release_host_window(ctl, win.unwrap_or_default(), tid);
+    UNLOAD_BUSY.store(false, Ordering::SeqCst);
 }
 
 // UTF-8 HTML that doesn't name its charset: the old HTML previewer reads it as the ANSI code page, so it
@@ -1594,65 +1631,145 @@ unsafe fn handler_stream(path: &str) -> Result<IStream> {
     SHCreateStreamOnFileEx(&name, (STGM_READ | STGM_SHARE_DENY_NONE).0, 0, false, None)
 }
 
-// Made where Explorer makes them (prevhost.exe, out of process), given the file as a stream when they take one.
-pub(crate) unsafe fn host_handler(h: HWND, clsid: &GUID, path: &str, area: RECT) -> Result<IPreviewHandler> {
-    let ph: IPreviewHandler = CoCreateInstance(clsid, None, CLSCTX_LOCAL_SERVER).or_else(|_| CoCreateInstance(clsid, None, CLSCTX_INPROC_SERVER))?;
-    let name = HSTRING::from(path);
-    if let Ok(init) = ph.cast::<IInitializeWithStream>() {
-        init.Initialize(&handler_stream(path)?, STGM_READ.0)?;
-    } else if let Ok(init) = ph.cast::<IInitializeWithItem>() {
-        let item: IShellItem = SHCreateItemFromParsingName(&name, None)?;
-        init.Initialize(&item, STGM_READ.0)?;
-    } else {
-        ph.cast::<IInitializeWithFile>()?.Initialize(&name, STGM_READ.0)?;
-    }
-    if let Ok(vis) = ph.cast::<IPreviewHandlerVisuals>() {
-        style_preview_visuals(&vis);
-    }
-    ph.SetWindow(h, &area)?;
-    ph.DoPreview()?;
-    Ok(ph)
+fn server_gone(err: &Error) -> bool {
+    handler_signal(err.code().0) == HandlerSignal::Fallback
 }
 
-// One thread per hosted preview: it starts the handler, tells the popup (WM_PEEK_HOSTED, lParam 1 = shown),
-// keeps it while it is the one wanted, then unloads it on its own apartment.
-fn host_thread(gen: usize, clsid: GUID, path: String, hwnd: isize, popup: isize, area: RECT) {
+unsafe fn create_preview(clsid: &GUID) -> Result<IPreviewHandler> {
+    match CoCreateInstance(clsid, None, CLSCTX_LOCAL_SERVER) {
+        Ok(ph) => Ok(ph),
+        Err(e) if server_gone(&e) => Err(e),
+        Err(_) => CoCreateInstance(clsid, None, CLSCTX_INPROC_SERVER),
+    }
+}
+
+/// One init interface. `Ok(false)` means the object does not offer it.
+unsafe fn init_kind(ph: &IPreviewHandler, kind: InitKind, path: &str) -> Result<bool> {
+    let name = HSTRING::from(path);
+    match kind {
+        InitKind::Stream => match ph.cast::<IInitializeWithStream>() {
+            Err(_) => Ok(false),
+            Ok(init) => {
+                let stream = handler_stream(path)?;
+                init.Initialize(&stream, STGM_READ.0).map(|_| true)
+            }
+        },
+        InitKind::Item => match ph.cast::<IInitializeWithItem>() {
+            Err(_) => Ok(false),
+            Ok(init) => {
+                let item: IShellItem = SHCreateItemFromParsingName(&name, None)?;
+                init.Initialize(&item, STGM_READ.0).map(|_| true)
+            }
+        },
+        InitKind::File => match ph.cast::<IInitializeWithFile>() {
+            Err(_) => Ok(false),
+            Ok(init) => init.Initialize(&name, STGM_READ.0).map(|_| true),
+        },
+    }
+}
+
+unsafe fn do_preview_locked(ph: &IPreviewHandler) -> Result<()> {
+    // The handler's server (Excel) must not become the foreground window while it starts.
+    _ = LockSetForegroundWindow(LSFW_LOCK);
+    let result = ph.DoPreview();
+    _ = LockSetForegroundWindow(LSFW_UNLOCK);
+    result
+}
+
+// Made where Explorer makes them (prevhost.exe, out of process). Stream, then item, then file.
+// A failed Initialize or DoPreview tries the next interface. A dead server does not.
+pub(crate) unsafe fn host_handler(h: HWND, clsid: &GUID, path: &str, area: RECT) -> Result<IPreviewHandler> {
+    let mut last = Error::from(E_NOINTERFACE);
+    for kind in init_kinds() {
+        let ph = create_preview(clsid)?;
+        match init_kind(&ph, kind, path) {
+            Ok(false) => continue,
+            Err(e) if server_gone(&e) => return Err(e),
+            Err(e) => {
+                last = e;
+                continue;
+            }
+            Ok(true) => {
+                if let Ok(vis) = ph.cast::<IPreviewHandlerVisuals>() {
+                    style_preview_visuals(&vis);
+                }
+                if let Err(e) = finish_preview(&ph, h, &area) {
+                    last = e;
+                    _ = ph.Unload();
+                    if server_gone(&last) {
+                        return Err(last);
+                    }
+                    continue;
+                }
+                return Ok(ph);
+            }
+        }
+    }
+    Err(last)
+}
+
+unsafe fn finish_preview(ph: &IPreviewHandler, h: HWND, area: &RECT) -> Result<()> {
+    ph.SetWindow(h, area)?;
+    do_preview_locked(ph)
+}
+
+// One thread per hosted preview. It unloads the handler and destroys the host window
+// on this apartment. The UI thread only asks, then waits.
+fn host_thread(gen: usize, clsid: GUID, path: String, hwnd: isize, popup: isize, area: RECT, ctl: Arc<HostCtl>) {
+    let _done = HostDone(ctl.clone());
     unsafe {
         let tid = GetCurrentThreadId() as usize;
         HOST_TID.store(tid, Ordering::SeqCst);
-        let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let _com = ComUninit(CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok());
         let h = HWND(hwnd as _);
+        let mut session = HandlerSession { ph: None, host: h };
+        let mut keep = || HOST_GEN.load(Ordering::SeqCst) == gen && !ctl.unload.load(Ordering::Acquire);
+        // The queue has to exist before DoPreview, or a size posted during startup is lost.
+        let mut prime = MSG::default();
+        _ = PeekMessageW(&mut prime, None, WM_PEEK_HOST_SIZE, WM_PEEK_HOST_SIZE, PM_NOREMOVE);
+        if !keep() {
+            return;
+        }
         let (mut seen, area) = match host_area(gen) {
             Some((seq, area)) => (seq, area),
             None => (0, area),
         };
-        let ph = host_handler(h, &clsid, &path, area);
-        let wanted = || HOST_GEN.load(Ordering::SeqCst) == gen;
-        if wanted() {
-            _ = PostMessageW(Some(HWND(popup as _)), WM_PEEK_HOSTED, WPARAM(gen), LPARAM(ph.is_ok() as isize));
-        }
-        if let Ok(ph) = ph {
-            let mut msg = MSG::default();
-            while wanted() && IsWindow(Some(h)).as_bool() {
-                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                    if msg.message == WM_PEEK_HOST_SIZE {
-                        apply_host_rect(&ph, gen, &mut seen);
-                    } else {
-                        _ = TranslateMessage(&msg);
-                        DispatchMessageW(&msg);
+        let popup_hwnd = HWND(popup as _);
+        // Failure is posted only after Unload. Posting it earlier lets the UI wait for this
+        // thread while this thread is inside a SendMessage to the UI (Unload / DestroyWindow).
+        let mut tell_fail = false;
+        match host_handler(h, &clsid, &path, area) {
+            Ok(ph) => {
+                session.ph = Some(ph);
+                if keep() {
+                    let pid = remember_handler_pid(h, &ctl);
+                    let fg = foreground_process();
+                    if should_reclaim(fg, pid, GetCurrentProcessId()) {
+                        _ = PostMessageW(Some(popup_hwnd), WM_PEEK_RECLAIM, WPARAM(gen), LPARAM(0));
+                    }
+                    _ = PostMessageW(Some(popup_hwnd), WM_PEEK_HOSTED, WPARAM(gen), LPARAM(1));
+                    let ph = session.ph.as_ref().unwrap();
+                    let end = drive_host(ph, h, WM_PEEK_HOST_SIZE, &mut keep, |ph| apply_host_rect(ph, gen, &mut seen));
+                    if end == HostRun::Failed && keep() {
+                        tell_fail = true;
                     }
                 }
-                apply_host_rect(&ph, gen, &mut seen);
-                _ = MsgWaitForMultipleObjects(None, false, 100, QS_ALLINPUT);
             }
-            _ = ph.Unload();
+            Err(_) => {
+                if keep() {
+                    tell_fail = true;
+                }
+            }
+        }
+        drop(session);
+        if tell_fail {
+            note_handler_failure(&path);
+            _ = PostMessageW(Some(popup_hwnd), WM_PEEK_HOSTED, WPARAM(gen), LPARAM(0));
         }
         if HOST_TID.load(Ordering::SeqCst) == tid {
             HOST_TID.store(0, Ordering::SeqCst);
         }
-        if com {
-            CoUninitialize();
-        }
+        // `session` drops first (Unload, then the host HWND), then COM, then `done`.
     }
 }
 
@@ -1679,8 +1796,13 @@ unsafe fn start_handler(h: HWND, gen: usize) {
     };
     view(|v| v.host_win = Some(win));
     publish_host(gen, w, ht);
+    let ctl = HostCtl::fresh();
+    *host_live() = Some(ctl.clone());
     let (hwnd, popup, area) = (win.0 as isize, h.0 as isize, RECT { left: 0, top: 0, right: w, bottom: ht });
-    if std::thread::Builder::new().spawn(move || host_thread(gen, clsid, path, hwnd, popup, area)).is_err() {
+    if std::thread::Builder::new().spawn(move || host_thread(gen, clsid, path, hwnd, popup, area, ctl)).is_err() {
+        if let Some(ctl) = host_live().take() {
+            ctl.done.store(true, Ordering::Release);
+        }
         load_peek(true);
     }
 }
@@ -1767,6 +1889,34 @@ fn peek_host_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     }
 }
 
+unsafe fn refresh_handler_pid() {
+    let Some(ctl) = host_live().clone() else { return };
+    let Some(host) = view(|v| v.host_win) else { return };
+    let pid = child_process(host);
+    let ours = GetCurrentProcessId();
+    if pid != 0 && pid != ours {
+        ctl.handler_pid.store(pid, Ordering::Release);
+    }
+}
+
+unsafe fn look_of(peek: HWND, activating: HWND) -> Option<CloseLook> {
+    if activating.0.is_null() || !IsWindow(Some(activating)).as_bool() {
+        return None;
+    }
+    refresh_handler_pid();
+    let host = view(|v| v.host_win).unwrap_or_default();
+    let is_peek = activating == peek;
+    let descendant = !is_peek && (IsChild(peek, activating).as_bool() || (!host.0.is_null() && (activating == host || IsChild(host, activating).as_bool())));
+    let mut pid = 0u32;
+    _ = GetWindowThreadProcessId(activating, Some(&mut pid));
+    let ours = GetCurrentProcessId();
+    let handler = current_handler_pid();
+    let root = GetAncestor(activating, GA_ROOT);
+    let top = !root.0.is_null() && root == activating;
+    let win = classify_activate(is_peek, descendant, handler != 0 && pid == handler, top);
+    Some(CloseLook { win, same_process: pid != 0 && pid == ours })
+}
+
 // The host thread is done starting: shown, or read the file ourselves.
 unsafe fn handler_ready(h: HWND, gen: usize, ok: bool) {
     if HOST_GEN.load(Ordering::SeqCst) != gen || peek_job().gen != gen {
@@ -1774,11 +1924,30 @@ unsafe fn handler_ready(h: HWND, gen: usize, ok: bool) {
     }
     if ok {
         view(|v| v.hosted = Some(gen));
+        if let Some(ctl) = host_live().clone() {
+            if let Some(host) = view(|v| v.host_win) {
+                _ = remember_handler_pid(host, &ctl);
+            }
+            let fg = foreground_process();
+            if should_reclaim(fg, ctl.handler_pid.load(Ordering::Acquire), GetCurrentProcessId()) {
+                reclaim_foreground(h);
+            }
+            ctl.loading.store(false, Ordering::Release);
+        }
         // the handler's window may have taken the focus: arrows and Esc stay ours
-        if GetActiveWindow() == h {
+        if GetActiveWindow() == h || GetForegroundWindow() == h {
             _ = SetFocus(Some(h));
         }
     } else {
+        if UNLOAD_BUSY.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(path) = peek_job().req.as_ref().map(|r| r.path.clone()) {
+            note_handler_failure(&path);
+        }
+        if let Some(ctl) = host_live().as_ref() {
+            ctl.loading.store(false, Ordering::Release);
+        }
         load_peek(true);
     }
     _ = InvalidateRect(Some(h), None, false);
@@ -3205,6 +3374,7 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 _ = InvalidateRect(Some(h), None, false);
             }
             WM_PEEK_HOSTED => handler_ready(h, wp.0, lp.0 != 0),
+            WM_PEEK_RECLAIM => reclaim_foreground(h),
             WM_MOUSEMOVE => {
                 let (x, y) = lp_xy(lp);
                 if let Some((px, py)) = view(|v| v.pan_pt) {
@@ -3435,13 +3605,25 @@ fn peek_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     }
                 }
             }
-            // another app or a click behind closes it; stepping takes the activation away only for a moment
+            // Another app or a click on the main window closes it. A handler server that
+            // takes activation while it is loading does not: lParam is checked again
+            // against the foreground window once this posted message runs.
             WM_ACTIVATE if (wp.0 & 0xffff) as u32 == WA_INACTIVE => {
                 if !HOLD_PEEK.load(Ordering::SeqCst) {
-                    _ = PostMessageW(Some(h), WM_PEEK_LOST, WPARAM(0), LPARAM(0));
+                    _ = PostMessageW(Some(h), WM_PEEK_LOST, WPARAM(0), lp);
                 }
             }
-            WM_PEEK_LOST if GetActiveWindow() != h && !HOLD_PEEK.load(Ordering::SeqCst) => _ = DestroyWindow(h),
+            WM_PEEK_LOST if !HOLD_PEEK.load(Ordering::SeqCst) => {
+                let posted = HWND(lp.0 as _);
+                let fg = GetForegroundWindow();
+                let close = close_after_deferral(false, look_of(h, posted), look_of(h, fg), handler_is_loading());
+                if close && GetActiveWindow() != h {
+                    unload_handler();
+                    _ = DestroyWindow(h);
+                } else if GetForegroundWindow() != h {
+                    reclaim_foreground(h);
+                }
+            }
             WM_DESTROY => {
                 crate::pane::marks_overlay::note_peek(false);
                 let from_find = FROM_FIND.load(Ordering::SeqCst);

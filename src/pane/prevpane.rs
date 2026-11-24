@@ -4,13 +4,18 @@
 //! SVG, PDF, and parsed office files. Audio and video use a registered preview
 //! handler when one exists, otherwise a thumbnail or a card. Any other registered
 //! Windows preview handler gets a child window under the attribute header. The
-//! handler lives on its own thread and is released when the selection changes or
-//! the pane closes.
+//! handler lives on its own thread. The UI asks that thread to unload the handler
+//! before the host window is destroyed, and waits briefly so a stuck handler
+//! cannot block the pane.
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
+
+use super::prehost::{
+    drive_host, foreground_process, note_handler_failure, reclaim_foreground, release_host_window, remember_handler_pid, should_reclaim, ComUninit, HandlerSession,
+    HostCtl, HostDone, HostRun, WM_HOST_UNLOAD,
+};
 
 use super::fsize::{cached_stat, classify_ui, is_volume_root, preview_walk, remember_stat};
 use super::peek::{bar_hit, bar_layout, bar_rgb, host_handler, image_fit_px, nudge, page_toward, paint_card, scaled, thumb_scroll, zoom_after, zoom_cmd, zoom_factor, zoom_or_fit, BarHit, PeekReq, Pix};
@@ -23,7 +28,7 @@ use crate::i18n::*;
 use crate::imports::*;
 use crate::ui::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
-use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::Controls::{IImageList, ILD_NORMAL};
 use windows::Win32::UI::Shell::IPreviewHandler;
 
@@ -32,6 +37,7 @@ const WM_PREVIEW_READY: u32 = WM_APP + 70; // wParam = generation; the result si
 const WM_PREVIEW_SIZE: u32 = WM_APP + 71; // thread message: the host window changed size
 const WM_PREVIEW_HOSTED: u32 = WM_APP + 72; // wParam = generation, lParam = 1 shown / 0 failed
 const WM_PREVIEW_TOTAL: u32 = WM_APP + 73; // wParam = generation; a folder walk finished
+const WM_PREVIEW_RECLAIM: u32 = WM_APP + 75; // handler process took the foreground
 const CMD_COPY: usize = 1;
 const CMD_EDIT: usize = 2;
 
@@ -85,7 +91,8 @@ struct Slot {
     hit: Hit,
     head_h: i32,
     bar_drag: Option<i32>,
-    host: isize, // HWND is not Send; the UI thread is the only one that creates or destroys it
+    host: isize, // HWND is not Send; the host thread destroys it after Unload
+    ctl: Option<Arc<HostCtl>>,
     tid: u32,
     area_w: i32,
     area_h: i32,
@@ -118,6 +125,7 @@ impl Default for Slot {
             head_h: 0,
             bar_drag: None,
             host: 0,
+            ctl: None,
             tid: 0,
             area_w: 0,
             area_h: 0,
@@ -629,19 +637,40 @@ unsafe fn on_total(h: HWND, gen: u64) {
     _ = InvalidateRect(Some(h), None, false);
 }
 
+static DROP_BUSY: AtomicBool = AtomicBool::new(false);
+
 unsafe fn drop_host(key: isize) {
-    let host = {
-        let mut map = slots();
-        let Some(slot) = map.get_mut(&key) else { return };
-        slot.tid = 0;
-        let host = slot.host;
-        slot.host = 0;
-        host
-    };
-    let host = HWND(host as _);
-    if !host.0.is_null() && IsWindow(Some(host)).as_bool() {
-        _ = DestroyWindow(host);
+    if DROP_BUSY.swap(true, Ordering::SeqCst) {
+        let (tid, ctl) = {
+            let map = slots();
+            match map.get(&key) {
+                Some(slot) => (slot.tid, slot.ctl.clone()),
+                None => (0, None),
+            }
+        };
+        if let Some(ctl) = ctl {
+            ctl.unload.store(true, Ordering::Release);
+            if tid != 0 {
+                _ = PostThreadMessageW(tid, WM_HOST_UNLOAD, WPARAM(0), LPARAM(0));
+            }
+        }
+        return;
     }
+    let (host, tid, ctl) = {
+        let mut map = slots();
+        let Some(slot) = map.get_mut(&key) else {
+            DROP_BUSY.store(false, Ordering::SeqCst);
+            return;
+        };
+        let host = slot.host;
+        let tid = slot.tid;
+        slot.tid = 0;
+        slot.host = 0;
+        let ctl = slot.ctl.take();
+        (host, tid, ctl)
+    };
+    release_host_window(ctl, HWND(host as _), tid);
+    DROP_BUSY.store(false, Ordering::SeqCst);
 }
 
 unsafe fn give_back(h: HWND) {
@@ -743,6 +772,7 @@ unsafe fn start_host(h: HWND, gen: u64, clsid: GUID, path: String) {
         enqueue(Work { hwnd: key, gen, path, w, h: ht, skip_handler: true });
         return;
     };
+    let ctl = HostCtl::fresh();
     {
         let mut map = slots();
         let Some(slot) = map.get_mut(&key) else {
@@ -756,19 +786,26 @@ unsafe fn start_host(h: HWND, gen: u64, clsid: GUID, path: String) {
             return;
         }
         slot.host = win.0 as isize;
+        slot.ctl = Some(ctl.clone());
         slot.area_w = w;
         slot.area_h = ht;
         slot.seq = slot.seq.wrapping_add(1);
     }
     let (hwnd, popup, area) = (win.0 as isize, h.0 as isize, RECT { left: 0, top: 0, right: w, bottom: ht });
     let again = path.clone();
-    if std::thread::Builder::new().name("maguro-preview-host".into()).spawn(move || host_thread(gen, clsid, path, hwnd, popup, area)).is_err() {
+    if std::thread::Builder::new().name("maguro-preview-host".into()).spawn(move || host_thread(gen, clsid, path, hwnd, popup, area, ctl)).is_err() {
+        if let Some(slot) = slots().get_mut(&key) {
+            if let Some(ctl) = slot.ctl.take() {
+                ctl.done.store(true, Ordering::Release);
+            }
+        }
         drop_host(key);
         enqueue(Work { hwnd: key, gen, path: again, w, h: ht, skip_handler: true });
     }
 }
 
-unsafe fn host_thread(gen: u64, clsid: GUID, path: String, hwnd: isize, popup: isize, area: RECT) {
+unsafe fn host_thread(gen: u64, clsid: GUID, path: String, hwnd: isize, popup: isize, area: RECT, ctl: Arc<HostCtl>) {
+    let _done = HostDone(ctl.clone());
     let tid = GetCurrentThreadId();
     let key = popup;
     {
@@ -779,31 +816,49 @@ unsafe fn host_thread(gen: u64, clsid: GUID, path: String, hwnd: isize, popup: i
             }
         }
     }
-    let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+    let _com = ComUninit(unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() });
     let h = HWND(hwnd as _);
-    let mut prime = MSG::default();
-    // The queue has to exist before DoPreview, or a size posted during startup is lost.
-    _ = PeekMessageW(&mut prime, None, WM_PREVIEW_SIZE, WM_PREVIEW_SIZE, PM_NOREMOVE);
-    let ph = host_handler(h, &clsid, &path, area);
-    if current(key, gen) {
-        _ = PostMessageW(Some(HWND(popup as _)), WM_PREVIEW_HOSTED, WPARAM(gen as usize), LPARAM(ph.is_ok() as isize));
-    }
-    if let Ok(ph) = ph {
-        let mut seen = 0u64;
-        let mut msg = MSG::default();
-        while current(key, gen) && IsWindow(Some(h)).as_bool() {
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_PREVIEW_SIZE {
-                    apply_host_rect(&ph, key, gen, &mut seen);
-                } else {
-                    _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
+    let mut session = HandlerSession { ph: None, host: h };
+    let mut keep = || current(key, gen) && !ctl.unload.load(Ordering::Acquire);
+    // Posted after Unload so the UI never waits on this thread from inside the thread's SendMessage.
+    let mut tell_fail = false;
+    unsafe {
+        let mut prime = MSG::default();
+        // The queue has to exist before DoPreview, or a size posted during startup is lost.
+        _ = PeekMessageW(&mut prime, None, WM_PREVIEW_SIZE, WM_PREVIEW_SIZE, PM_NOREMOVE);
+        if !keep() {
+            return;
+        }
+        let popup_hwnd = HWND(popup as _);
+        match host_handler(h, &clsid, &path, area) {
+            Ok(ph) => {
+                session.ph = Some(ph);
+                if keep() {
+                    let pid = remember_handler_pid(h, &ctl);
+                    let fg = foreground_process();
+                    if should_reclaim(fg, pid, GetCurrentProcessId()) {
+                        _ = PostMessageW(Some(popup_hwnd), WM_PREVIEW_RECLAIM, WPARAM(gen as usize), LPARAM(0));
+                    }
+                    _ = PostMessageW(Some(popup_hwnd), WM_PREVIEW_HOSTED, WPARAM(gen as usize), LPARAM(1));
+                    let mut seen = 0u64;
+                    let ph = session.ph.as_ref().unwrap();
+                    let end = drive_host(ph, h, WM_PREVIEW_SIZE, &mut keep, |ph| apply_host_rect(ph, key, gen, &mut seen));
+                    if end == HostRun::Failed && keep() {
+                        tell_fail = true;
+                    }
                 }
             }
-            apply_host_rect(&ph, key, gen, &mut seen);
-            _ = MsgWaitForMultipleObjects(None, false, 100, QS_ALLINPUT);
+            Err(_) => {
+                if keep() {
+                    tell_fail = true;
+                }
+            }
         }
-        _ = ph.Unload();
+    }
+    drop(session);
+    if tell_fail {
+        note_handler_failure(&path);
+        unsafe { _ = PostMessageW(Some(HWND(popup as _)), WM_PREVIEW_HOSTED, WPARAM(gen as usize), LPARAM(0)) };
     }
     {
         let mut map = slots();
@@ -813,24 +868,21 @@ unsafe fn host_thread(gen: u64, clsid: GUID, path: String, hwnd: isize, popup: i
             }
         }
     }
-    if com {
-        CoUninitialize();
-    }
 }
 
-unsafe fn apply_host_rect(ph: &IPreviewHandler, key: isize, gen: u64, seen: &mut u64) {
+unsafe fn apply_host_rect(ph: &IPreviewHandler, key: isize, gen: u64, seen: &mut u64) -> Result<()> {
     let Some((seq, w, ht)) = ({
         let map = slots();
         map.get(&key).and_then(|s| (s.gen == gen && s.area_w > 0 && s.area_h > 0).then_some((s.seq, s.area_w, s.area_h)))
     }) else {
-        return;
+        return Ok(());
     };
     if seq == *seen {
-        return;
+        return Ok(());
     }
     *seen = seq;
     let area = RECT { left: 0, top: 0, right: w, bottom: ht };
-    _ = ph.SetRect(&area);
+    ph.SetRect(&area)
 }
 
 unsafe fn sync_host(h: HWND) {
@@ -874,11 +926,33 @@ unsafe fn on_hosted(h: HWND, gen: u64, ok: bool) {
         if let Some(slot) = slots().get_mut(&key) {
             if slot.gen == gen {
                 slot.kind = Kind::Handler;
+                if let Some(ctl) = slot.ctl.clone() {
+                    ctl.loading.store(false, Ordering::Release);
+                }
+            }
+        }
+        let host = slots().get(&key).map(|s| s.host).unwrap_or(0);
+        if let Some(ctl) = slots().get(&key).and_then(|s| s.ctl.clone()) {
+            if host != 0 {
+                _ = remember_handler_pid(HWND(host as _), &ctl);
+            }
+            let fg = foreground_process();
+            if should_reclaim(fg, ctl.handler_pid.load(Ordering::Acquire), GetCurrentProcessId()) {
+                let main = app(|a| a.main);
+                if !main.0.is_null() {
+                    reclaim_foreground(main);
+                }
             }
         }
         give_back(h);
         _ = InvalidateRect(Some(h), None, false);
         return;
+    }
+    if DROP_BUSY.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Some(path) = slots().get(&key).map(|s| s.path.clone()) {
+        note_handler_failure(&path);
     }
     drop_host(key);
     let (path, w, ht) = {
@@ -1212,6 +1286,13 @@ fn preview_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_CONTEXTMENU => preview_menu(h, lp),
             WM_PREVIEW_READY => on_ready(h, wp.0 as u64),
             WM_PREVIEW_HOSTED => on_hosted(h, wp.0 as u64, lp.0 != 0),
+            WM_PREVIEW_RECLAIM => {
+                let main = app(|a| a.main);
+                if !main.0.is_null() {
+                    reclaim_foreground(main);
+                }
+                give_back(h);
+            }
             WM_PREVIEW_TOTAL => on_total(h, wp.0 as u64),
             WM_DESTROY => preview_clear(),
             _ => return DefWindowProcW(h, msg, wp, lp),

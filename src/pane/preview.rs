@@ -92,14 +92,26 @@ pub(crate) fn maguro_owns(ext: &str) -> bool {
 
 /// Shell preview handler for a type Maguro does not draw, when one is registered and the file is small enough.
 /// `plain` means that handler already failed. `registered` is the lookup result, so tests skip the registry.
+/// Parsed spreadsheets never take the handler. `handlers_first` is the old "handler before Maguro" route.
 pub(crate) fn want_shell_handler(ext: &str, len: u64, plain: bool, registered: bool) -> bool {
-    !plain && registered && len > 0 && len <= HEAVY_MAX && !maguro_owns(ext)
+    shell_handler_wanted(ext, len, plain, registered, false)
+}
+
+pub(crate) fn shell_handler_wanted(ext: &str, len: u64, plain: bool, registered: bool, handlers_first: bool) -> bool {
+    if plain || !registered || len == 0 || len > HEAVY_MAX {
+        return false;
+    }
+    super::prehost::allow_shell_handler(ext, maguro_owns(ext), handlers_first)
 }
 
 pub(crate) fn handler_for(ext: &str) -> Option<GUID> {
+    // xlsx, xlsm, xltx, ods, csv, and tsv are drawn here. Do not resolve Excel's handler for them.
+    if super::prehost::maguro_spreadsheet(ext) {
+        return None;
+    }
     const PREVIEW: PCWSTR = w!("{8895b1c6-b41f-4c1c-a562-0d564250836f}");
     let twin = match ext {
-        "xlsm" | "xltx" | "xlsb" => "xlsx",
+        "xlsb" => "xlsx", // binary workbook; the parsed xlsx/xlsm/xltx types never reach this lookup
         "docm" | "dotx" => "docx",
         "pptm" | "ppsx" | "potx" | "pps" => "pptx",
         "mhtml" => "mht",
@@ -159,9 +171,10 @@ pub(crate) unsafe fn content(req: &PeekReq) -> Body {
         };
     }
     let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let skip_handler = req.plain || super::prehost::handler_failure_blocks(path, super::prehost::mtime_key(meta.as_ref().and_then(|m| m.modified().ok())));
     // Audio and video: a registered handler when the file is small enough, otherwise the old thumbnail or card.
     if VIDEOS.contains(&e) || AUDIO.contains(&e) {
-        if want_shell_handler(e, len, req.plain, true) {
+        if want_shell_handler(e, len, skip_handler, true) {
             if let Some(g) = handler_for(e) {
                 return Body::Handler(g);
             }
@@ -181,13 +194,13 @@ pub(crate) unsafe fn content(req: &PeekReq) -> Body {
     }
     // Same order in Quick Look and the docked pane: Maguro's own preview for types it draws,
     // otherwise any registered IPreviewHandler (not only the old extension list).
-    if want_shell_handler(e, len, req.plain, true) {
+    if want_shell_handler(e, len, skip_handler, true) {
         if let Some(g) = handler_for(e) {
             return Body::Handler(g);
         }
     }
     let found = match e {
-        "pdf" => pdf_first(path, req).or_else(|| (!req.plain).then(|| handler_for(e).map(Body::Handler)).flatten()),
+        "pdf" => pdf_first(path, req).or_else(|| (!skip_handler).then(|| handler_for(e).map(Body::Handler)).flatten()),
         "csv" | "tsv" => read_head(path, TEXT_MAX).filter(|(b, _)| looks_text(b)).map(|(b, cut)| {
             let text = decode_text(&b);
             let sep = if e == "tsv" { '\t' } else { csv_sep(&text) };
@@ -1196,6 +1209,15 @@ mod tests {
         assert!(!want_shell_handler("dwg", 0, false, true));
         assert!(!want_shell_handler("html", HEAVY_MAX + 1, false, true));
         assert!(!want_shell_handler("html", 100, false, false));
+        for ext in ["xlsx", "xlsm", "xltx", "ods", "csv", "tsv"] {
+            assert!(!shell_handler_wanted(ext, 100, false, true, true), "{ext}");
+            assert!(!shell_handler_wanted(ext, 100, false, true, false), "{ext}");
+        }
+        assert!(shell_handler_wanted("xls", 100, false, true, false));
+        assert!(shell_handler_wanted("xlsb", 100, false, true, true));
+        assert!(!shell_handler_wanted("xls", 100, true, true, true));
+        assert!(shell_handler_wanted("docx", 100, false, true, true));
+        assert!(!shell_handler_wanted("docx", 100, false, true, false));
     }
 
     #[test]
