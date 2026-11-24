@@ -825,15 +825,16 @@ pub(crate) fn cell_rect(g: &Geo, h: &[usize], i: usize) -> RECT {
     RECT { left: x0, top: y0, right: x1, bottom: y1 }
 }
 
-// Inside a pane plate: icon buttons, address pill, ⇄, filter pill on top; a pane-tab
-// strip under that bar when this pane has two or more tabs; the Explorer view below.
-// One tab hides the strip (the list uses it) and shows `add` just to the right of ⇄.
-// Window tabs are a different strip, on the main window.
+// Inside a pane plate: pane number, back, forward, up, new-pane-tab, address pill,
+// filter pill, favourite. A pane-tab strip sits under that bar when this pane has
+// two or more tabs; the Explorer view is below. One tab hides the strip and shows
+// `add` immediately to the right of Up, packed like the nav buttons. Window tabs
+// are a different strip, on the main window.
 pub(crate) struct PaneGeo {
     pub(crate) num: RECT,      // pane-number badge; the header drag handle, kept on a narrow pane
-    pub(crate) btn: [RECT; 4], // back, forward, up, open-in
+    pub(crate) btn: [RECT; 3], // back, forward, up
     pub(crate) addr: RECT,
-    pub(crate) add: RECT, // add-tab button; zero width while the strip is showing
+    pub(crate) add: RECT, // add-tab button; zero width while the strip is showing, or when it is dropped
     pub(crate) filt: RECT,
     pub(crate) fav: RECT,
     pub(crate) tabs: RECT, // pane-tab strip between the bar and the list; empty while this pane has one tab
@@ -848,7 +849,6 @@ struct HeaderChrome {
     back: bool,
     fwd: bool,
     up: bool,
-    swap: bool,
     add: bool,
     fav: bool,
     filt: i32,
@@ -856,16 +856,15 @@ struct HeaderChrome {
 
 /// `strip` when this pane has two or more tabs. Callers that have a window use `pane_geo_of`.
 /// The number stays. The address stays wide enough for the folder name. The filter shrinks
-/// first, then up, forward, back, +, ⇄ and the star, in that order.
+/// first, then up, forward, back, +, and the star, in that order.
 pub(crate) fn pane_geo(w: i32, h: i32, dpi: i32, strip: bool) -> PaneGeo {
     let s = |v: i32| v * dpi / 96;
-    // back, forward, up, ⇄, favourite; the add-tab button joins them while the strip is hidden
-    let nbtn = if strip { 5 } else { 6 };
+    // back, forward, up, favourite; the add-tab button joins them while the strip is hidden
+    let nbtn = if strip { 4 } else { 5 };
     let mut chrome = HeaderChrome {
         back: true,
         fwd: true,
         up: true,
-        swap: true,
         add: !strip,
         fav: true,
         filt: s(150).min((w - 2 * s(4) - nbtn * s(24)) / 3).max(0),
@@ -900,10 +899,6 @@ pub(crate) fn pane_geo(w: i32, h: i32, dpi: i32, strip: bool) -> PaneGeo {
             chrome.add = false;
             continue;
         }
-        if chrome.swap {
-            chrome.swap = false;
-            continue;
-        }
         if chrome.fav {
             chrome.fav = false;
             continue;
@@ -933,9 +928,11 @@ fn place_header(w: i32, h: i32, dpi: i32, strip: bool, chrome: &HeaderChrome) ->
     let btn0 = take(&mut x, chrome.back);
     let btn1 = take(&mut x, chrome.fwd);
     let btn2 = take(&mut x, chrome.up);
-    let nav = chrome.back || chrome.fwd || chrome.up;
+    // Same packing as Back / Forward / Up: no extra gap before New pane tab.
+    let add = take(&mut x, chrome.add);
+    let nav = chrome.back || chrome.fwd || chrome.up || chrome.add;
 
-    // Right side, packed from the window edge: star, filter, +, ⇄.
+    // Right side, packed from the window edge: star, then filter.
     let mut edge = w - pad;
     let fav = if chrome.fav {
         edge -= b;
@@ -952,31 +949,12 @@ fn place_header(w: i32, h: i32, dpi: i32, strip: bool, chrome: &HeaderChrome) ->
     } else {
         zero(edge)
     };
-    let add = if chrome.add {
-        if chrome.fav || chrome.filt > 0 {
-            edge -= gap;
-        }
-        edge -= b;
-        rect(edge, b)
-    } else {
-        zero(edge)
-    };
-    let swap_on = chrome.swap;
-    let btn3 = if swap_on {
-        if chrome.fav || chrome.filt > 0 || chrome.add {
-            edge -= gap;
-        }
-        edge -= b;
-        rect(edge, b)
-    } else {
-        zero(edge)
-    };
-    let right = chrome.fav || chrome.filt > 0 || chrome.add || swap_on;
+    let right = chrome.fav || chrome.filt > 0;
     let addr_left = if nav { x + pad } else { x };
     let addr_right = if right { edge - pad } else { (w - pad).max(addr_left) };
     PaneGeo {
         num,
-        btn: [btn0, btn1, btn2, btn3],
+        btn: [btn0, btn1, btn2],
         addr: rect(addr_left, (addr_right - addr_left).max(0)),
         add,
         filt,
@@ -2136,7 +2114,7 @@ mod tests {
         assert!(pane_tab_close_rect(RECT { left: 0, top: 0, right: 64, bottom: 20 }, 96).is_some());
         let pg = PaneGeo {
             num: RECT::default(),
-            btn: [RECT::default(); 4],
+            btn: [RECT::default(); 3],
             addr: RECT::default(),
             filt: RECT::default(),
             fav: RECT::default(),
@@ -2165,10 +2143,14 @@ mod tests {
         assert_eq!(one.view.bottom, many.view.bottom);
         assert_eq!(one.add.right - one.add.left, 24);
         assert_eq!(many.add.left, many.add.right);
-        assert_eq!(one.btn[3].right + 2, one.add.left);
-        assert_eq!(one.add.right + 2, one.filt.left);
-        assert_eq!(many.btn[3].right + 2, many.filt.left);
-        assert!(one.addr.right < many.addr.right);
+        // + sits against Up. The address pill starts after the usual pad.
+        assert_eq!(one.btn[2].right, one.add.left);
+        assert_eq!(one.add.right + 4, one.addr.left);
+        assert_eq!(one.addr.right + 4, one.filt.left);
+        assert_eq!(many.btn[2].right + 4, many.addr.left);
+        assert_eq!(many.addr.right + 4, many.filt.left);
+        assert_eq!(one.addr.right, many.addr.right);
+        assert!(one.addr.left > many.addr.left);
         // The number is reserved first and stays either way.
         for strip in [false, true] {
             let narrow = pane_geo(80, 400, 96, strip);
@@ -2178,7 +2160,7 @@ mod tests {
             let s = |v: i32| v * dpi / 96;
             for w in [400, 800, 1200] {
                 let p = pane_geo(w, 400, dpi, strip);
-                let row = [p.num, p.btn[0], p.btn[1], p.btn[2], p.addr, p.btn[3], p.add, p.filt, p.fav];
+                let row = [p.num, p.btn[0], p.btn[1], p.btn[2], p.add, p.addr, p.filt, p.fav];
                 assert!(row.windows(2).all(|x| x[0].right <= x[1].left), "{w}@{dpi} strip={strip}");
                 assert!(p.num.right - p.num.left == s(PANE_NUM_W) && p.fav.right <= w && p.view.top >= p.btn[0].bottom, "{w}@{dpi}");
             }
@@ -2186,7 +2168,7 @@ mod tests {
                 let p = pane_geo(w, 400, dpi, strip);
                 assert!(p.fav.right <= w && p.view.top >= p.btn[0].bottom, "{w}@{dpi}");
                 assert!(p.num.right > p.num.left && p.num.right <= w, "{w}@{dpi}");
-                let live: Vec<RECT> = [p.btn[0], p.btn[1], p.btn[2], p.btn[3], p.addr, p.add, p.filt, p.fav]
+                let live: Vec<RECT> = [p.btn[0], p.btn[1], p.btn[2], p.add, p.addr, p.filt, p.fav]
                     .into_iter()
                     .filter(|c| c.right > c.left)
                     .collect();
@@ -2205,8 +2187,15 @@ mod tests {
                     let add_w = p.add.right - p.add.left;
                     assert!(add_w == s(24) || add_w == 0, "{w}@{dpi}");
                     assert_eq!((p.tabs.bottom, p.view.top), (p.tabs.top, p.tabs.top));
-                    if p.btn[3].left >= p.btn[2].right && p.btn[3].right > p.btn[3].left && p.add.right > p.add.left {
-                        assert!(p.btn[3].right <= p.add.left && p.add.right <= p.filt.left, "{w}@{dpi}");
+                    if p.add.right > p.add.left {
+                        let nav_right = [p.btn[0], p.btn[1], p.btn[2]]
+                            .into_iter()
+                            .filter(|b| b.right > b.left)
+                            .map(|b| b.right)
+                            .max()
+                            .unwrap_or(p.num.right);
+                        assert_eq!(p.add.left, nav_right, "{w}@{dpi}");
+                        assert!(p.add.right + 4 <= p.addr.left, "{w}@{dpi}");
                     }
                 }
             }
@@ -2218,8 +2207,8 @@ mod tests {
         // Wide pane: the number leads, and the address edit still keeps its s(32).
         let wide = pane_geo(800, 500, 96, true);
         assert_eq!((wide.num.left, wide.num.right), (4, 34));
-        assert_eq!((wide.btn[0].left, wide.btn[2].right, wide.addr.left, wide.addr.right), (34, 106, 110, 590));
-        assert_eq!((wide.btn[3].left, wide.filt.left, wide.filt.right, wide.fav.left), (594, 620, 770, 772));
+        assert_eq!((wide.btn[0].left, wide.btn[2].right, wide.addr.left, wide.addr.right), (34, 106, 110, 616));
+        assert_eq!((wide.filt.left, wide.filt.right, wide.fav.left), (620, 770, 772));
         // Just below the old cutoff the number used to vanish. It stays, and the address keeps a folder name.
         let above = pane_geo(241, 500, 96, true);
         let below = pane_geo(240, 500, 96, true);
@@ -2228,21 +2217,28 @@ mod tests {
         assert!(edit(&above) >= 66 && edit(&below) >= 66);
         assert_eq!((below.num.left, below.num.right), (4, 34));
         assert_eq!((below.btn[0].left, below.addr.left), (above.btn[0].left, above.addr.left));
-        // The badge is 12 DIP wider than the old 18px label, so Up gives way at 240.
-        // Back, forward, swap and the star stay full size. Nothing is a sliver.
-        assert_eq!(below.btn[2].left, below.btn[2].right);
+        // ⇄ is gone, so Up still fits at 240. Back, forward, up and the star stay full size.
+        // The filter has already given way. Nothing is a sliver.
+        assert_eq!(below.filt.left, below.filt.right);
         assert_eq!(
-            (below.btn[0].right - below.btn[0].left, below.btn[1].right - below.btn[1].left, below.btn[3].right - below.btn[3].left, below.fav.right - below.fav.left),
+            (below.btn[0].right - below.btn[0].left, below.btn[1].right - below.btn[1].left, below.btn[2].right - below.btn[2].left, below.fav.right - below.fav.left),
             (24, 24, 24, 24)
         );
-        let room = pane_geo(248, 500, 96, true);
+        // Up gives way at 221. Forward and the star stay full size.
+        let tight = pane_geo(221, 500, 96, true);
+        assert_eq!(tight.btn[2].left, tight.btn[2].right);
+        assert_eq!(
+            (tight.btn[0].right - tight.btn[0].left, tight.btn[1].right - tight.btn[1].left, tight.fav.right - tight.fav.left),
+            (24, 24, 24)
+        );
+        let room = pane_geo(247, 500, 96, true);
         assert!(room.btn.iter().all(|r| r.right - r.left == 24) && room.fav.right - room.fav.left == 24);
         assert_eq!(room.filt.left, room.filt.right);
         // A ~20% column at 200% DPI (1x3). The label is the whole grab target.
         let col = pane_geo(384, 500, 192, true);
         assert_eq!(col.num.right - col.num.left, 60);
         assert!(col.addr.right - col.addr.left >= 160);
-        for c in [col.btn[0], col.btn[1], col.btn[2], col.btn[3], col.addr, col.filt, col.fav] {
+        for c in [col.btn[0], col.btn[1], col.btn[2], col.addr, col.filt, col.fav] {
             if c.right > c.left {
                 assert!(c.left >= col.num.right);
             }
@@ -2266,7 +2262,7 @@ mod tests {
                 // aa_rfill's rad is the RoundRect ellipse. The shorter side is a semicircle end.
                 assert_eq!(pane_num_radius(p.num), h, "{dpi} strip={strip}");
                 assert_eq!(p.btn[0].left, p.num.right, "{dpi} strip={strip}");
-                for c in [p.btn[0], p.btn[1], p.btn[2], p.btn[3], p.addr, p.add, p.filt, p.fav] {
+                for c in [p.btn[0], p.btn[1], p.btn[2], p.addr, p.add, p.filt, p.fav] {
                     if c.right > c.left {
                         assert!(c.left >= p.num.right, "overlaps the badge {dpi} strip={strip}");
                     }
@@ -2322,7 +2318,7 @@ mod tests {
             let p = pane_geo(w, s(120), dpi, strip);
             assert_eq!(p.num.right - p.num.left, s(PANE_NUM_W), "{dpi} strip={strip}");
             assert!(p.num.left >= 0 && p.num.right <= w, "{dpi} strip={strip}");
-            for c in [p.btn[0], p.btn[1], p.btn[2], p.btn[3], p.addr, p.add, p.filt, p.fav] {
+            for c in [p.btn[0], p.btn[1], p.btn[2], p.addr, p.add, p.filt, p.fav] {
                 if c.right > c.left {
                     assert!(c.left >= p.num.right, "overlaps the number {dpi} strip={strip} {:?}", c);
                 }
@@ -2332,7 +2328,7 @@ mod tests {
             assert!(addr_w >= s(80), "address dropped {dpi} strip={strip} w={addr_w}");
             let field = (p.addr.right - s(6)) - (p.addr.left + s(8));
             assert!(field >= s(16), "folder name has no room {dpi} strip={strip}");
-            // Back, forward, up, ⇄ and + give way before the address does.
+            // Back, forward, up and + give way before the address does.
             assert!(p.btn.iter().all(|r| r.right == r.left), "nav still up {dpi} strip={strip}");
             assert_eq!(p.add.left, p.add.right, "add still up {dpi} strip={strip}");
         }

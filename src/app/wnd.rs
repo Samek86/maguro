@@ -1144,7 +1144,7 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                     _ = InvalidateRect(Some(h), Some(&r), false);
                 }
             }
-            // folder dropped on the top bar: still this pane's? then open it here, as ⇄ does
+            // folder dropped on the top bar: still this pane's? then open it here
             WM_DROP_OPEN => {
                 let queued = app(|a| {
                     let mine = a.drop_open.as_ref().is_some_and(|(w, i, _)| *w == h && a.panes[*i].as_ref().is_some_and(|p| p.hwnd == h));
@@ -1184,11 +1184,6 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 (ID_BACK, _) => nav(SBSP_NAVIGATEBACK),
                 (ID_FWD, _) => nav(SBSP_NAVIGATEFORWARD),
                 (ID_UP, _) => nav(SBSP_PARENT),
-                (ID_OPEN_IN, _) => {
-                    if let Some(i) = pane_of(h) {
-                        open_in_click(h, i);
-                    }
-                }
                 (ID_PANE_ADD, _) => {
                     if let Some(i) = pane_of(h) {
                         set_active(i);
