@@ -38,7 +38,6 @@ pub(crate) fn glyph(id: i32) -> &'static str {
         ID_BACK => "\u{E72B}",
         ID_FWD => "\u{E72A}",
         ID_UP => "\u{E74A}",
-        ID_OPEN_IN => "\u{E8AB}",
         ID_PANE_ADD => ICON_PLUS,
         ID_TB_LAYOUT => "\u{E8A9}",
         // Tab-row save/load are drawn in sicon.rs. These points remain for glyph().
