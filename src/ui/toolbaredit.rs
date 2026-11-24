@@ -29,6 +29,11 @@ const TIMER_EDGE: usize = 1;
 /// Client minimum, in DIP. `WM_GETMINMAXINFO` turns this into an outer size.
 const EDIT_MIN_W: i32 = 420;
 const EDIT_MIN_H: i32 = 360;
+/// Fresh client size, in DIP. Measured `open_client(None)` was 560×618 at 96 DPI
+/// and 840×927 at 144 DPI: the old 520 DIP height was clamped up by the narrow
+/// catalog stack. This is 1.5× that width and 2/3 of that height.
+const EDIT_OPEN_W: i32 = 840;
+const EDIT_OPEN_H: i32 = 412;
 /// Icon slot on a palette card, DIP. The slot used to start 2 DIP from the top.
 const WELL_ICON_W: i32 = 30;
 const WELL_ICON_H: i32 = 24;
@@ -220,29 +225,59 @@ fn edge_delta(origin: i32, span: i32, pos: i32, zone: i32, step: i32) -> i32 {
     }
 }
 
-/// Client size at which the bar, the change-target row, every palette card, the icon
-/// settings, and the footer all sit fully inside the window and do not overlap.
+/// Resize floor. Width fits the footer (restore, full-size icon segments, preview, done).
+/// Height is the chrome floor, not the height of every palette card at that narrow width.
 ///
-/// Width is the footer row (restore, full-size icon segments, preview, done). Height is
-/// the smallest size `edit_layout` accepts for the whole catalog, with a target selected
-/// so the change row and the icon settings are both present.
+/// The old height search ran at this narrow width, where the catalog needs seven rows,
+/// and returned 618 at 96 DPI. `open_client` then refused anything shorter, so the
+/// 412 DIP default never appeared. At the wider default the same cards use more
+/// columns and fit; when they do not, the palette scrolls. The bar, hint, change row,
+/// icon settings, and footer stay fully visible either way.
 fn min_client(dpi: i32) -> (i32, i32) {
     let w = footer_min_width(dpi).max(px(dpi, EDIT_MIN_W));
-    let n = catalog().len();
     let mut lo = px(dpi, EDIT_MIN_H);
-    let mut hi = lo + palette_height_for(n, w, dpi) + px(dpi, 160);
-    if !client_fits(w, hi, dpi, n) {
+    let mut hi = lo + px(dpi, 240);
+    if chrome_fits(w, lo, dpi) {
+        return (w, lo);
+    }
+    if !chrome_fits(w, hi, dpi) {
         return (w, hi);
     }
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        if client_fits(w, mid, dpi, n) {
+        if chrome_fits(w, mid, dpi) {
             hi = mid;
         } else {
             lo = mid + 1;
         }
     }
     (w, lo)
+}
+
+/// Bar, hint, change-target row, icon settings, restore, and done sit inside the
+/// client and do not overlap. The well keeps room for one card. The palette may scroll.
+fn chrome_fits(w: i32, h: i32, dpi: i32) -> bool {
+    let lay = edit_layout(w, h, dpi, true, true);
+    let client = RECT { left: 0, top: 0, right: w, bottom: h };
+    let bands = [lay.bar, lay.hint, lay.change, lay.well, lay.icons, lay.reset, lay.done];
+    if bands.iter().any(|r| !contains_rect(client, *r) || r.right <= r.left || r.bottom <= r.top) {
+        return false;
+    }
+    for (i, a) in bands.iter().enumerate() {
+        for b in bands.iter().skip(i + 1) {
+            if overlaps(*a, *b) {
+                return false;
+            }
+        }
+    }
+    let (auto, manual, preview) = icon_controls(lay.icons, dpi);
+    auto.right - auto.left >= px(dpi, 72)
+        && manual.right - manual.left >= px(dpi, 72)
+        && preview.right > preview.left
+        && contains_rect(lay.icons, auto)
+        && contains_rect(lay.icons, manual)
+        && contains_rect(lay.icons, preview)
+        && lay.well.bottom - lay.well.top >= px(dpi, 64)
 }
 
 fn footer_min_width(dpi: i32) -> i32 {
@@ -258,37 +293,26 @@ fn palette_height_for(n: usize, client_w: i32, dpi: i32) -> i32 {
 }
 
 /// The tallest editor: a selected target (change row + icon settings) and every palette card.
+/// Width changes the column count, so the same catalog is shorter in a wider window.
 fn client_fits(w: i32, h: i32, dpi: i32, n: usize) -> bool {
+    if !chrome_fits(w, h, dpi) {
+        return false;
+    }
     let lay = edit_layout(w, h, dpi, true, true);
     let client = RECT { left: 0, top: 0, right: w, bottom: h };
-    let bands = [lay.bar, lay.hint, lay.change, lay.well, lay.icons, lay.reset, lay.done];
-    if bands.iter().any(|r| !contains_rect(client, *r) || r.right <= r.left || r.bottom <= r.top) {
-        return false;
-    }
-    for (i, a) in bands.iter().enumerate() {
-        for b in bands.iter().skip(i + 1) {
-            if overlaps(*a, *b) {
-                return false;
-            }
-        }
-    }
-    let (auto, manual, preview) = icon_controls(lay.icons, dpi);
-    if auto.right - auto.left < px(dpi, 72) || manual.right - manual.left < px(dpi, 72) || preview.right <= preview.left || !contains_rect(lay.icons, auto) || !contains_rect(lay.icons, manual) || !contains_rect(lay.icons, preview) {
-        return false;
-    }
     let (body, content) = well_body(lay.well, n, dpi);
     let view = (lay.well.bottom - lay.well.top).max(0);
     if content > view {
         return false;
     }
-    well_slots(body, n, dpi, 0).iter().all(|cell| contains_rect(lay.well, *cell) && contains_rect(client, *cell) && !overlaps(*cell, lay.reset) && !overlaps(*cell, lay.done) && !overlaps(*cell, lay.icons))
+    well_slots(body, n, dpi, 0).iter().all(|cell| contains_rect(lay.well, *cell) && contains_rect(client, *cell) && !overlaps(*cell, lay.reset) && !overlaps(*cell, lay.done) && !overlaps(*cell, lay.icons) && !overlaps(*cell, lay.bar) && !overlaps(*cell, lay.hint) && !overlaps(*cell, lay.change))
 }
 
 fn open_client(saved: Option<(i32, i32)>, dpi: i32) -> (i32, i32) {
     let (min_w, min_h) = min_client(dpi);
     match saved {
         Some((w, h)) => (w.max(min_w), h.max(min_h)),
-        None => (px(dpi, 560).max(min_w), px(dpi, 520).max(min_h)),
+        None => (px(dpi, EDIT_OPEN_W).max(min_w), px(dpi, EDIT_OPEN_H).max(min_h)),
     }
 }
 
@@ -1926,23 +1950,63 @@ mod tests {
     fn the_editor_minimum_fits_every_palette_card_and_the_footer() {
         assert!(edit_style().0 & WS_THICKFRAME.0 != 0);
         assert!(edit_style().0 & WS_MAXIMIZEBOX.0 != 0);
+        // Resize floor: footer width, and the 360 DIP chrome floor. The old floor was
+        // (436, 618) because every card had to fit at that narrow width. That clamp
+        // is what made a fresh window 618 tall. The palette may scroll here.
         let (w, h) = min_client(96);
-        assert_eq!((w, h), (436, 618), "the minimum rose above 420x360");
-        assert!(!client_fits(w, h - 1, 96, catalog().len()), "one pixel shorter clips a palette card");
+        assert_eq!((w, h), (436, 360), "the resize floor stays wide enough for the footer and short enough to scroll");
         assert_eq!(min_client(144), (w * 3 / 2, h * 3 / 2), "the minimum scales with DPI");
+        assert_eq!(min_client(144), (654, 540));
         let (outer_w, outer_h) = unsafe { outer_size(w, h, 96) };
         assert!(outer_w >= w && outer_h >= h);
-        assert_eq!(open_client(None, 96), (560.max(w), 520.max(h)));
+        // Measured open_client(None) before this change: (560, 618) at 96 DPI and
+        // (840, 927) at 144 DPI. 1.5× width and 2/3 height of that real size.
+        assert_eq!(open_client(None, 96), (840, 412));
+        assert_eq!(open_client(None, 144), (1260, 618));
+        assert_eq!(open_client(None, 144), (px(144, 840), px(144, 412)));
         assert_eq!(open_client(Some((100, 100)), 96), (w, h));
         assert_eq!(open_client(Some((w + 80, h + 40)), 96), (w + 80, h + 40));
+        assert_eq!(open_client(Some((900, 500)), 96), (900, 500), "a size chosen this session is kept");
+
+        let n = catalog().len();
+        assert!(!client_fits(w, 412, 96, n), "at the narrow floor the catalog still does not fit in 412");
+        let fit = catalog_height(840, 96);
+        assert!(fit <= 412, "at 840 DIP the extra columns bring the catalog under the new height, fit={fit}");
+        assert!(client_fits(840, fit, 96, n));
+        assert!(!client_fits(840, fit - 1, 96, n), "one pixel shorter than the width-aware fit clips a card");
+        assert!(client_fits(1260, 618, 144, n));
 
         let doc = targets_only();
-        assert_no_overlap(&doc, w, h, 96);
-        assert_no_overlap(&Doc::default_layout(), w, h, 96);
+        assert_chrome(&doc, Some(0), w, h, 96);
+        assert_chrome(&Doc::default_layout(), None, w, h, 96);
         let full = crate::toolbar::parse(br#"{"version":1,"items":[]}"#).unwrap();
+        let narrow = geom_of(&full, None, 0, 0, w, h, 96);
+        assert!(narrow.well_max > 0, "the narrow floor scrolls the full catalog");
         let old = geom_of(&full, None, 0, 0, 420, 360, 96);
         let folder = visible_well(&full).iter().position(|item| matches!(item, Well::OpenFolder)).unwrap();
         assert!(overlaps(old.wells[folder], old.lay.reset) || !contains_rect(old.lay.well, old.wells[folder]), "420x360 still covers the open-folder card");
+    }
+
+    #[test]
+    fn the_default_editor_does_not_clip_at_96_or_144_dpi() {
+        let full = crate::toolbar::parse(br#"{"version":1,"items":[]}"#).unwrap();
+        let targets = targets_only();
+        for dpi in [96, 144] {
+            let (w, h) = open_client(None, dpi);
+            assert_eq!((w, h), (px(dpi, 840), px(dpi, 412)), "dpi {dpi}");
+            // No selected target: hint only, no change row and no icon settings.
+            assert_catalog(&full, None, w, h, dpi);
+            assert_catalog(&Doc::default_layout(), None, w, h, dpi);
+            // Selected folder target: change row and icon-size segments are both on screen.
+            assert_catalog(&targets, Some(0), w, h, dpi);
+            let g = geom_of(&targets, Some(0), 0, 0, w, h, dpi);
+            assert!(g.lay.change.right > g.lay.change.left, "dpi {dpi} change row");
+            assert!(g.lay.icons.bottom > g.lay.icons.top, "dpi {dpi} icon settings");
+            let (auto, manual, preview) = icon_controls(g.lay.icons, dpi);
+            assert!(auto.right - auto.left >= px(dpi, 72) && manual.right - manual.left >= px(dpi, 72), "dpi {dpi}");
+            assert!(preview.right > preview.left, "dpi {dpi}");
+            assert_eq!(g.well_max, 0, "dpi {dpi} the wider default shows every card");
+        }
     }
 
     #[test]
@@ -1975,8 +2039,9 @@ mod tests {
         let shown = visible_well(&doc);
         assert!(shown.iter().any(|item| matches!(item, Well::OpenFolder)));
         assert!(shown.iter().any(|item| matches!(item, Well::OpenFile)));
-        let (w, h) = min_client(96);
-        assert_no_overlap(&doc, w, h, 96);
+        let (w, h) = open_client(None, 96);
+        assert_catalog(&doc, Some(0), w, h, 96);
+        assert_chrome(&doc, Some(0), min_client(96).0, min_client(96).1, 96);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1987,40 +2052,73 @@ mod tests {
         doc
     }
 
-    fn assert_no_overlap(doc: &Doc, w: i32, h: i32, dpi: i32) {
-        let sel = (0..doc.item_count()).find(|&i| doc.is_folder_target(i) || doc.is_file_target(i));
+    /// Smallest height at `w` where every catalog card fits with the change row and icon settings.
+    fn catalog_height(w: i32, dpi: i32) -> i32 {
+        let n = catalog().len();
+        let mut lo = 1;
+        let mut hi = px(dpi, 360) + palette_height_for(n, w, dpi) + px(dpi, 200);
+        assert!(client_fits(w, hi, dpi, n), "the search ceiling does not fit {w}x{hi}");
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if client_fits(w, mid, dpi, n) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        lo
+    }
+
+    fn assert_chrome(doc: &Doc, sel: Option<usize>, w: i32, h: i32, dpi: i32) {
         let g = geom_of(doc, sel, 0, 0, w, h, dpi);
         let lay = &g.lay;
         let client = RECT { left: 0, top: 0, right: w, bottom: h };
+        let target = sel.is_some_and(|i| doc.is_folder_target(i) || doc.is_file_target(i));
         let mut bands = vec![("bar", lay.bar), ("hint", lay.hint), ("well", lay.well), ("reset", lay.reset), ("done", lay.done)];
-        if sel.is_some() {
+        if target {
             bands.push(("change", lay.change));
             bands.push(("icons", lay.icons));
+        } else {
+            assert_eq!(lay.change, RECT::default(), "no change row without a selected target");
         }
         for (name, r) in &bands {
-            assert!(r.right > r.left && r.bottom > r.top, "{name} is empty at {w}x{h}");
-            assert!(contains_rect(client, *r), "{name} leaves the client {r:?}");
+            assert!(r.right > r.left && r.bottom > r.top, "{name} is empty at {w}x{h} dpi {dpi}");
+            assert!(contains_rect(client, *r), "{name} leaves the client {r:?} at {w}x{h} dpi {dpi}");
         }
         for (i, (an, a)) in bands.iter().enumerate() {
             for (bn, b) in bands.iter().skip(i + 1) {
-                assert!(!overlaps(*a, *b), "{an} overlaps {bn}");
+                assert!(!overlaps(*a, *b), "{an} overlaps {bn} at {w}x{h} dpi {dpi}");
             }
         }
-        assert_eq!(g.well_max, 0, "the palette scrolls at the minimum");
+        if target {
+            let (auto, manual, preview) = icon_controls(lay.icons, dpi);
+            assert!(contains_rect(lay.icons, auto) && contains_rect(lay.icons, manual) && contains_rect(lay.icons, preview), "dpi {dpi}");
+            assert!(auto.right - auto.left >= px(dpi, 72) && manual.right - manual.left >= px(dpi, 72), "dpi {dpi}");
+            assert!(preview.right > preview.left, "dpi {dpi}");
+        }
+        assert!(lay.well.bottom - lay.well.top >= px(dpi, 64), "the well keeps a card of space at {w}x{h}");
+    }
+
+    fn assert_catalog(doc: &Doc, sel: Option<usize>, w: i32, h: i32, dpi: i32) {
+        assert_chrome(doc, sel, w, h, dpi);
+        let g = geom_of(doc, sel, 0, 0, w, h, dpi);
+        let lay = &g.lay;
+        let client = RECT { left: 0, top: 0, right: w, bottom: h };
+        assert_eq!(g.well_max, 0, "the palette scrolls at {w}x{h} dpi {dpi}");
         let shown = visible_well(doc);
         assert_eq!(g.wells.len(), shown.len());
+        let target = sel.is_some_and(|i| doc.is_folder_target(i) || doc.is_file_target(i));
         for (i, cell) in g.wells.iter().enumerate() {
-            assert!(contains_rect(lay.well, *cell), "palette card {i} is clipped by the well");
-            assert!(contains_rect(client, *cell), "palette card {i} leaves the client");
-            assert!(!overlaps(*cell, lay.reset) && !overlaps(*cell, lay.done), "palette card {i} meets the footer");
-            if sel.is_some() {
-                assert!(!overlaps(*cell, lay.icons), "palette card {i} meets the icon settings");
+            assert!(contains_rect(lay.well, *cell), "palette card {i} is clipped by the well at dpi {dpi}");
+            assert!(contains_rect(client, *cell), "palette card {i} leaves the client at dpi {dpi}");
+            assert!(!overlaps(*cell, lay.reset) && !overlaps(*cell, lay.done), "palette card {i} meets the footer at dpi {dpi}");
+            assert!(!overlaps(*cell, lay.bar) && !overlaps(*cell, lay.hint), "palette card {i} meets the bar at dpi {dpi}");
+            if target {
+                assert!(!overlaps(*cell, lay.icons) && !overlaps(*cell, lay.change), "palette card {i} meets the icon row at dpi {dpi}");
             }
         }
-        if sel.is_some() {
-            let (auto, manual, preview) = icon_controls(lay.icons, dpi);
-            assert!(contains_rect(lay.icons, auto) && contains_rect(lay.icons, manual) && contains_rect(lay.icons, preview));
-            assert!(auto.right - auto.left >= px(dpi, 72) && manual.right - manual.left >= px(dpi, 72));
+        for (i, cell) in g.slots.iter().enumerate() {
+            assert!(!overlaps(*cell, lay.hint) && !overlaps(*cell, lay.well), "bar slot {i} leaves the bar at dpi {dpi}");
         }
         assert!(shown.iter().any(|item| matches!(item, Well::OpenFolder)));
         assert!(shown.iter().any(|item| matches!(item, Well::OpenFile)));
