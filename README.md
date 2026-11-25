@@ -119,8 +119,8 @@ The command toolbar shows icons only — no text labels. When window tabs sit on
 
 A new install, or **Use Default Set** in the editor, starts with New folder, New text file, Delete, Paste, Rename, View, Properties, and Mark as important, then a separator, Show hidden files, Duplicate pane to the right, Duplicate pane below, Close pane, and Open Terminal. A toolbar you have already saved stays as it is.
 
-<p align="center"><img width="760" alt="Vertical command toolbar" src="docs/images-v12/en/toolbar_vertical.png"></p>
-<p align="center"><img width="760" alt="Horizontal command toolbar" src="docs/images-v12/en/toolbar_horizontal.png"></p>
+<p align="center"><img width="140" alt="Vertical command toolbar" src="docs/images-v12/en/toolbar_vertical.png"></p>
+<p align="center"><img width="706" alt="Horizontal command toolbar" src="docs/images-v12/en/toolbar_horizontal.png"></p>
 
 ### 5. Toolbar editor
 

@@ -119,8 +119,8 @@
 
 새로 설치하거나 편집기에서 **기본값으로**를 누르면, 새 폴더, 새 텍스트 문서, 삭제, 붙여넣기, 이름 바꾸기, 표시, 속성, 중요 표시 다음에 구분선, 숨김 파일 표시, 오른쪽에 패널 복제, 아래쪽에 패널 복제, 패널 닫기, 터미널 열기가 기본값입니다. 이미 저장한 도구 모음은 그대로 둡니다.
 
-<p align="center"><img width="760" alt="세로 명령 도구 모음" src="docs/images-v12/ko/toolbar_vertical.png"></p>
-<p align="center"><img width="760" alt="가로 명령 도구 모음" src="docs/images-v12/ko/toolbar_horizontal.png"></p>
+<p align="center"><img width="140" alt="세로 명령 도구 모음" src="docs/images-v12/ko/toolbar_vertical.png"></p>
+<p align="center"><img width="706" alt="가로 명령 도구 모음" src="docs/images-v12/ko/toolbar_horizontal.png"></p>
 
 ### 5. 도구 모음 편집기
 

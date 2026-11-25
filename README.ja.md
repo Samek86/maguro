@@ -119,8 +119,8 @@
 
 新規インストール、またはエディターの **デフォルトに戻す** では、新しいフォルダー、新しいテキスト ファイル、削除、貼り付け、名前の変更、表示、プロパティ、重要としてマークのあとに区切り、隠しファイルを表示、右にペインを複製、下にペインを複製、ペインを閉じる、ターミナルを開く、が初期配置です。すでに保存したツールバーはそのままです。
 
-<p align="center"><img width="760" alt="縦のコマンドツールバー" src="docs/images-v12/ja/toolbar_vertical.png"></p>
-<p align="center"><img width="760" alt="横のコマンドツールバー" src="docs/images-v12/ja/toolbar_horizontal.png"></p>
+<p align="center"><img width="140" alt="縦のコマンドツールバー" src="docs/images-v12/ja/toolbar_vertical.png"></p>
+<p align="center"><img width="706" alt="横のコマンドツールバー" src="docs/images-v12/ja/toolbar_horizontal.png"></p>
 
 ### 5. ツールバーエディター
 

@@ -1,6 +1,6 @@
 # Toolbar and important-mark close-ups for README / help:
-#   <lang>/toolbar_vertical.png    top window tabs, one pane, icon column beside it with the More (>>) button
-#   <lang>/toolbar_horizontal.png  vertical window tabs, one pane, command bar in the title row with More (>>)
+#   <lang>/toolbar_vertical.png    top window tabs, one pane; left strip with the icon column and More (>>)
+#   <lang>/toolbar_horizontal.png  vertical window tabs, one pane; top strip with the title-row command bar and More (>>)
 #   <lang>/feature_marks.png       lower part of a short window: two rows of 128px icons with three gold stars
 #                                  and the status bar count; the cut top edge gets the same 1px frame line
 # Seeds come from tabs*.json, tabs.vertical*.json and hero_light*.json in MAGURO_CFG_DIR (G: = demo drive).
@@ -62,22 +62,37 @@ $MarksJson = @'
 {"path":"G:\\Mixed\\budget-2026.csv","dir":false,"vol":null,"fid":null,"state":"ok","added":"2026-11-20T00:00:00Z"}
 ]}
 '@
-# The marks shot keeps the window's own left, right and bottom frame and cuts off the title, tab and
-# address rows (MarksTop window pixels at 96 DPI). The cut edge gets a 1px line in the colour of the
-# window's own frame, read from the middle of its bottom edge.
-$MarksTop = 116
+# Every shot is a window capture (white backdrop + DWM bounds) cut down to the part it shows.
+# Values are window pixels at 96 DPI. Edges that stay are the window's own 1px frame; each cut edge
+# gets a 1px line in the frame colour read from the window edge on the same side (middle pixel).
+#   toolbar_vertical    left 140 px, full height: icon column with More (>>) and Change, plus the pane edge
+#   toolbar_horizontal  top 95 px, full width: title row command bar through More and Change, the right
+#                       buttons, and the tab list / address row under it
+#   feature_marks       drops the top 116 px (title, tabs, address, column headers)
+$Crops = @{
+  toolbar_vertical   = @{ Top = 0;   Width = 140; Height = 0 }
+  toolbar_horizontal = @{ Top = 0;   Width = 0;   Height = 95 }
+  feature_marks      = @{ Top = 116; Width = 0;   Height = 0 }
+}
 
-function Save-MarksCrop([string]$src, [string]$dest, [IntPtr]$h) {
-  $top = [int]($MarksTop * [MaguroCap]::Dpi($h) / 96.0)
+function Save-WindowCrop([string]$src, [string]$dest, [IntPtr]$h, $c) {
+  $s = [MaguroCap]::Dpi($h) / 96.0
   $img = [Drawing.Bitmap]::FromFile($src)
-  $cw = $img.Width; $ch = $img.Height - $top
-  $Frame = $img.GetPixel([int]($cw / 2), $img.Height - 1)
+  $W = $img.Width; $H = $img.Height
+  $top = [int]($c.Top * $s)
+  $cw = if ($c.Width -gt 0) { [Math]::Min($W, [int]($c.Width * $s)) } else { $W }
+  $ch = if ($c.Height -gt 0) { [Math]::Min($H - $top, [int]($c.Height * $s)) } else { $H - $top }
+  $right = $img.GetPixel($W - 1, [int]($H / 2))
+  $bottom = $img.GetPixel([int]($W / 2), $H - 1)
   $bmp = New-Object Drawing.Bitmap $cw, $ch
   $g = [Drawing.Graphics]::FromImage($bmp)
   $g.DrawImage($img, (New-Object Drawing.Rectangle 0, 0, $cw, $ch), (New-Object Drawing.Rectangle 0, $top, $cw, $ch), [Drawing.GraphicsUnit]::Pixel)
-  $pen = New-Object Drawing.Pen $Frame, 1
-  $g.DrawLine($pen, 0, 0, $cw - 1, 0)
-  $pen.Dispose(); $g.Dispose(); $img.Dispose()
+  $img.Dispose()
+  $g.Dispose()
+  # Draw the cut-edge lines pixel by pixel so no anti-aliasing touches them.
+  if ($top -gt 0) { for ($x = 0; $x -lt $cw; $x++) { $bmp.SetPixel($x, 0, $bottom) } }
+  if ($cw -lt $W) { for ($y = 0; $y -lt $ch; $y++) { $bmp.SetPixel($cw - 1, $y, $right) } }
+  if (($top + $ch) -lt $H) { for ($x = 0; $x -lt $cw; $x++) { $bmp.SetPixel($x, $ch - 1, $bottom) } }
   $e = Test-MaguroEdges $bmp
   if (-not $e.Ok) { $bmp.Dispose(); throw "crop edge check failed $dest" }
   $bmp.Save($dest, [Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
@@ -102,13 +117,9 @@ foreach ($lang in $Langs) {
     if ($h -eq [IntPtr]::Zero) { Write-Host "FAIL no MaguroMain $lang/$kind"; continue }
     Start-Sleep -Milliseconds 2500   # thumbnails and star overlays
     try {
-      if ($kind -eq 'feature_marks') {
-        $full = Join-Path $Seeds "full-$lang.png"
-        Cap-MaguroWindow $h $full
-        Save-MarksCrop $full $dest $h
-      } else {
-        Cap-MaguroWindow $h $dest
-      }
+      $full = Join-Path $Seeds "full-$kind-$lang.png"
+      Cap-MaguroWindow $h $full
+      Save-WindowCrop $full $dest $h $Crops[$kind]
     } catch { Write-Host "FAIL $lang/$kind : $_" }
     [void][MaguroCap]::PostMessage($h, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 600
