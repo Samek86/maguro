@@ -255,7 +255,10 @@ fn reveal_miss() {
 /// Alt+Z, or whatever chord the keymap now has. A dialog that has disabled its owner comes forward instead.
 /// A folder opens in a new tab, then the main window is restored and brought forward
 /// the same way as Win+Shift+E. A file is handed to the shell and does not arm `TIMER_CLIPSEL`.
+/// One physical press runs this once. A nested call while it is still inside a pump returns.
 pub(crate) unsafe fn on_hotkey() {
+    let vk = crate::keys::clip_chord().map(|c| c.vk).unwrap_or(0);
+    let Some(_arm) = crate::keys::arm_global(vk) else { return };
     if modal_forward() {
         return;
     }
