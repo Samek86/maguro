@@ -119,8 +119,8 @@ The command toolbar shows icons only — no text labels. When window tabs sit on
 
 A new install, or **Use Default Set** in the editor, starts with New folder, New text file, Delete, Paste, Rename, View, Properties, and Mark as important, then a separator, Show hidden files, Duplicate pane to the right, Duplicate pane below, Close pane, and Open Terminal. A toolbar you have already saved stays as it is.
 
-<p align="center"><img width="760" alt="Vertical command toolbar" src="docs/images-v11/en/toolbar_vertical.png"></p>
-<p align="center"><img width="760" alt="Horizontal command toolbar" src="docs/images-v11/en/toolbar_horizontal.png"></p>
+<p align="center"><img width="140" alt="Vertical command toolbar" src="docs/images-v12/en/toolbar_vertical.png"></p>
+<p align="center"><img width="706" alt="Horizontal command toolbar" src="docs/images-v12/en/toolbar_horizontal.png"></p>
 
 ### 5. Toolbar editor
 
@@ -240,7 +240,7 @@ While another app's Open or Save dialog is in front, **Ctrl+Alt+G** lists folder
 
 Right-click a file or folder → **Mark as important**, or press **Ctrl+Alt+S**. The same command is **Remove important mark** when the selection is already marked. If several items are selected and any of them is unmarked, Maguro marks the selection; if every one is already marked, it clears them. **Show important-mark stars** (on by default) draws or hides a small gold star on marked files and folders in the folder pane. Hiding the stars keeps the marks. The status bar shows how many are in the open folder, such as **2 important**. Maguro draws the star itself. It is not a shell icon overlay, and nothing is written to the registry. A marked folder does not mark the files inside it.
 
-<p align="center"><img width="720" alt="Gold stars on marked files and a folder" src="docs/images-v11/common/feature_marks.png"></p>
+<p align="center"><img width="526" alt="Gold stars on marked files and a folder" src="docs/images-v12/en/feature_marks.png"></p>
 
 The mark follows a rename, a move, and the Recycle Bin, including a restore while Maguro is running. A copy is not marked. A mark whose file cannot be found becomes missing and is dropped after 180 days, or sooner from the list. Gear menu → **Important list** (**Ctrl+Shift+I**) can search, open the folder, remove a mark, clean up missing items, and export or import marks. Settings export, import, and reset leave marks alone. Marks live in `marks.json` next to settings (`%APPDATA%\Maguro\marks.json`, or beside the exe when `portable.txt` is present), separate from `maguro.json`. The first save of each day copies the previous file to `marks.json.bak`. If `marks.json` cannot be read, Maguro leaves it unchanged and the list window says why and shows the path.
 

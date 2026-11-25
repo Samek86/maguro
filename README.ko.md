@@ -119,8 +119,8 @@
 
 새로 설치하거나 편집기에서 **기본값으로**를 누르면, 새 폴더, 새 텍스트 문서, 삭제, 붙여넣기, 이름 바꾸기, 표시, 속성, 중요 표시 다음에 구분선, 숨김 파일 표시, 오른쪽에 패널 복제, 아래쪽에 패널 복제, 패널 닫기, 터미널 열기가 기본값입니다. 이미 저장한 도구 모음은 그대로 둡니다.
 
-<p align="center"><img width="760" alt="세로 명령 도구 모음" src="docs/images-v11/ko/toolbar_vertical.png"></p>
-<p align="center"><img width="760" alt="가로 명령 도구 모음" src="docs/images-v11/ko/toolbar_horizontal.png"></p>
+<p align="center"><img width="140" alt="세로 명령 도구 모음" src="docs/images-v12/ko/toolbar_vertical.png"></p>
+<p align="center"><img width="706" alt="가로 명령 도구 모음" src="docs/images-v12/ko/toolbar_horizontal.png"></p>
 
 ### 5. 도구 모음 편집기
 
@@ -240,7 +240,7 @@ Maguro가 켜져 있으면 **Alt+Z**로 다른 창이 앞에 있어도 클립보
 
 파일이나 폴더를 우클릭해 **중요 표시**를 하거나 **Ctrl+Alt+S**를 누릅니다. 이미 표시된 항목이면 **중요 표시 해제**입니다. 여러 개를 선택했을 때, 표시되지 않은 항목이 하나라도 있으면 선택 전체를 표시하고, 모두 표시되어 있으면 한꺼번에 해제합니다. **중요 표시 별 보이기**(기본 켜짐)는 폴더 창에서 표시한 파일과 폴더에 작은 금색 별을 그리거나 숨깁니다. 별을 숨겨도 표시는 남습니다. 상태 표시줄에는 그 폴더의 개수가 나옵니다(예: **중요 6**). 별은 Maguro가 직접 그리며, 셸 아이콘 오버레이가 아니고 레지스트리도 바꾸지 않습니다. 폴더를 표시해도 그 안의 파일에는 별이 붙지 않습니다.
 
-<p align="center"><img width="720" alt="표시한 파일과 폴더 위의 금색 별" src="docs/images-v11/common/feature_marks.png"></p>
+<p align="center"><img width="526" alt="표시한 파일과 폴더 위의 금색 별" src="docs/images-v12/ko/feature_marks.png"></p>
 
 표시는 이름 바꾸기, 이동, 휴지통을 따라가며, Maguro가 켜져 있는 동안 복원해도 남습니다. 복사본에는 표시가 없습니다. 파일을 찾을 수 없으면 180일 뒤에 빠지고, 목록에서 그보다 먼저 지울 수도 있습니다. 톱니바퀴 메뉴의 **중요 목록**, 또는 **Ctrl+Shift+I**로 목록을 엽니다. 검색하고, **위치 열기**로 폴더에 가고, **중요 표시 해제**로 빼고, **찾을 수 없는 항목 정리**로 없는 항목을 지우고, **내보내기**와 **가져오기**를 할 수 있습니다. 설정을 내보내거나 가져오거나 초기화해도 표시는 바뀌지 않습니다. 표시는 설정 옆 `marks.json`에 있습니다(`%APPDATA%\Maguro\marks.json`, `portable.txt`가 있으면 exe 옆). `maguro.json`과는 다른 파일입니다. 하루의 첫 저장 때 이전 파일을 `marks.json.bak`으로 남깁니다. `marks.json`을 읽지 못하면 그 파일을 덮어쓰지 않고, 목록 창에 이유와 경로가 나옵니다.
 
