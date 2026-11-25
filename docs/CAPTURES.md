@@ -2,7 +2,7 @@
 
 **현재 README와 도움말의 스틸은 `docs/images-v11/`에 있다.** 같은 경로를 덮어쓰면 GitHub·브라우저 캐시에 옛 그림이 남으므로, `docs/images-v10`과 그 이전 폴더는 새 샷의 대상으로 쓰지 않는다. 다음 재촬영은 `docs/images-v12/`에 넣는다.
 
-README(en/ja/ko)와 도움말(en/ja/ko)의 UI 이미지는 v0.3.4 재촬영부터 `docs/images-v11/`을 가리킨다. `docs/images-v10/`과 그 이하는 대체됨(superseded)이며 트리에 남긴다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
+README(en/ja/ko)와 도움말(en/ja/ko)의 UI 이미지는 v0.3.4 재촬영부터 `docs/images-v11/`을 가리킨다. 단, 도구 모음 두 장(`toolbar_vertical.png`, `toolbar_horizontal.png`)과 중요 표시(`feature_marks.png`)는 `docs/images-v12/{en,ko,ja}/`에 있다(아래 「도구 모음·중요 표시 샷」). `docs/images-v10/`과 그 이하는 대체됨(superseded)이며 트리에 남긴다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
 
 Maguro README / 도움말용 스크린샷. 모든 제품 이미지는 **포터블 빌드만** 사용하고, AppData·레지스트리·grids.ini·설치본 경로를 쓰지 않는다.
 
@@ -110,6 +110,20 @@ servers.png / servers.ko.png / servers.ja.png 는 **실제 호스트·자격 증
 - **스크립트:** docs/capture/capture-settings-panes.ps1
 - **크기(재촬영):** 986×633, EN≈34KB, KO≈32KB, JA≈47KB. 빈 흰 클라이언트(~7KB)는 RedrawWindow 누락 — 거부.
 - **주의:** 캡처 전 셸 확장 열거가 끝날 때까지 ≈7초 대기.
+
+## 도구 모음·중요 표시 샷 (docs/images-v12)
+
+스크립트: `docs/capture/capture-toolbar-marks.ps1` (환경 변수 `MAGURO_PORTABLE`, `MAGURO_CFG_DIR`, `MAGURO_SHOT_DIR`=이미지 루트, `MAGURO_FORCE=1`; 선택 `MAGURO_LANGS`, `MAGURO_KINDS`). 포터블 0.3.4, 시드는 `MAGURO_CFG_DIR`의 `tabs*.json`, `tabs.vertical*.json`, `hero_light*.json`이고 `G:` → 데모 폴더(`C:\WORK\pgtest\MaguroDemo`). 스크립트가 시드를 고쳐 임시 폴더에 쓴다: 라이트 테마, 언어별 UI, 즐겨찾기·트리 사이드바 끔, 패널 하나. 키 입력·클릭은 보내지 않고 시작 2.5초 뒤 찍으며, 닫기는 포터블 maguro.exe 창에만 WM_CLOSE.
+
+| 파일 | 화면 | 창 크기(바깥) | 결과 | 크롭 |
+| --- | --- | --- | --- | --- |
+| `{en,ko,ja}/toolbar_vertical.png` | 창 탭 위쪽(Photos·Mixed·Docs·Music), `G:\Photos 2026` 96px 미리 보기. 패널 왼쪽 세로 아이콘 열, 창이 낮아 남은 명령은 아래쪽 **더 보기(»)** 로 감 | 760×430 | 746×423 | 흰 백드롭 + DWM 경계, 1px 테두리 유지 |
+| `{en,ko,ja}/toolbar_horizontal.png` | 세로 창 탭(`vertical_tabs`), 같은 패널. 제목 줄의 가로 명령 막대, 창이 좁아 남은 명령은 연필(변경) 단추 왼쪽 **더 보기(»)** 로 감 | 720×460 | 706×453 | 흰 백드롭 + DWM 경계, 1px 테두리 유지 |
+| `{en,ko,ja}/feature_marks.png` | `G:\Mixed` 128px 큰 아이콘. 포터블 폴더의 `marks.json`으로 Archive(폴더), app.ts, budget-2026.csv 세 개에 금색 별. 아래 상태 표시줄에 언어별 중요 개수(**3 important** / **중요 3** / **重要 3**) | 540×460 | 526×337 | 창 캡처(흰 백드롭 + DWM)에서 위쪽 116px(제목·탭·주소·열 머리글)만 잘라 냄. 왼쪽·오른쪽·아래는 창 자체 1px 테두리, 잘린 위쪽 변은 창 테두리 색(아래 변 가운데 픽셀) 1px 선 |
+
+- 세 장 모두 흰 백드롭 위에서 찍어 가장자리 바깥 검은 여백이 없고, `Test-MaguroEdges`를 통과한다. 개인 경로·SID는 없다(`G:` 데모 드라이브만).
+- `marks.json`은 찍는 동안만 포터블 폴더에 두고 끝나면 지운다. AppData의 설정·중요 표시는 쓰지 않는다.
+- README는 `feature_marks.png`를 실제 폭(526)으로 보여 준다.
 
 ## 이미지별 기록 (2026-11-04 재촬영 기준)
 
