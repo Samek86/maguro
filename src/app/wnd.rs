@@ -211,6 +211,8 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             // A network drive or subst sends no device message. Look again when Maguro comes forward.
             WM_ACTIVATEAPP => {
+                // The chord hold ends when its vk is already up. The key-up may belong to another app.
+                crate::keys::release_global_on_activate();
                 if wp.0 != 0 {
                     _ = PostMessageW(Some(h), WM_DRIVES, WPARAM(0), LPARAM(0));
                     resume_status_timer(h);

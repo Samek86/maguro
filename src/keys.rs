@@ -345,7 +345,8 @@ pub(crate) fn is_global_chord(id: &str) -> bool {
 }
 
 /// One physical press of a global chord.
-/// `held` is the vk that already ran, until that vk's key-up. `busy` is set while its handler runs.
+/// `held` is the vk that already ran, until that vk's key-up or until activation finds it up.
+/// `busy` is set while its handler runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) struct GlobalPress {
     pub held: Option<u16>,
@@ -391,6 +392,20 @@ pub(crate) fn global_chord_keyup(held: Option<u16>, vk: u16) -> Option<u16> {
     held.filter(|&h| h != vk)
 }
 
+/// The hold covers a vk only while that press is still down.
+/// `up` is true when `GetAsyncKeyState` says the held vk is up.
+pub(crate) fn global_hold_if_down(held: Option<u16>, up: bool) -> Option<u16> {
+    held.filter(|_| !up)
+}
+
+/// `WM_ACTIVATEAPP`, either direction. A key-up delivered to another app leaves `held` set.
+pub(crate) fn release_global_on_activate() {
+    with(|s| {
+        let up = s.global.held.is_some_and(vk_is_up);
+        s.global.held = global_hold_if_down(s.global.held, up);
+    });
+}
+
 pub(crate) fn global_press() -> GlobalPress {
     with(|s| s.global)
 }
@@ -415,9 +430,8 @@ impl Drop for GlobalArm {
     fn drop(&mut self) {
         let mut press = global_hotkey_leave(global_press());
         // A nested pump may already have dispatched the key-up, so this loop never saw it.
-        if press.held.is_some_and(vk_is_up) {
-            press.held = None;
-        }
+        let up = press.held.is_some_and(vk_is_up);
+        press.held = global_hold_if_down(press.held, up);
         set_global_press(press);
     }
 }
@@ -1222,5 +1236,23 @@ mod tests {
         assert_eq!((down, press.held), (GlobalDown::Run, Some(z)));
         let (down, _) = global_chord_keydown(idle, false, z, false);
         assert_eq!(down, GlobalDown::Run);
+    }
+
+    #[test]
+    fn global_hold_if_down_drops_a_vk_that_is_up() {
+        let z = b'Z' as u16;
+        // Activation while the vk is still down keeps this press, so the echo is eaten.
+        let held = GlobalPress { held: global_hold_if_down(Some(z), false), busy: false };
+        assert_eq!(held.held, Some(z));
+        let (down, _) = global_chord_keydown(held, true, z, false);
+        assert_eq!(down, GlobalDown::Eat);
+        // Activation after that vk went up in another app forgets the press.
+        let cleared = GlobalPress { held: global_hold_if_down(Some(z), true), busy: false };
+        assert_eq!(cleared.held, None);
+        let (down, press) = global_chord_keydown(cleared, false, z, false);
+        assert_eq!(down, GlobalDown::Run);
+        assert_eq!(press.held, None);
+        assert_eq!(global_hold_if_down(None, true), None);
+        assert_eq!(global_hold_if_down(None, false), None);
     }
 }
