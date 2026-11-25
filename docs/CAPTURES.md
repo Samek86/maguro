@@ -259,6 +259,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 
 ## 변경 이력 (관련)
 
+- **2026-11-25 (v0.3.4 데모 영상):** README 데모는 `docs/images-v11/demo/demo-{en,ko,ja}.mp4`와 같은 이름의 gif다. mp4는 68.0초, 720×1280, 30 fps, H.264 High yuv420p + AAC LC 44.1 kHz. gif는 25.0초, 540×960, 15 fps, 375프레임. 장면 순서는 기존 68초 영상과 같다. 인트로 그래픽, 키캡만 있는 구간, 엔드 카드는 이전 영상 프레임을 유지하고, Maguro 창이 보이는 구간만 v0.3.4 포터블로 다시 찍었다. 음악은 이전 mp4의 오디오를 그대로 붙였다. 장면은 멀티 패널, 세로 탭(탭 표시 방식), 패널 사이 드래그, 즐겨찾기와 파일 바구니, 폴더 감시와 세션, 탐색기 메뉴와 다크 모드, Win+Shift+E 단축키다. 영어·한국어 본편 창은 영어 UI이고, 한국어 세로 탭 구간만 한국어 UI다. 일본어는 일본어 UI다. 주소 줄의 ⇄ 버튼은 0.3.4에 없고 명령 도구 모음이 보인다. 녹화·합성 스크립트는 저장소 밖 `docs-refresh/demo`에 있다. 이전 `docs/demo-*` 파일은 지우지 않았다.
+
 - **2026-11-25 (v0.3.4):** README·도움말(en/ko/ja)이 가리키는 스틸 101장을 `docs/images-v11/{en,ko,ja,common}/`에 전부 다시 찍음. 포터블 0.3.4, 시드 `readme2-cfgs-v6`, `G:` → MaguroDemo. 패널 머리글은 뒤로/앞으로/위로/새 패널 탭이고 ⇄ 버튼이 없다. 도구 모음 편집기는 넓고 낮다(842×444). 미리보기(`preview.png`)는 Alt+P 미리보기 창에 사진이 있고, 빠른 보기(`preview_peek`)는 언어별 속성 줄이다. 가장자리 검사는 101장 모두 통과. `docs/images-v10/`은 그대로 둠. 다음 재촬영은 `docs/images-v12/`.
 
 - **2026-11-19 (v0.3.1):** `docs/images-v10/{en,ko,ja}/feature_basket.png`와 `feature_folder_watch.png`만 다시 찍음. 포터블 0.3.1, 시드 `readme2-cfgs-v6`의 `hero_light.json`, `G:` → `C:\WORK\pgtest\MaguroDemo`. 바구니는 `G:\Mixed`의 notes.docx, plan.xlsx, budget-2026.csv, samples.zip, todo.txt (576×513, 이름 검정, 푸터에 선택 0). 폴더 감시는 `G:\Photos 2026`, 하위 폴더 포함, 일시 중지 아님, 상태 Watching / 감시 중 / 監視中 (746×433). 바깥 검은 여백만 잘라 1px 테두리를 남김(모서리 RGB 약 108,108,108). 바이트: en basket 15179, ko basket 15787, ja basket 18858, en watch 12949, ko watch 12910, ja watch 16668. `capture-features.ps1`의 바구니·감시 시드는 `MAGURO_DEMO_ROOT`(기본 `G:\`)이고, 그 경로가 없으면 스크립트가 중단한다. 이전 v0.3.0 샷은 디스크에 없던 `demo-253`·`demo-readme-watch` 경로였다.

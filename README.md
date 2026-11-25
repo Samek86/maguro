@@ -33,10 +33,10 @@
 <br>
 
 <p align="center">
-  <a href="https://samek86.github.io/maguro/demo-en.mp4"><img src="docs/demo-en.gif" width="360" alt="Maguro in motion"></a>
+  <a href="https://samek86.github.io/maguro/images-v11/demo/demo-en.mp4"><img src="docs/images-v11/demo/demo-en.gif" width="360" alt="Maguro in motion"></a>
 </p>
 
-<p align="center">▶ <a href="https://samek86.github.io/maguro/demo-en.mp4">Watch the full video</a> (68 s)</p>
+<p align="center">▶ <a href="https://samek86.github.io/maguro/images-v11/demo/demo-en.mp4">Watch the full video</a> (68 s)</p>
 
 <br>
 
