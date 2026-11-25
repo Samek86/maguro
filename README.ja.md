@@ -36,7 +36,7 @@
   <a href="https://samek86.github.io/maguro/images-v11/demo/demo-ja.mp4"><img src="docs/images-v11/demo/demo-ja.gif" width="360" alt="Maguroの動作画面"></a>
 </p>
 
-<p align="center">▶ <a href="https://samek86.github.io/maguro/images-v11/demo/demo-ja.mp4">フル動画を見る</a>（68秒）</p>
+<p align="center">▶ <a href="https://samek86.github.io/maguro/images-v11/demo/demo-ja.mp4">フル動画を見る</a>（70秒）</p>
 
 <br>
 
