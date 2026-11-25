@@ -42,10 +42,8 @@ public static class CapMain {
 "@
 }
 function KillP {
-  Get-CimInstance Win32_Process -Filter "Name='maguro.exe'" | ForEach-Object {
-    if($_.ExecutablePath -and $_.ExecutablePath -like "$Portable*"){ Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
-  }
-  Close-MaguroBackdrop; Start-Sleep -Milliseconds 500
+  Close-PortableMaguro $Portable
+  Close-MaguroBackdrop; Start-Sleep -Milliseconds 400
 }
 function WaitCls([uint32]$pidMag,[string]$cls,[int]$sec=20){
   $d=(Get-Date).AddSeconds($sec)
@@ -66,6 +64,7 @@ function CloseMag($st){
   Start-Sleep -Milliseconds 400; KillP
 }
 function ShotMain($cfg,$name){
+  if (Test-MaguroCaptureStop) { return }
   $dest=Join-Path $Out "$name.png"
   if((Test-Path $dest) -and -not $Force){ Write-Host "skip $name"; return }
   Write-Host "=== $name ($cfg) ==="
@@ -96,8 +95,14 @@ foreach($x in @(
   $destMain=Join-Path $Out "$($x.n).png"
   $destPeek=Join-Path $Out "$($x.pk).png"
   if((Test-Path $destMain) -and (Test-Path $destPeek) -and -not $Force){ Write-Host "skip $($x.n)/$($x.pk)"; continue }
+  if (Test-MaguroCaptureStop) { break }
   Write-Host "=== $($x.n) / $($x.pk) ==="
   $st=StartMag $x.c
+  # Select a picture so the Alt+P preview pane (preview_pane in the seed) has content before the grab.
+  Start-Sleep -Milliseconds 2000
+  [void][CapMain]::SetForegroundWindow($st.Hwnd)
+  [MaguroCap]::ClickClient($st.Hwnd, 500, 300)
+  Start-Sleep -Milliseconds 1200
   CapW $st.Hwnd $destMain
   [void][CapMain]::SetForegroundWindow($st.Hwnd); Start-Sleep -Milliseconds 300
   # click first file then Space for peek

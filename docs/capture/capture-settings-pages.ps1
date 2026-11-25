@@ -37,10 +37,8 @@ public static class CapSet {
 "@
 }
 function KillP {
-  Get-CimInstance Win32_Process -Filter "Name='maguro.exe'" | ForEach-Object {
-    if($_.ExecutablePath -and $_.ExecutablePath -like "$Portable*"){ Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
-  }
-  Close-MaguroBackdrop; Start-Sleep -Milliseconds 500
+  Close-PortableMaguro $Portable
+  Close-MaguroBackdrop; Start-Sleep -Milliseconds 400
 }
 function WaitCls([uint32]$pidMag,[string]$cls,[int]$sec=20){
   $d=(Get-Date).AddSeconds($sec)
@@ -71,6 +69,7 @@ foreach($pair in @(
   @{c='favorites.ko.json'; gen='settings.ko'; gen2='settings_general.ko'; ctx='settings_ctxmenu.ko'},
   @{c='hero_light.ja.json'; gen='settings.ja'; gen2='settings_general.ja'; ctx='settings_ctxmenu.ja'}
 )){
+  if (Test-MaguroCaptureStop) { break }
   Write-Host "=== settings suite $($pair.gen) ==="
   $st=StartMag $pair.c
   [void][CapSet]::SetForegroundWindow($st.Hwnd)

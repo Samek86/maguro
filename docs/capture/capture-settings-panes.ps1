@@ -14,10 +14,9 @@ $Exe = Join-Path $Portable 'maguro.exe'
 New-Item -ItemType Directory -Force $Out | Out-Null
 
 function Kill-PortableMaguro {
-  Get-CimInstance Win32_Process -Filter "Name='maguro.exe'" -EA SilentlyContinue |
-    Where-Object { $_.ExecutablePath -like "$Portable*" } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
-  Start-Sleep -Milliseconds 500
+  Close-PortableMaguro $Portable
+  Close-MaguroBackdrop
+  Start-Sleep -Milliseconds 400
 }
 function Seed([string]$cfg,[string]$lang){
   Copy-Item -Force (Join-Path $CfgDir $cfg) (Join-Path $Portable 'maguro.json')
@@ -32,6 +31,7 @@ foreach ($pair in @(
   @{ c='favorites.ko.json'; lang='ko'; n='settings_panes.ko.png' },
   @{ c='hero_light.ja.json';lang='ja'; n='settings_panes.ja.png' }
 )) {
+  if (Test-MaguroCaptureStop) { break }
   Write-Host "=== $($pair.n) ==="
   Kill-PortableMaguro; Seed $pair.c $pair.lang
   $proc = Start-Process $Exe -WorkingDirectory $Portable -PassThru

@@ -1,8 +1,8 @@
-# 스크린샷 캡처 기록 (docs/images-v10)
+# 스크린샷 캡처 기록 (docs/images-v11)
 
-**현재 README와 도움말의 스틸은 `docs/images-v10/`에 있다.** 같은 경로를 덮어쓰면 GitHub·브라우저 캐시에 옛 그림이 남으므로, `docs/images-v8`, `docs/images-v9`와 그 이전 폴더는 새 샷의 대상으로 쓰지 않는다. 다음 재촬영은 `docs/images-v11/`에 넣는다.
+**현재 README와 도움말의 스틸은 `docs/images-v11/`에 있다.** 같은 경로를 덮어쓰면 GitHub·브라우저 캐시에 옛 그림이 남으므로, `docs/images-v10`과 그 이전 폴더는 새 샷의 대상으로 쓰지 않는다. 다음 재촬영은 `docs/images-v12/`에 넣는다.
 
-README(en/ja/ko)와 도움말(en/ja/ko)의 UI 이미지는 v0.3.0 재촬영부터 `docs/images-v10/`을 가리킨다. `docs/images-v9/`와 `docs/images-v8/` 이하는 대체됨(superseded)이며 트리에 남긴다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
+README(en/ja/ko)와 도움말(en/ja/ko)의 UI 이미지는 v0.3.4 재촬영부터 `docs/images-v11/`을 가리킨다. `docs/images-v10/`과 그 이하는 대체됨(superseded)이며 트리에 남긴다. 아래 표의 크기 값 일부는 이전 촬영 기록이다.
 
 Maguro README / 도움말용 스크린샷. 모든 제품 이미지는 **포터블 빌드만** 사용하고, AppData·레지스트리·grids.ini·설치본 경로를 쓰지 않는다.
 
@@ -258,6 +258,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File docs\capture\capture-main.ps
 시스템 대화상자(IFileOperation 진행, 탐색기 메뉴, 공통 파일 대화상자)는 그대로다. 이름 묻기, 즐겨찾기 관리, 정보, Excel, 확인 창, 그리고 팝업·알림(폴더 감시 토스트, 즐겨찾기 없음, 네트워크 실패, 빠른 복사 진행·이름 충돌, 세션 목록, 단축키, 레이아웃 고르기, 선택 칸, 서버 연결의 저장/취소)은 공유 토큰으로 옮겼다. 설정 창의 토글은 모양과 동작이 이전과 같다.
 
 ## 변경 이력 (관련)
+
+- **2026-11-25 (v0.3.4):** README·도움말(en/ko/ja)이 가리키는 스틸 101장을 `docs/images-v11/{en,ko,ja,common}/`에 전부 다시 찍음. 포터블 0.3.4, 시드 `readme2-cfgs-v6`, `G:` → MaguroDemo. 패널 머리글은 뒤로/앞으로/위로/새 패널 탭이고 ⇄ 버튼이 없다. 도구 모음 편집기는 넓고 낮다(842×444). 미리보기(`preview.png`)는 Alt+P 미리보기 창에 사진이 있고, 빠른 보기(`preview_peek`)는 언어별 속성 줄이다. 가장자리 검사는 101장 모두 통과. `docs/images-v10/`은 그대로 둠. 다음 재촬영은 `docs/images-v12/`.
 
 - **2026-11-19 (v0.3.1):** `docs/images-v10/{en,ko,ja}/feature_basket.png`와 `feature_folder_watch.png`만 다시 찍음. 포터블 0.3.1, 시드 `readme2-cfgs-v6`의 `hero_light.json`, `G:` → `C:\WORK\pgtest\MaguroDemo`. 바구니는 `G:\Mixed`의 notes.docx, plan.xlsx, budget-2026.csv, samples.zip, todo.txt (576×513, 이름 검정, 푸터에 선택 0). 폴더 감시는 `G:\Photos 2026`, 하위 폴더 포함, 일시 중지 아님, 상태 Watching / 감시 중 / 監視中 (746×433). 바깥 검은 여백만 잘라 1px 테두리를 남김(모서리 RGB 약 108,108,108). 바이트: en basket 15179, ko basket 15787, ja basket 18858, en watch 12949, ko watch 12910, ja watch 16668. `capture-features.ps1`의 바구니·감시 시드는 `MAGURO_DEMO_ROOT`(기본 `G:\`)이고, 그 경로가 없으면 스크립트가 중단한다. 이전 v0.3.0 샷은 디스크에 없던 `demo-253`·`demo-readme-watch` 경로였다.
 
