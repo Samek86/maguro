@@ -48,9 +48,7 @@ public static class CapFeat {
 "@
 }
 function KillP {
-  Get-CimInstance Win32_Process -Filter "Name='maguro.exe'" | ForEach-Object {
-    if($_.ExecutablePath -and $_.ExecutablePath -like "$Portable*"){ Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
-  }
+  Close-PortableMaguro $Portable
   Close-MaguroBackdrop; Start-Sleep -Milliseconds 400
 }
 function WaitCls([uint32]$pidMag,[string]$cls,[int]$sec=20){
@@ -79,6 +77,7 @@ function CloseMag($st){
 # ---- search ----
 Write-Host '=== search ==='
 foreach($x in @(@{c='preview.json';n='search'},@{c='preview.ko.json';n='search.ko'},@{c='preview.ja.json';n='search.ja'})){
+  if (Test-MaguroCaptureStop) { break }
   $dest=Join-Path $Out "$($x.n).png"
   if((Test-Path $dest) -and -not $Force){ Write-Host "skip $($x.n)"; continue }
   $st=StartMag $x.c; if(-not $st){ continue }
@@ -92,6 +91,7 @@ foreach($x in @(@{c='preview.json';n='search'},@{c='preview.ko.json';n='search.k
 # ---- rename ----
 Write-Host '=== rename ==='
 foreach($rn in @(@{c='rename_camera.en.json';n='rename'},@{c='rename_camera.ko.json';n='rename.ko'},@{c='rename_camera.ja.json';n='rename.ja'})){
+  if (Test-MaguroCaptureStop) { break }
   $dest=Join-Path $Out "$($rn.n).png"
   if((Test-Path $dest) -and -not $Force){ Write-Host "skip $($rn.n)"; continue }
   $st=StartMag $rn.c; if(-not $st){ continue }
@@ -206,6 +206,7 @@ foreach($pair in @(
   @{lang='ko'; basket='feature_basket.ko.png'; watch='feature_folder_watch.ko.png'; wsv='feature_win_shift_v.ko.png'; excel='feature_excel_readonly_tidy.ko.png'},
   @{lang='ja'; basket='feature_basket.ja.png'; watch='feature_folder_watch.ja.png'; wsv='feature_win_shift_v.ja.png'; excel='feature_excel_readonly_tidy.ja.png'}
 )){
+  if (Test-MaguroCaptureStop) { break }
   Write-Host "=== features $($pair.lang) ==="
   $need = @($pair.basket,$pair.watch,$pair.wsv,$pair.excel) | Where-Object { $Force -or -not (Test-Path (Join-Path $Out $_)) }
   if($need.Count -eq 0){ Write-Host "skip features $($pair.lang)"; continue }
@@ -247,8 +248,8 @@ foreach($pair in @(
     Set-Clipboard -Value $(if($env:MAGURO_WSV_PATH){$env:MAGURO_WSV_PATH}else{'G:\Photos 2026'})
     Start-Sleep -Milliseconds 300
     [void][CapFeat]::SetForegroundWindow($st.Hwnd)
-    # Win+Alt+V (VK_LWIN, VK_MENU, V)
-    [MaguroCap]::ChordTo($st.Hwnd, [uint32]$st.Pid, 0x5B,0x12,0x56)
+    # Default chord is Alt+Z, not Win+Alt+V. WM_HOTKEY id 3 is CLIP_HOTKEY_ID (no global keys).
+    [void][CapFeat]::PostMessage($st.Hwnd, 0x0312, [UIntPtr]::new(3), [IntPtr]::Zero)
     Start-Sleep -Milliseconds 1200
     SaveCap $st.Hwnd (Join-Path $Out $pair.wsv)
   }

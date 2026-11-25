@@ -48,9 +48,7 @@ public static class CapHelp {
 "@
 }
 function KillP {
-  Get-CimInstance Win32_Process -Filter "Name='maguro.exe'" | ForEach-Object {
-    if($_.ExecutablePath -and $_.ExecutablePath -like "$Portable*"){ Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
-  }
+  Close-PortableMaguro $Portable
   Close-MaguroBackdrop; Start-Sleep -Milliseconds 400
 }
 function WaitCls([uint32]$pidMag,[string]$cls,[int]$sec=20){
@@ -118,11 +116,11 @@ print('seeded', '$lang', '$mode')
   python $tmp | Out-Host
 }
 function CloseNotepad {
-  Get-Process notepad -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
-  Start-Sleep -Milliseconds 300
+  # Never kill a Notepad we did not start. The Open dialog host is stopped by its own PID.
 }
 
 foreach($lang in @('en','ko','ja')){
+  if (Test-MaguroCaptureStop) { break }
   $sfx=Suf $lang
   Write-Host "==== help LANG $lang ===="
   KillP; CloseNotepad

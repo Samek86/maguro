@@ -191,8 +191,44 @@ public static class MaguroCap {
     throw new InvalidOperationException("FORBIDDEN Click(screen): use MaguroCap.ClickClient(hwnd, clientX, clientY).");
   }
   public static int Dpi(IntPtr h){ IntPtr dc=GetDC(h); int dpi=GetDeviceCaps(dc,88); ReleaseDC(h,dc); return dpi>0?dpi:96; }
+  public static void ClosePid(uint pid){
+    EnumWindows((h,l)=>{ uint p; GetWindowThreadProcessId(h,out p); if(p==pid) PostMessage(h, WM_CLOSE, UIntPtr.Zero, IntPtr.Zero); return true; }, IntPtr.Zero);
+  }
 }
 "@
+}
+
+# Close windows of maguro.exe whose path is under $Portable. WM_CLOSE first.
+# Stop-Process only if that process is still alive after a few seconds.
+function Close-PortableMaguro([string]$Portable) {
+  if (-not $Portable) { return }
+  $procs = @(Get-CimInstance Win32_Process -Filter "Name='maguro.exe'" -EA SilentlyContinue |
+    Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -like "$Portable*") })
+  foreach ($p in $procs) {
+    try { [MaguroCap]::ClosePid([uint32]$p.ProcessId) } catch {}
+  }
+  $deadline = (Get-Date).AddSeconds(4)
+  do {
+    $alive = @($procs | Where-Object { Get-Process -Id $_.ProcessId -EA SilentlyContinue })
+    if ($alive.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 200
+  } while ((Get-Date) -lt $deadline)
+  foreach ($p in $procs) {
+    if (Get-Process -Id $p.ProcessId -EA SilentlyContinue) {
+      Write-Host "WM_CLOSE timeout; stopping leftover pid $($p.ProcessId)"
+      Stop-Process -Id $p.ProcessId -Force -EA SilentlyContinue
+    }
+  }
+}
+
+# Set MAGURO_STOP_FILE to ask a capture script to finish the current shot and return.
+function Test-MaguroCaptureStop {
+  $f = $env:MAGURO_STOP_FILE
+  if ($f -and (Test-Path -LiteralPath $f)) {
+    Write-Host "STOP $f"
+    return $true
+  }
+  return $false
 }
 
 # --- KEYBOARD SAFETY helpers (never SendKeys / SendInput / keybd_event) ---
