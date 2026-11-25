@@ -211,6 +211,8 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             // A network drive or subst sends no device message. Look again when Maguro comes forward.
             WM_ACTIVATEAPP => {
+                // The chord hold ends when its vk is already up. The key-up may belong to another app.
+                crate::keys::release_global_on_activate();
                 if wp.0 != 0 {
                     _ = PostMessageW(Some(h), WM_DRIVES, WPARAM(0), LPARAM(0));
                     resume_status_timer(h);
@@ -1417,7 +1419,10 @@ pub(crate) unsafe fn toggle_hotkey() {
 
 /// Front, with the file list ready. Pressed again while Maguro is in front: minimize.
 /// A dialog that has disabled its owner comes forward instead.
+/// One physical press runs this once. A nested call while it is still inside a pump returns.
 pub(crate) unsafe fn hotkey_pressed() {
+    let vk = crate::keys::hot_chord().map(|c| c.vk).unwrap_or(0);
+    let Some(_arm) = crate::keys::arm_global(vk) else { return };
     let mains = app(|a| a.desks.iter().map(|d| d.main).filter(|h| !h.0.is_null()).collect::<Vec<_>>());
     let disabled = mains.into_iter().find(|h| !IsWindowEnabled(*h).as_bool());
     if let Some(main) = disabled {

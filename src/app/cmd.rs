@@ -358,6 +358,36 @@ unsafe fn composition_pending(start: HWND) -> bool {
     false
 }
 
+/// `app.front`, `dialog.jump`, `clip.open` while `RegisterHotKey` is live for that chord.
+fn global_chord_registered(id: &str) -> bool {
+    if !crate::keys::register_hotkey_now(crate::keys::capturing(), true) {
+        return false;
+    }
+    match id {
+        "app.front" => app(|a| a.hot_on),
+        "clip.open" => app(|a| a.clip_on),
+        "dialog.jump" => crate::dialogjump::hotkey_live(),
+        _ => false,
+    }
+}
+
+/// `true` when this keydown must not run a global chord.
+/// `repeat` is lParam bit 30 and is not what the decision uses.
+fn take_global_chord(vk: u16, ctrl: bool, shift: bool, alt: bool, win: bool, repeat: bool) -> bool {
+    let Some(i) = crate::keys::lookup(vk, ctrl, shift, alt, win) else { return false };
+    let id = crate::keys::id_of(i);
+    if !crate::keys::is_global_chord(id) {
+        return false;
+    }
+    let (down, next) = crate::keys::global_chord_keydown(crate::keys::global_press(), global_chord_registered(id), vk, repeat);
+    if down == crate::keys::GlobalDown::Eat {
+        crate::keys::set_global_press(next);
+        true
+    } else {
+        false
+    }
+}
+
 pub(crate) unsafe fn key(m: &MSG) -> bool {
     // A Settings shortcut row is waiting. Record the chord and do not run the command,
     // refresh the pane, or hand the key to the shell view. This sits above the drag,
@@ -384,14 +414,20 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
     if VIRTUAL_KEY(vk) == VK_ESCAPE && commit_vtab_drag() {
         return true;
     }
+    let down = |k: VIRTUAL_KEY| GetKeyState(k.0 as i32) < 0;
+    let (ctrl, shift, alt) = (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU));
+    let win = down(VK_LWIN) || down(VK_RWIN);
+    // One press of app.front / dialog.jump / clip.open runs once.
+    // Registered: WM_HOTKEY owns it, so this keydown is eaten in every branch below.
+    // Not registered: the first keydown runs; a repeat is eaten from the hold, not from bit 30.
+    if take_global_chord(vk, ctrl, shift, alt, win, m.lParam.0 & (1 << 30) != 0) {
+        return true;
+    }
     // The preview takes its own keys. Pane shortcuts must not act behind it.
     let peek = app(|a| a.peek);
     if !peek.0.is_null() && m.hwnd == peek {
         return false;
     }
-    let down = |k: VIRTUAL_KEY| GetKeyState(k.0 as i32) < 0;
-    let (ctrl, shift, alt) = (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU));
-    let win = down(VK_LWIN) || down(VK_RWIN);
     // A conflict dialog is up. Let it see the key.
     if crate::keys::modal() {
         return false;
@@ -677,7 +713,7 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
     }
     if let Some(i) = crate::keys::lookup(vk, ctrl, shift, alt, win) {
         let id = crate::keys::id_of(i);
-        if matches!(id, "app.keys" | "view.peek" | "view.preview" | "app.front" | "dialog.jump" | "clip.open" | "view.gather" | "view.recentfiles" | "file.mkdir" | "file.winmerge" | "file.reveal" | "file.basket" | "file.basket.add" | "file.mark" | "ws.load" | "ws.save" | "watch.open" | "tab.list" | "marks.list") && m.lParam.0 & (1 << 30) != 0 {
+        if matches!(id, "app.keys" | "view.peek" | "view.preview" | "view.gather" | "view.recentfiles" | "file.mkdir" | "file.winmerge" | "file.reveal" | "file.basket" | "file.basket.add" | "file.mark" | "ws.load" | "ws.save" | "watch.open" | "tab.list" | "marks.list") && m.lParam.0 & (1 << 30) != 0 {
             return true;
         }
         // Pane-tab chords stay out of the address bar (already returned) and out of every other focus,
@@ -1246,6 +1282,11 @@ pub(crate) unsafe fn pre_translate(m: &MSG) -> bool {
             if eat {
                 return true;
             }
+            // The chord vk is still down from WM_HOTKEY or from the one in-app press.
+            // Auto-repeat and the keydown that follows a focus change are not a new press.
+            if !crate::keys::capturing() && crate::keys::global_held() == Some(vk) {
+                return true;
+            }
             if take_browser_key(m) {
                 return true;
             }
@@ -1267,6 +1308,7 @@ pub(crate) unsafe fn pre_translate(m: &MSG) -> bool {
                 }
             }
             app(|a| a.held = a.held.filter(|&k| k != vk));
+            crate::keys::release_global_vk(vk);
             crate::keys::clear_swallow(vk);
             // The shell must not see the key-up of a chord that was only being recorded.
             crate::keys::capturing()

@@ -83,6 +83,11 @@ fn with<R>(f: impl FnOnce(&mut Watch) -> R) -> R {
     WATCH.with(|w| f(&mut w.borrow_mut()))
 }
 
+/// `RegisterHotKey` is live for the dialog chord on the current owner.
+pub(crate) fn hotkey_live() -> bool {
+    with(|w| w.live)
+}
+
 /// Register the dialog chord only when the setting is on, the foreground window is a file
 /// dialog of another process, and the chord has a modifier. A bare key is refused.
 pub(crate) fn should_register_hotkey(setting_on: bool, file_dialog: bool, bare_chord: bool) -> bool {
@@ -852,7 +857,10 @@ unsafe fn restore_tick() {
 
 /// Hotkey, or the same chord pressed while Maguro itself is in front. No folders: no menu.
 /// The event hwnd counts when `GetForegroundWindow` has not caught up to it.
+/// One physical press runs this once. The folder menu pumps messages, so a nested call returns.
 pub(crate) unsafe fn on_hotkey() {
+    let vk = crate::keys::dialog_chord().map(|c| c.vk).unwrap_or(0);
+    let Some(_arm) = crate::keys::arm_global(vk) else { return };
     if !crate::app(|a| a.s.dialog_jump) {
         return;
     }

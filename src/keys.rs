@@ -153,11 +153,22 @@ struct KeyState {
     hot_hold: bool,
     swallow: u16,
     modal: bool,
+    /// Press of `app.front`, `dialog.jump`, or `clip.open` that has already run.
+    global: GlobalPress,
 }
 
 impl KeyState {
     fn fresh() -> Self {
-        KeyState { binds: CMDS.iter().map(Cmd::chord).collect(), extra: Map::new(), capture: None, block: false, hot_hold: false, swallow: 0, modal: false }
+        KeyState {
+            binds: CMDS.iter().map(Cmd::chord).collect(),
+            extra: Map::new(),
+            capture: None,
+            block: false,
+            hot_hold: false,
+            swallow: 0,
+            modal: false,
+            global: GlobalPress::default(),
+        }
     }
 }
 
@@ -328,6 +339,114 @@ pub(crate) fn clear_swallow(vk: u16) {
     });
 }
 
+/// `app.front`, `dialog.jump`, and `clip.open` are also `RegisterHotKey` chords.
+pub(crate) fn is_global_chord(id: &str) -> bool {
+    matches!(id, "app.front" | "dialog.jump" | "clip.open")
+}
+
+/// One physical press of a global chord.
+/// `held` is the vk that already ran, until that vk's key-up or until activation finds it up.
+/// `busy` is set while its handler runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) struct GlobalPress {
+    pub held: Option<u16>,
+    pub busy: bool,
+}
+
+/// Whether a keydown of a global chord should run the command.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum GlobalDown {
+    /// Hotkey is off, and this press has not run yet.
+    Run,
+    /// WM_HOTKEY owns the press, the handler is on the stack, or the vk is still down.
+    Eat,
+}
+
+/// `registered` means `RegisterHotKey` is live, so the press arrives as `WM_HOTKEY`.
+/// A keydown is then a repeat, or the same press delivered again after focus moves.
+/// `repeat` is lParam bit 30. It is ignored: that bit is clear on the second delivery.
+pub(crate) fn global_chord_keydown(press: GlobalPress, registered: bool, vk: u16, _repeat: bool) -> (GlobalDown, GlobalPress) {
+    if press.busy || registered || press.held == Some(vk) {
+        // A keydown must not arm the hold. The handler arms it, and a queued WM_HOTKEY still has to run.
+        (GlobalDown::Eat, press)
+    } else {
+        (GlobalDown::Run, press)
+    }
+}
+
+/// Start the handler for this press. `None` when a handler for a global chord is already on the stack.
+pub(crate) fn global_hotkey_enter(press: GlobalPress, vk: u16) -> Option<GlobalPress> {
+    if press.busy {
+        return None;
+    }
+    Some(GlobalPress { held: Some(vk), busy: true })
+}
+
+/// The handler returned. The vk stays held until key-up.
+pub(crate) fn global_hotkey_leave(press: GlobalPress) -> GlobalPress {
+    GlobalPress { held: press.held, busy: false }
+}
+
+/// Key-up of the chord vk ends the press. Any other vk leaves the hold in place.
+pub(crate) fn global_chord_keyup(held: Option<u16>, vk: u16) -> Option<u16> {
+    held.filter(|&h| h != vk)
+}
+
+/// The hold covers a vk only while that press is still down.
+/// `up` is true when `GetAsyncKeyState` says the held vk is up.
+pub(crate) fn global_hold_if_down(held: Option<u16>, up: bool) -> Option<u16> {
+    held.filter(|_| !up)
+}
+
+/// `WM_ACTIVATEAPP`, either direction. A key-up delivered to another app leaves `held` set.
+pub(crate) fn release_global_on_activate() {
+    with(|s| {
+        let up = s.global.held.is_some_and(vk_is_up);
+        s.global.held = global_hold_if_down(s.global.held, up);
+    });
+}
+
+pub(crate) fn global_press() -> GlobalPress {
+    with(|s| s.global)
+}
+
+pub(crate) fn set_global_press(press: GlobalPress) {
+    with(|s| s.global = press);
+}
+
+pub(crate) fn global_held() -> Option<u16> {
+    with(|s| s.global.held)
+}
+
+pub(crate) fn release_global_vk(vk: u16) {
+    with(|s| s.global.held = global_chord_keyup(s.global.held, vk));
+}
+
+/// Set while `app.front`, `dialog.jump`, or `clip.open` is running.
+/// Drop clears `busy`. The vk stays while it is down.
+pub(crate) struct GlobalArm;
+
+impl Drop for GlobalArm {
+    fn drop(&mut self) {
+        let mut press = global_hotkey_leave(global_press());
+        // A nested pump may already have dispatched the key-up, so this loop never saw it.
+        let up = press.held.is_some_and(vk_is_up);
+        press.held = global_hold_if_down(press.held, up);
+        set_global_press(press);
+    }
+}
+
+fn vk_is_up(vk: u16) -> bool {
+    unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk as i32) >= 0 }
+}
+
+/// Arm the chord vk and refuse a nested call. The guard stays for the whole handler, including a nested pump.
+pub(crate) fn arm_global(vk: u16) -> Option<GlobalArm> {
+    let next = global_hotkey_enter(global_press(), vk)?;
+    set_global_press(next);
+    Some(GlobalArm)
+}
+
 fn overlaps(a: Chord, b: Chord) -> bool {
     if a.ctrl != b.ctrl || a.shift != b.shift || a.alt != b.alt || a.win != b.win {
         return false;
@@ -366,6 +485,7 @@ pub(crate) fn reset_all() {
         s.capture = None;
         s.block = false;
         s.hot_hold = false;
+        s.global = GlobalPress::default();
     });
 }
 
@@ -1060,5 +1180,79 @@ mod tests {
         clear_swallow(b'N' as u16);
         assert!(!swallows(b'N' as u16));
         fresh();
+    }
+
+    #[test]
+    fn global_chord_keydown_runs_once_per_press() {
+        let z = b'Z' as u16;
+        let e = b'E' as u16;
+        let idle = GlobalPress::default();
+        assert!(is_global_chord("clip.open") && is_global_chord("app.front") && is_global_chord("dialog.jump"));
+        assert!(!is_global_chord("tab.new"));
+
+        // Registered: the keydown is not the press. Hold stays empty so WM_HOTKEY can still run.
+        // Bit 30 clear (the echo after focus moves) and bit 30 set (auto-repeat) are the same.
+        let (down, press) = global_chord_keydown(idle, true, z, false);
+        assert_eq!(down, GlobalDown::Eat);
+        assert_eq!(press, idle);
+        let (down, press) = global_chord_keydown(idle, true, z, true);
+        assert_eq!(down, GlobalDown::Eat);
+        assert_eq!(press, idle);
+        let armed = global_hotkey_enter(press, z).unwrap();
+        assert_eq!(armed, GlobalPress { held: Some(z), busy: true });
+
+        // Nested handler, and a keydown while it runs, do not run again.
+        assert!(global_hotkey_enter(armed, z).is_none());
+        let (down, press) = global_chord_keydown(armed, true, z, false);
+        assert_eq!(down, GlobalDown::Eat);
+        assert!(press.busy && press.held == Some(z));
+
+        // After the handler returns the vk stays down, so a later keydown is still the same press.
+        let held = global_hotkey_leave(armed);
+        assert!(!held.busy && held.held == Some(z));
+        let (down, _) = global_chord_keydown(held, true, z, false);
+        assert_eq!(down, GlobalDown::Eat);
+        let (down, _) = global_chord_keydown(held, false, z, false);
+        assert_eq!(down, GlobalDown::Eat);
+        let (down, _) = global_chord_keydown(held, false, z, true);
+        assert_eq!(down, GlobalDown::Eat);
+
+        // Key-up of that vk allows the next press. A different vk does not.
+        assert_eq!(global_chord_keyup(Some(z), e), Some(z));
+        assert_eq!(global_chord_keyup(Some(z), z), None);
+        let up = GlobalPress { held: global_chord_keyup(Some(z), z), busy: false };
+        let again = global_hotkey_enter(up, z).unwrap();
+        assert!(again.busy && again.held == Some(z));
+
+        // Hotkey off: the keydown runs once. The repeat bit does not matter.
+        let (down, press) = global_chord_keydown(idle, false, z, true);
+        assert_eq!(down, GlobalDown::Run);
+        assert_eq!(press, idle);
+        let armed = global_hotkey_enter(press, z).unwrap();
+        let up = global_hotkey_leave(armed);
+        let (down, _) = global_chord_keydown(up, false, z, false);
+        assert_eq!(down, GlobalDown::Eat);
+        let (down, press) = global_chord_keydown(up, false, e, false);
+        assert_eq!((down, press.held), (GlobalDown::Run, Some(z)));
+        let (down, _) = global_chord_keydown(idle, false, z, false);
+        assert_eq!(down, GlobalDown::Run);
+    }
+
+    #[test]
+    fn global_hold_if_down_drops_a_vk_that_is_up() {
+        let z = b'Z' as u16;
+        // Activation while the vk is still down keeps this press, so the echo is eaten.
+        let held = GlobalPress { held: global_hold_if_down(Some(z), false), busy: false };
+        assert_eq!(held.held, Some(z));
+        let (down, _) = global_chord_keydown(held, true, z, false);
+        assert_eq!(down, GlobalDown::Eat);
+        // Activation after that vk went up in another app forgets the press.
+        let cleared = GlobalPress { held: global_hold_if_down(Some(z), true), busy: false };
+        assert_eq!(cleared.held, None);
+        let (down, press) = global_chord_keydown(cleared, false, z, false);
+        assert_eq!(down, GlobalDown::Run);
+        assert_eq!(press.held, None);
+        assert_eq!(global_hold_if_down(None, true), None);
+        assert_eq!(global_hold_if_down(None, false), None);
     }
 }
