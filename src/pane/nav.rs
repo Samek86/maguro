@@ -1580,6 +1580,116 @@ pub(crate) unsafe fn focus_view(i: usize) {
     }
 }
 
+/// Keyboard focus after a window-tab or pane-tab switch.
+///
+/// DirectUI treats a focus arrival with Shift down as Shift+Tab and parks the
+/// keys on the column header, so the selection draws inactive and Down opens
+/// the header filter. `item` is the row to pass to `SelectItem`. `flags` is
+/// `SVSI_FOCUSED`, plus `SVSI_SELECT` when that row is already selected:
+/// `SVSI_DESELECT` is zero, so `SVSI_FOCUSED` alone would clear the row.
+/// Deselect-others and ensure-visible are never set, so no other row changes.
+/// `again_on_shift_up` is set when Shift was still down, so the same pin runs
+/// once that Shift is released.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ItemsFocusAfterSwitch {
+    pub item: Option<i32>,
+    pub flags: u32,
+    pub again_on_shift_up: bool,
+}
+
+/// `focused` wins, and `focused_selected` says whether that row is selected.
+/// The first selected row is the fallback. An empty view, or a row past the
+/// end, returns nothing so the caller does not invent a selection.
+pub(crate) fn items_focus_after_switch(shift_down: bool, count: i32, focused: i32, focused_selected: bool, selected: i32) -> ItemsFocusAfterSwitch {
+    let in_view = |k: i32| count > 0 && (0..count).contains(&k);
+    let (item, keep_selected) = if in_view(focused) {
+        (Some(focused), focused_selected)
+    } else if in_view(selected) {
+        (Some(selected), true)
+    } else {
+        (None, false)
+    };
+    let select = if keep_selected { SVSI_SELECT.0 as u32 } else { 0 };
+    ItemsFocusAfterSwitch { item, flags: SVSI_FOCUSED.0 as u32 | select, again_on_shift_up: shift_down }
+}
+
+/// Repeat the items pin after Shift comes up. A Shift+Tab the user pressed
+/// inside the pane is not armed. Focus that has left the view, or a rename
+/// box, is left where the user put it.
+pub(crate) fn refocus_items_after_shift(armed: bool, focus_in_view: bool, label_open: bool) -> bool {
+    armed && focus_in_view && !label_open
+}
+
+/// `(count, focused index, focused row is selected, first selected index)`.
+/// Missing numbers are `-1`.
+/// The selected index is read only when nothing is focused. `GetSelectedItem`
+/// starts at 0, and only after `ItemCount(SVGIO_SELECTION)` says a row is
+/// selected: `S_FALSE` still comes back as `Ok(0)`.
+unsafe fn items_row(pane: usize) -> (i32, i32, bool, i32) {
+    let Some(fv) = view_of::<IFolderView2>(pane) else { return (0, -1, false, -1) };
+    let count = fv.ItemCount(SVGIO_ALLVIEW).unwrap_or(0);
+    let focused = fv.GetFocusedItem().unwrap_or(-1);
+    let focused_selected = (0..count).contains(&focused)
+        && match fv.Item(focused) {
+            Ok(pidl) => {
+                let state = fv.GetSelectionState(pidl).unwrap_or(0);
+                CoTaskMemFree(Some(pidl as _));
+                state & SVSI_SELECT.0 as u32 != 0
+            }
+            Err(_) => false,
+        };
+    let need_selected = count > 0 && !(0..count).contains(&focused) && fv.ItemCount(SVGIO_SELECTION).unwrap_or(0) > 0;
+    let selected = if need_selected {
+        fv.GetSelectedItem(0).ok().filter(|&k| (0..count).contains(&k)).unwrap_or(-1)
+    } else {
+        -1
+    };
+    (count, focused, focused_selected, selected)
+}
+
+/// `UIActivate` / `SetFocus`, then `SelectItem(SVSI_FOCUSED)` on the row the
+/// view already had, keeping its selected state. Shift still down is remembered for [`release_items_focus`].
+pub(crate) unsafe fn focus_items_after_switch(pane: usize) {
+    // Read the row first. The focus arrival can move DirectUI onto the header
+    // without this index changing, and a second arrival must not replace it.
+    let saved = items_row(pane);
+    // Arm before SetFocus. That call can pump the Shift key-up, and the key-up
+    // has to find this pane or the header keeps the keys.
+    if GetKeyState(VK_SHIFT.0 as i32) < 0 {
+        app(|a| a.items_refocus = Some(pane));
+    }
+    focus_view(pane);
+    let live = items_row(pane);
+    let (count, focused, focused_selected, selected) = if saved.0 > 0 { saved } else { live };
+    let shift_down = GetKeyState(VK_SHIFT.0 as i32) < 0;
+    let plan = items_focus_after_switch(shift_down, count, focused, focused_selected, selected);
+    if let Some(k) = plan.item {
+        if let Some(fv) = view_of::<IFolderView2>(pane) {
+            _ = fv.SelectItem(k, plan.flags);
+        }
+    }
+    // A key-up pumped above already cleared this. Do not arm it again.
+    app(|a| a.items_refocus = plan.again_on_shift_up.then_some(pane));
+}
+
+unsafe fn focus_inside_view(pane: usize) -> bool {
+    let focus = GetFocus();
+    if focus.0.is_null() || !IsWindow(Some(focus)).as_bool() {
+        return false;
+    }
+    let Some(root) = view_of::<IShellView>(pane).and_then(|sv| sv.GetWindow().ok()) else { return false };
+    !root.0.is_null() && (focus == root || IsChild(root, focus).as_bool())
+}
+
+/// Shift is up. Pin the items again when this switch arrived with Shift down
+/// and the keys are still in that pane's view.
+pub(crate) unsafe fn release_items_focus() {
+    let Some(pane) = app(|a| a.items_refocus.take()) else { return };
+    if refocus_items_after_shift(true, focus_inside_view(pane), pane_shell_label_open(pane)) {
+        focus_items_after_switch(pane);
+    }
+}
+
 /// Where focus sits when a context menu or a file drag returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModalFocus {
@@ -5274,9 +5384,10 @@ mod activation_dedupe {
 #[cfg(test)]
 mod selection_visible_tests {
     use super::{
-        list_folder_flag_write, nav_busy_after, pane_folder_flags, refocus_after_file_drag, restore_list_after_modal, ModalFocus, NavBusyStep,
+        items_focus_after_switch, list_folder_flag_write, nav_busy_after, pane_folder_flags, refocus_after_file_drag, refocus_items_after_shift, restore_list_after_modal, ModalFocus,
+        NavBusyStep,
     };
-    use windows::Win32::UI::Shell::{FWF_FULLROWSELECT, FWF_NOWEBVIEW, FWF_SHOWSELALWAYS};
+    use windows::Win32::UI::Shell::{FWF_FULLROWSELECT, FWF_NOWEBVIEW, FWF_SHOWSELALWAYS, SVSI_DESELECTOTHERS, SVSI_ENSUREVISIBLE, SVSI_FOCUSED, SVSI_NOTAKEFOCUS, SVSI_SELECT};
 
     fn busy_after(steps: &[NavBusyStep]) -> bool {
         let mut busy = false;
@@ -5325,5 +5436,41 @@ mod selection_visible_tests {
         assert!(refocus_after_file_drag(true, true));
         assert!(!refocus_after_file_drag(false, true), "a nested message inside DoDragDrop is not the end");
         assert!(!refocus_after_file_drag(true, false), "a click that never dragged");
+    }
+
+    #[test]
+    fn a_tab_switch_pins_the_focused_row_and_repeats_only_when_shift_was_down() {
+        let focus_only = SVSI_FOCUSED.0 as u32;
+        let focus_kept = (SVSI_FOCUSED.0 | SVSI_SELECT.0) as u32;
+        let up = items_focus_after_switch(false, 10, 3, true, 1);
+        assert_eq!(up.item, Some(3));
+        assert_eq!(up.flags, focus_kept, "a selected focused row stays selected");
+        assert_eq!(up.flags & SVSI_DESELECTOTHERS.0 as u32, 0);
+        assert_eq!(up.flags & SVSI_ENSUREVISIBLE.0 as u32, 0);
+        assert_eq!(up.flags & SVSI_NOTAKEFOCUS.0 as u32, 0);
+        assert!(!up.again_on_shift_up);
+
+        let unselected = items_focus_after_switch(false, 10, 3, false, 1);
+        assert_eq!(unselected.item, Some(3));
+        assert_eq!(unselected.flags, focus_only, "an unselected focused row is not selected");
+
+        let down = items_focus_after_switch(true, 10, 3, true, 1);
+        assert_eq!(down.item, Some(3));
+        assert_eq!(down.flags, focus_kept);
+        assert!(down.again_on_shift_up);
+
+        let fallback = items_focus_after_switch(false, 10, -1, false, 4);
+        assert_eq!(fallback.item, Some(4));
+        assert_eq!(fallback.flags, focus_kept, "the fallback row is selected by definition");
+        assert_eq!(items_focus_after_switch(true, 4, -1, false, 0).item, Some(0));
+        assert_eq!(items_focus_after_switch(false, 0, 0, true, 0).item, None);
+        assert_eq!(items_focus_after_switch(true, 5, -1, false, -1).item, None);
+        assert_eq!(items_focus_after_switch(false, 5, 5, true, 9).item, None);
+        assert_eq!(items_focus_after_switch(false, -1, 0, true, 0).item, None);
+
+        assert!(refocus_items_after_shift(true, true, false));
+        assert!(!refocus_items_after_shift(true, false, false), "focus left the view");
+        assert!(!refocus_items_after_shift(true, true, true), "a rename box is open");
+        assert!(!refocus_items_after_shift(false, true, false), "an ordinary Shift+Tab is not a switch");
     }
 }

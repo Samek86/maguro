@@ -261,6 +261,9 @@ pub(crate) struct Desk {
     pub(crate) tab_scroll: usize,  // first visible window tab while the strip overflows
     /// Ctrl+Tab has highlighted this tab. Panes stay on `s.tab` until the timer or Ctrl goes up.
     pub(crate) tab_pending: Option<usize>,
+    /// Pane whose items are pinned again when Shift is released. A tab switch
+    /// focused the shell view while Shift was still down.
+    pub(crate) items_refocus: Option<usize>,
     /// Panes created for this switch whose shell view stays hidden. The pane chrome
     /// (address, breadcrumbs) is already the new tab. Zero means nothing is held.
     pub(crate) shell_hold: u32,
@@ -467,6 +470,7 @@ pub(crate) fn blank_desk() -> Desk {
         tab_hot_over: false,
         tab_scroll: 0,
         tab_pending: None,
+        items_refocus: None,
         shell_hold: 0,
         shell_hold_at: None,
         tab_drag: None,
