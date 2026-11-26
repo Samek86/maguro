@@ -1099,7 +1099,7 @@ pub(crate) unsafe fn switch_tab(j: usize) {
     arm_shell_hold();
     relayout();
     sync_filter_edits();
-    focus_view(active_pane());
+    focus_items_after_switch(active_pane());
     tabs_invalidate();
     note_save();
     refresh_save_button();
@@ -1299,7 +1299,7 @@ pub(crate) unsafe fn new_tab_at(path: Option<&str>) {
     show_active_tab();
     relayout();
     redraw_all();
-    focus_view(active_pane());
+    focus_items_after_switch(active_pane());
     tabs_invalidate();
     note_save();
     refresh_save_button();
@@ -1370,7 +1370,7 @@ pub(crate) unsafe fn open_tabs_beside(tabs: Vec<Tab>) {
         relayout();
         sync_filter_edits();
         redraw_all();
-        focus_view(active_pane());
+        focus_items_after_switch(active_pane());
         tabs_invalidate();
         note_save();
         refresh_save_button();
@@ -1425,7 +1425,7 @@ pub(crate) unsafe fn close_tab(i: usize) {
         relayout();
         sync_filter_edits();
         redraw_all();
-        focus_view(active_pane());
+        focus_items_after_switch(active_pane());
     }
     tabs_invalidate();
     note_save();

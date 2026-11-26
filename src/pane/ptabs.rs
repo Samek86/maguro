@@ -8,7 +8,7 @@ use crate::app::*;
 use crate::ui::*;
 use crate::session::*;
 use crate::i18n::*;
-use super::{focus_view, go_near, layout_pane, save_view, set_active};
+use super::{focus_items_after_switch, go_near, layout_pane, save_view, set_active};
 
 /// Path tooltip for a pane tab. The lock glyph uses 15. Window tabs use 7 and 8.
 const PANE_TAB_TIP: usize = 14;
@@ -85,7 +85,7 @@ unsafe fn pane_tab_go(i: usize, change: impl FnOnce(&mut Session) -> Option<Stri
     }
     apply_pane_tab_chrome(i, before_on);
     note_save();
-    focus_view(i);
+    focus_items_after_switch(i);
 }
 
 pub(crate) unsafe fn new_pane_tab(i: usize) {
@@ -214,7 +214,7 @@ pub(crate) unsafe fn pane_tab_mouse(h: HWND, i: usize, x: i32, y: i32, middle: b
         (PaneTabHit::Plus, false) => new_pane_tab(i),
         _ => {}
     }
-    focus_view(i);
+    focus_items_after_switch(i);
     true
 }
 

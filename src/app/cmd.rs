@@ -1300,6 +1300,14 @@ pub(crate) unsafe fn pre_translate(m: &MSG) -> bool {
         }
         WM_KEYUP | WM_SYSKEYUP => {
             let vk = m.wParam.0 as u16;
+            if vk == VK_SHIFT.0 || vk == VK_LSHIFT.0 || vk == VK_RSHIFT.0 {
+                // The switch may have focused the view while Shift was still down.
+                // DirectUI then leaves the column header with the keys. Pin the
+                // items once every Shift key is up.
+                if GetKeyState(VK_SHIFT.0 as i32) >= 0 && bind_hwnd(m.hwnd) {
+                    release_items_focus();
+                }
+            }
             if vk == VK_CONTROL.0 || vk == VK_LCONTROL.0 || vk == VK_RCONTROL.0 {
                 refresh_pane_drag();
                 // Ctrl+Tab moves the strip immediately and switches on Ctrl key-up, before the timer.
