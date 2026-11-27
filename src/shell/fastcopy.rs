@@ -3,15 +3,17 @@
 //! Local-to-local stays on IFileOperation unless the user picks Fast paste.
 //! The argument builder never emits `/MIR`, `/PURGE`, `/MOV`, or `/MOVE`.
 //! A move is a copy followed by deleting the sources only after every step succeeds.
+//! A single top-level file of `LARGE_FILE_BYTES` or more goes through `CopyFileExW` so its bytes show while it copies.
 
 use std::collections::HashSet;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use windows::Win32::Storage::FileSystem::{CopyFileExW, COPYFILE_FLAGS, COPYPROGRESSROUTINE_PROGRESS, LPPROGRESS_ROUTINE_CALLBACK_REASON, PROGRESS_CANCEL, PROGRESS_CONTINUE};
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Controls::{TTF_ABSOLUTE, TTF_TRACK, TTM_TRACKACTIVATE, TTM_TRACKPOSITION};
@@ -26,6 +28,27 @@ const SCAN_PUMP_EVERY: u32 = 32;
 const DONE_MIN_VISIBLE: Duration = Duration::from_millis(500);
 const DONE_LINGER: Duration = Duration::from_secs(3);
 const NOTE_HOLD: Duration = Duration::from_secs(5);
+/// A single file this large is copied with `CopyFileExW` so its bytes show while it copies.
+/// Smaller files and folder trees stay on `robocopy /MT:8`.
+const LARGE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// A large-file copy repaints the progress window at most this often (plus at file start and end).
+const LIVE_PAINT_EVERY: Duration = Duration::from_millis(500);
+/// Win32 `ERROR_REQUEST_ABORTED`, returned by `CopyFileExW` after the progress routine cancels.
+const ERROR_REQUEST_ABORTED: u32 = 1235;
+
+fn is_large_file(size: u64) -> bool {
+    size >= LARGE_FILE_BYTES
+}
+
+/// Throttle for the large-file loop: paint again only after `LIVE_PAINT_EVERY`.
+fn live_paint_due(since_last: Duration) -> bool {
+    since_last >= LIVE_PAINT_EVERY
+}
+
+/// Bytes to show: finished files plus the in-flight part of the current file, capped at its size.
+fn live_bytes(done: u64, in_flight: u64, size: u64) -> u64 {
+    done.saturating_add(in_flight.min(size))
+}
 
 /// The finished window stays at least `DONE_MIN_VISIBLE` from open, then until a click or `DONE_LINGER`.
 fn done_should_close(open_for: Duration, done_for: Duration, clicked: bool) -> bool {
@@ -351,6 +374,8 @@ struct Item {
     src: String,
     dest: String,
     is_dir: bool,
+    /// File length from planning; 0 for folders.
+    size: u64,
     skip: bool,
 }
 
@@ -366,13 +391,15 @@ fn plan_items(job: &FastJob, ui: &mut Progress) -> Vec<Item> {
         if name.is_empty() {
             continue;
         }
-        let is_dir = Path::new(src).is_dir();
+        let meta = std::fs::metadata(src).ok();
+        let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
+        let size = meta.as_ref().filter(|m| m.is_file()).map_or(0, |m| m.len());
         let dest_name = if job.rename { unique_name(&job.dst, name, &mut taken) } else { name.to_string() };
         if !job.rename {
             taken.insert(dest_name.to_lowercase());
         }
         let dest = join_path(&job.dst, &dest_name);
-        out.push(Item { src: src.clone(), dest, is_dir, skip: false });
+        out.push(Item { src: src.clone(), dest, is_dir, size, skip: false });
     }
     out
 }
@@ -436,6 +463,8 @@ enum Step {
     Files { from: String, to: String, names: Vec<String>, sources: Vec<String> },
     Tree { from: String, to: String, source: String },
     AsName { from: String, file: String, dest: String, source: String },
+    /// One large top-level file copied straight to `dest` with `CopyFileExW`.
+    Large { source: String, dest: String, size: u64 },
 }
 
 impl Step {
@@ -443,7 +472,7 @@ impl Step {
         match self {
             Step::Files { sources, .. } => sources.iter().cloned().map(|s| (s, false)).collect(),
             Step::Tree { source, .. } => vec![(source.clone(), true)],
-            Step::AsName { source, .. } => vec![(source.clone(), false)],
+            Step::AsName { source, .. } | Step::Large { source, .. } => vec![(source.clone(), false)],
         }
     }
 }
@@ -463,6 +492,11 @@ fn build_steps(items: &[Item]) -> Vec<Step> {
         if item.is_dir {
             flush(&mut steps, &mut batch);
             steps.push(Step::Tree { from: item.src.clone(), to: item.dest.clone(), source: item.src.clone() });
+            continue;
+        }
+        if is_large_file(item.size) {
+            flush(&mut steps, &mut batch);
+            steps.push(Step::Large { source: item.src.clone(), dest: item.dest.clone(), size: item.size });
             continue;
         }
         if src_name != dest_name {
@@ -510,7 +544,7 @@ fn tally(steps: &[Step], ui: &mut Progress) -> (u64, u64) {
                     add_file(Path::new(s), &mut files, &mut bytes);
                 }
             }
-            Step::AsName { source, .. } => {
+            Step::AsName { source, .. } | Step::Large { source, .. } => {
                 if !scan_tick(ui, &mut seen) {
                     return (files, bytes);
                 }
@@ -571,6 +605,7 @@ fn run_step(exe: &Path, dir: &Path, step: &Step, ui: &mut Progress, errors: &mut
     match step {
         Step::Files { from, to, names, .. } => run_robocopy(exe, dir, from, to, names, false, ui, errors),
         Step::Tree { from, to, .. } => run_robocopy(exe, dir, from, to, &[], true, ui, errors),
+        Step::Large { source, dest, size } => run_large(source, dest, *size, ui, errors),
         Step::AsName { from, file, dest, .. } => {
             let stage = dir.join("stage");
             let _ = std::fs::remove_dir_all(&stage);
@@ -686,6 +721,114 @@ fn run_robocopy(exe: &Path, dir: &Path, src: &str, dst: &str, files: &[String], 
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(30)),
             Err(_) => return StepEnd::Fail(16),
+        }
+    }
+}
+
+/// Shared with the `CopyFileExW` progress routine. The routine only stores and reads atomics.
+struct LiveCopy {
+    transferred: AtomicU64,
+    cancel: Arc<AtomicBool>,
+}
+
+unsafe extern "system" fn large_copy_progress(
+    _total: i64,
+    transferred: i64,
+    _stream_size: i64,
+    _stream_done: i64,
+    _stream_no: u32,
+    _reason: LPPROGRESS_ROUTINE_CALLBACK_REASON,
+    _src: HANDLE,
+    _dst: HANDLE,
+    data: *const core::ffi::c_void,
+) -> COPYPROGRESSROUTINE_PROGRESS {
+    let live = unsafe { &*(data as *const LiveCopy) };
+    live.transferred.store(transferred.max(0) as u64, Ordering::Relaxed);
+    if live.cancel.load(Ordering::Relaxed) { PROGRESS_CANCEL } else { PROGRESS_CONTINUE }
+}
+
+/// `\\?\` form for a long absolute path so `CopyFileExW` is not held to MAX_PATH.
+fn long_path(path: &str) -> String {
+    if path.len() < 248 || path.starts_with(r"\\?\") {
+        return path.to_string();
+    }
+    if let Some(rest) = path.strip_prefix(r"\\") {
+        return format!(r"\\?\UNC\{rest}");
+    }
+    if path.as_bytes().get(1) == Some(&b':') {
+        return format!(r"\\?\{path}");
+    }
+    path.to_string()
+}
+
+/// Win32 error code from a `windows::core::Error` (HRESULT_FROM_WIN32 unwrapped).
+fn win32_code(e: &windows::core::Error) -> u32 {
+    let hr = e.code().0 as u32;
+    if hr & 0xFFFF_0000 == 0x8007_0000 { hr & 0xFFFF } else { hr }
+}
+
+/// Copy one large file on a worker thread. This thread pumps, checks cancel, and repaints
+/// every `LIVE_PAINT_EVERY`. A cancelled `CopyFileExW` removes its partial destination.
+fn run_large(src: &str, dest: &str, size: u64, ui: &mut Progress, errors: &mut Vec<String>) -> StepEnd {
+    ui.set_current(src.to_string());
+    ui.set_in_flight(0);
+    ui.refresh_text();
+    ui.pump();
+    if let Ok(m) = std::fs::metadata(dest) {
+        // The user chose to overwrite; robocopy replaces a read-only target, so do the same.
+        let mut perm = m.permissions();
+        if m.is_file() && perm.readonly() {
+            perm.set_readonly(false);
+            let _ = std::fs::set_permissions(dest, perm);
+        }
+    }
+    if let Some(parent) = Path::new(dest).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let live = Arc::new(LiveCopy { transferred: AtomicU64::new(0), cancel: ui.cancel.clone() });
+    let worker = {
+        let live = live.clone();
+        let from = long_path(src);
+        let to = long_path(dest);
+        std::thread::spawn(move || -> std::result::Result<(), u32> {
+            let data = Arc::as_ptr(&live) as *const core::ffi::c_void;
+            let result = unsafe { CopyFileExW(&HSTRING::from(from.as_str()), &HSTRING::from(to.as_str()), Some(large_copy_progress), Some(data), None, COPYFILE_FLAGS(0)) };
+            result.map_err(|e| win32_code(&e))
+        })
+    };
+    let mut last_paint = Instant::now();
+    while !worker.is_finished() {
+        ui.pump();
+        if live_paint_due(last_paint.elapsed()) {
+            ui.set_in_flight(live.transferred.load(Ordering::Relaxed).min(size));
+            ui.refresh_text();
+            last_paint = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let result = worker.join().unwrap_or(Err(16));
+    ui.set_in_flight(0);
+    match result {
+        Ok(()) if !ui.cancelled() => {
+            ui.add_done(size);
+            ui.refresh_text();
+            ui.pump();
+            StepEnd::Ok
+        }
+        Ok(()) => StepEnd::Ok,
+        Err(_) if ui.cancelled() => {
+            // CopyFileExW deletes a partial target after PROGRESS_CANCEL; make sure of it.
+            if Path::new(dest).is_file() && std::fs::metadata(dest).map_or(false, |m| m.len() < size) {
+                let _ = std::fs::remove_file(dest);
+            }
+            StepEnd::Cancel
+        }
+        Err(code) => {
+            let code = if code == ERROR_REQUEST_ABORTED { 16 } else { code };
+            if errors.len() < 40 {
+                errors.push(format!("ERROR {code} (0x{code:08X}) Copying File {src}"));
+            }
+            StepEnd::Fail(code as i32)
         }
     }
 }
@@ -947,6 +1090,8 @@ struct Progress {
     files_done: u64,
     files_total: u64,
     bytes_done: u64,
+    /// Bytes of the large file now copying; not yet in `bytes_done`.
+    in_flight: u64,
     bytes_total: u64,
     current: String,
     started: Instant,
@@ -972,6 +1117,7 @@ impl Progress {
             files_done: 0,
             files_total: 0,
             bytes_done: 0,
+            in_flight: 0,
             bytes_total: 0,
             current: String::new(),
             started: now,
@@ -1012,6 +1158,15 @@ impl Progress {
         self.dirty = true;
     }
 
+    fn set_in_flight(&mut self, bytes: u64) {
+        self.in_flight = bytes;
+        self.dirty = true;
+    }
+
+    fn shown_bytes(&self) -> u64 {
+        live_bytes(self.bytes_done, self.in_flight, self.bytes_total.saturating_sub(self.bytes_done))
+    }
+
     fn set_current(&mut self, path: String) {
         self.current = path;
         self.dirty = true;
@@ -1027,10 +1182,11 @@ impl Progress {
 
     fn refresh_text(&mut self) {
         let Some(v) = view(self.hwnd) else { return };
+        let bytes_done = self.shown_bytes();
         let frac = if self.force_full {
             1.0
         } else if self.bytes_total > 0 {
-            (self.bytes_done as f32 / self.bytes_total as f32).clamp(0.0, 1.0)
+            (bytes_done as f32 / self.bytes_total as f32).clamp(0.0, 1.0)
         } else if self.files_total > 0 {
             (self.files_done as f32 / self.files_total as f32).clamp(0.0, 1.0)
         } else {
@@ -1041,14 +1197,14 @@ impl Progress {
             &[
                 ("done", &self.files_done.to_string()),
                 ("total", &self.files_total.to_string()),
-                ("bdone", &format_bytes(self.bytes_done)),
+                ("bdone", &format_bytes(bytes_done)),
                 ("btotal", &format_bytes(self.bytes_total)),
             ],
         );
         let eta = if self.force_full {
             String::new()
         } else {
-            match eta_basis(self.bytes_done, self.bytes_total, self.files_done, self.files_total) {
+            match eta_basis(bytes_done, self.bytes_total, self.files_done, self.files_total) {
                 Some((done, total)) => eta_text(done, total, self.started),
                 None => String::new(),
             }
@@ -1893,6 +2049,67 @@ unsafe fn measure_dc(dc: HDC, font: HFONT, text: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn file_item(src: &str, dest: &str, size: u64) -> Item {
+        Item { src: src.into(), dest: dest.into(), is_dir: false, size, skip: false }
+    }
+
+    #[test]
+    fn large_files_get_their_own_copyfileex_step_and_the_rest_stay_on_robocopy() {
+        assert!(!is_large_file(LARGE_FILE_BYTES - 1));
+        assert!(is_large_file(LARGE_FILE_BYTES));
+        let items = vec![
+            file_item(r"C:\s\a.txt", r"D:\d\a.txt", 10),
+            file_item(r"C:\s\big.iso", r"D:\d\big.iso", LARGE_FILE_BYTES),
+            file_item(r"C:\s\b.txt", r"D:\d\b.txt", LARGE_FILE_BYTES - 1),
+            file_item(r"C:\s\c.txt", r"D:\d\c.txt", 5),
+            file_item(r"C:\s\big2.iso", r"D:\d\big2 - Copy.iso", 1 << 32),
+            Item { src: r"C:\s\tree".into(), dest: r"D:\d\tree".into(), is_dir: true, size: 0, skip: false },
+            Item { skip: true, ..file_item(r"C:\s\skip.iso", r"D:\d\skip.iso", 1 << 30) },
+        ];
+        let steps = build_steps(&items);
+        assert_eq!(steps.len(), 5);
+        assert!(matches!(&steps[0], Step::Files { names, .. } if names == &["a.txt".to_string()]));
+        assert!(matches!(&steps[1], Step::Large { source, dest, size } if source == r"C:\s\big.iso" && dest == r"D:\d\big.iso" && *size == LARGE_FILE_BYTES));
+        assert!(matches!(&steps[2], Step::Files { names, .. } if names == &["b.txt".to_string(), "c.txt".to_string()]));
+        // A large renamed copy goes straight to its new name with no staging folder.
+        assert!(matches!(&steps[3], Step::Large { dest, .. } if dest == r"D:\d\big2 - Copy.iso"));
+        // Folder trees stay on robocopy even when they hold large files.
+        assert!(matches!(&steps[4], Step::Tree { .. }));
+        assert_eq!(steps[1].sources(), vec![(r"C:\s\big.iso".to_string(), false)]);
+    }
+
+    #[test]
+    fn in_flight_bytes_show_live_and_never_double_count() {
+        let mut done = 100u64;
+        let size = 1_000u64;
+        assert_eq!(live_bytes(done, 0, size), 100);
+        assert_eq!(live_bytes(done, 400, size), 500);
+        // A stale or overshooting callback value is capped at the file size.
+        assert_eq!(live_bytes(done, 5_000, size), 1_100);
+        // At the end the in-flight part is cleared and the whole file joins `done` once.
+        done += size;
+        assert_eq!(live_bytes(done, 0, size), 1_100);
+        assert_eq!(live_bytes(u64::MAX - 1, 10, size), u64::MAX);
+    }
+
+    #[test]
+    fn large_copy_repaints_at_most_every_half_second() {
+        assert_eq!(LIVE_PAINT_EVERY, Duration::from_millis(500));
+        assert!(!live_paint_due(Duration::ZERO));
+        assert!(!live_paint_due(Duration::from_millis(499)));
+        assert!(live_paint_due(Duration::from_millis(500)));
+        assert!(live_paint_due(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn long_paths_get_the_extended_prefix() {
+        assert_eq!(long_path(r"C:\a\b.iso"), r"C:\a\b.iso");
+        let deep = format!(r"C:\{}\f.iso", "d".repeat(260));
+        assert_eq!(long_path(&deep), format!(r"\\?\{deep}"));
+        let unc = format!(r"\\srv\share\{}", "d".repeat(260));
+        assert!(long_path(&unc).starts_with(r"\\?\UNC\srv\share\"));
+    }
 
     #[test]
     fn fast_only_when_forced_or_network_setting() {
