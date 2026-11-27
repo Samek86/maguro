@@ -17,6 +17,8 @@ use crate::{settings, store};
 
 // ---------- background paste ----------
 
+use super::inuse::Pass;
+
 // Copies running on worker threads; the status line says so and skips its disk calls meanwhile.
 pub(crate) static COPYING: AtomicUsize = AtomicUsize::new(0);
 
@@ -587,15 +589,15 @@ unsafe fn start_transfer(srcs: Vec<String>, dst: String, rename: bool, mv: bool,
         // A drop may still be holding the file after the first settle. Try once quietly,
         // then ask which program has it if the move is still blocked.
         let result = if after_drop && mv {
-            let first = copy_once(&prepared, &prepared_dst, rename, true);
-            if first.result.is_ok() && first.locked.is_empty() {
+            let first = copy_once(&prepared, &prepared_dst, rename, true, Pass::Quiet, owner_hwnd);
+            if first.result.is_ok() && first.locked.is_empty() && first.denied().is_empty() {
                 Ok(())
             } else {
                 settle_drop_move(&srcs);
-                super::inuse::recover(owner_hwnd, kind, &fallback, || copy_once(&prepared, &prepared_dst, rename, true))
+                super::inuse::recover_with(owner_hwnd, kind, &fallback, |pass, only| copy_once(&pick(&prepared, only), &prepared_dst, rename, true, pass, owner_hwnd))
             }
         } else {
-            super::inuse::recover(owner_hwnd, kind, &fallback, || copy_once(&prepared, &prepared_dst, rename, mv))
+            super::inuse::recover_with(owner_hwnd, kind, &fallback, |pass, only| copy_once(&pick(&prepared, only), &prepared_dst, rename, mv, pass, owner_hwnd))
         };
         if let Err(e) = result {
             if !super::inuse::is_cancel(&e) {
@@ -724,7 +726,78 @@ unsafe fn run_copy_at(srcs: &[String], dst: &str, rename: bool, mv: bool, owner:
     let dst = final_dos(dst);
     let fallback = transfer_fallback(&srcs, &dst);
     let kind = if mv { super::inuse::OpKind::Move } else { super::inuse::OpKind::Copy };
-    super::inuse::recover(owner, kind, &fallback, || copy_once(&srcs, &dst, rename, mv))
+    super::inuse::recover_with(owner, kind, &fallback, |pass, only| copy_once(&pick(&srcs, only), &dst, rename, mv, pass, owner))
+}
+
+/// The sources for one pass: all of them first, then only the ones that need elevation.
+fn pick(srcs: &[String], only: &[String]) -> Vec<String> {
+    if only.is_empty() { srcs.to_vec() } else { super::inuse::retry_targets(srcs, only) }
+}
+
+/// Copy or move flags. The quiet pass adds `FOF_NOERRORUI`; the elevated pass swaps it for
+/// `FOFX_SHOWELEVATIONPROMPT`. `confirmed` = conflicts were already answered (Fast copy).
+pub(crate) fn copy_flags(rename: bool, confirmed: bool, pass: Pass) -> FILEOPERATION_FLAGS {
+    let mut base = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOFX_ADDUNDORECORD;
+    if rename {
+        base = base | FOF_RENAMEONCOLLISION;
+    }
+    if confirmed {
+        base = base | FOF_NOCONFIRMATION;
+    }
+    super::inuse::pass_flags(base, pass)
+}
+
+/// Delete flags. `shell_confirms` = a permanent delete nobody confirmed yet, so the shell
+/// asks. The elevated pass never asks again: the first pass already got the answer.
+pub(crate) fn delete_flags(permanent: bool, shell_confirms: bool, pass: Pass) -> FILEOPERATION_FLAGS {
+    let mut base = FOF_NOCONFIRMMKDIR;
+    if !shell_confirms || pass == Pass::Elevated {
+        base = base | FOF_NOCONFIRMATION;
+    }
+    if !permanent {
+        base = base | FOF_ALLOWUNDO | FOFX_ADDUNDORECORD;
+    }
+    super::inuse::pass_flags(base, pass)
+}
+
+pub(crate) fn rename_flags(pass: Pass) -> FILEOPERATION_FLAGS {
+    super::inuse::pass_flags(FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOF_NOCONFIRMATION | FOFX_ADDUNDORECORD, pass)
+}
+
+/// The elevated pass shows Windows' own prompts. An owner keeps them in front of Maguro.
+unsafe fn own_elevated(op: &IFileOperation, pass: Pass, owner: HWND) -> Result<()> {
+    if pass == Pass::Elevated && !owner.0.is_null() {
+        op.SetOwnerWindow(owner)?;
+    }
+    Ok(())
+}
+
+/// Fast copy hit access denied. Copy or move `items` (source, destination name) into `dst`
+/// once, elevated, with Windows' prompt. Conflicts were already answered in the Fast copy window.
+pub(crate) unsafe fn elevated_transfer(items: &[(String, String)], dst: &str, mv: bool, owner: HWND) -> Result<()> {
+    let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
+    op.SetOperationFlags(copy_flags(false, true, Pass::Elevated))?;
+    own_elevated(&op, Pass::Elevated, owner)?;
+    let to: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(dst), None)?;
+    for (src, name) in items {
+        let item: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(src.as_str()), None)?;
+        let same = Path::new(src).file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name));
+        let wide = HSTRING::from(name.as_str());
+        let new_name = if same || name.is_empty() { PCWSTR::null() } else { PCWSTR(wide.as_ptr()) };
+        if mv { op.MoveItem(&item, &to, new_name, None)? } else { op.CopyItem(&item, &to, new_name, None)? }
+    }
+    let attempt = super::inuse::perform_watched(&op);
+    attempt.result?;
+    if op.GetAnyOperationsAborted().unwrap_or(BOOL(0)).as_bool() {
+        return Err(Error::from(COPYENGINE_E_USER_CANCELLED));
+    }
+    Ok(())
+}
+
+/// Fast move copied these but could not remove the sources (access denied). Delete them
+/// elevated, without another confirmation: the move already decided it.
+pub(crate) unsafe fn elevated_remove(srcs: &[String], owner: HWND) -> Result<()> {
+    delete_once(srcs, true, 0, Pass::Elevated, owner).result
 }
 
 fn transfer_fallback(srcs: &[String], dst: &str) -> Vec<String> {
@@ -744,31 +817,32 @@ fn transfer_fallback(srcs: &[String], dst: &str) -> Vec<String> {
     out
 }
 
-unsafe fn copy_once(srcs: &[String], dst: &str, rename: bool, mv: bool) -> super::inuse::Attempt {
+unsafe fn copy_once(srcs: &[String], dst: &str, rename: bool, mv: bool, pass: Pass, owner: HWND) -> super::inuse::Attempt {
     let op: IFileOperation = match CoCreateInstance(&FileOperation, None, CLSCTX_ALL) {
         Ok(op) => op,
-        Err(e) => return super::inuse::Attempt { result: Err(e), locked: Vec::new() },
+        Err(e) => return super::inuse::Attempt::err(e),
     };
-    let flags = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI | FOFX_ADDUNDORECORD;
-    if let Err(e) = op.SetOperationFlags(if rename { flags | FOF_RENAMEONCOLLISION } else { flags }) {
-        return super::inuse::Attempt { result: Err(e), locked: Vec::new() };
+    if let Err(e) = op.SetOperationFlags(copy_flags(rename, false, pass)) {
+        return super::inuse::Attempt::err(e);
+    }
+    if let Err(e) = own_elevated(&op, pass, owner) {
+        return super::inuse::Attempt::err(e);
     }
     let to: IShellItem = match SHCreateItemFromParsingName(&HSTRING::from(dst), None) {
         Ok(it) => it,
-        Err(e) => return super::inuse::Attempt { result: Err(e), locked: Vec::new() },
+        Err(e) => return super::inuse::Attempt::err(e),
     };
     for s in srcs {
         let item: IShellItem = match SHCreateItemFromParsingName(&HSTRING::from(s), None) {
             Ok(it) => it,
-            Err(e) => return super::inuse::Attempt { result: Err(e), locked: Vec::new() },
+            Err(e) => return super::inuse::Attempt::err(e),
         };
         let queued = if mv { op.MoveItem(&item, &to, PCWSTR::null(), None) } else { op.CopyItem(&item, &to, PCWSTR::null(), None) };
         if let Err(e) = queued {
-            return super::inuse::Attempt { result: Err(e), locked: Vec::new() };
+            return super::inuse::Attempt::err(e);
         }
     }
-    let (result, locked) = super::inuse::perform_watched(&op);
-    super::inuse::Attempt { result, locked }
+    super::inuse::perform_watched(&op)
 }
 
 /// Shell Properties for the active pane's selection.
@@ -888,65 +962,70 @@ pub(crate) unsafe fn run_rename_one(path: &str, new_name: &str, owner: HWND) -> 
     if let Some(dir) = Path::new(path).parent() {
         fallback.push(dir.join(new_name).to_string_lossy().into_owned());
     }
-    super::inuse::recover(owner, super::inuse::OpKind::Rename, &fallback, || rename_once(path, new_name))
+    super::inuse::recover_with(owner, super::inuse::OpKind::Rename, &fallback, |pass, _| rename_once(path, new_name, pass, owner))
 }
 
-unsafe fn rename_once(path: &str, new_name: &str) -> super::inuse::Attempt {
+unsafe fn rename_once(path: &str, new_name: &str, pass: Pass, owner: HWND) -> super::inuse::Attempt {
     let op: IFileOperation = match CoCreateInstance(&FileOperation, None, CLSCTX_ALL) {
         Ok(op) => op,
-        Err(e) => return super::inuse::Attempt { result: Err(e), locked: Vec::new() },
+        Err(e) => return super::inuse::Attempt::err(e),
     };
-    let flags = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOFX_ADDUNDORECORD;
-    if let Err(e) = op.SetOperationFlags(flags) {
-        return super::inuse::Attempt { result: Err(e), locked: Vec::new() };
+    if let Err(e) = op.SetOperationFlags(rename_flags(pass)) {
+        return super::inuse::Attempt::err(e);
+    }
+    if let Err(e) = own_elevated(&op, pass, owner) {
+        return super::inuse::Attempt::err(e);
     }
     let item: IShellItem = match SHCreateItemFromParsingName(&HSTRING::from(path), None) {
         Ok(it) => it,
-        Err(e) => return super::inuse::Attempt { result: Err(e), locked: Vec::new() },
+        Err(e) => return super::inuse::Attempt::err(e),
     };
     let name = HSTRING::from(new_name);
     if let Err(e) = op.RenameItem(&item, PCWSTR(name.as_ptr()), None) {
-        return super::inuse::Attempt { result: Err(e), locked: Vec::new() };
+        return super::inuse::Attempt::err(e);
     }
-    let (result, locked) = super::inuse::perform_watched(&op);
-    super::inuse::Attempt { result, locked }
+    super::inuse::perform_watched(&op)
 }
 
 pub(crate) unsafe fn run_delete(srcs: &[String], permanent: bool, ask_owner: isize, dialog_owner: isize) -> Result<()> {
     let fallback = srcs.to_vec();
-    super::inuse::recover(HWND(dialog_owner as *mut _), super::inuse::OpKind::Delete, &fallback, || delete_once(srcs, permanent, ask_owner))
+    let owner = HWND(dialog_owner as *mut _);
+    super::inuse::recover_with(owner, super::inuse::OpKind::Delete, &fallback, |pass, only| {
+        // An item that was deleted before the failure is gone; the elevated pass skips it.
+        let targets: Vec<String> = pick(srcs, only).into_iter().filter(|p| pass == Pass::Quiet || Path::new(p).exists()).collect();
+        if targets.is_empty() {
+            return super::inuse::Attempt { result: Ok(()), locked: Vec::new(), failed: Vec::new() };
+        }
+        delete_once(&targets, permanent, ask_owner, pass, owner)
+    })
 }
 
-unsafe fn delete_once(srcs: &[String], permanent: bool, ask_owner: isize) -> super::inuse::Attempt {
+unsafe fn delete_once(srcs: &[String], permanent: bool, ask_owner: isize, pass: Pass, owner: HWND) -> super::inuse::Attempt {
     let op: IFileOperation = match CoCreateInstance(&FileOperation, None, CLSCTX_ALL) {
         Ok(op) => op,
-        Err(e) => return super::inuse::Attempt { result: Err(e), locked: Vec::new() },
+        Err(e) => return super::inuse::Attempt::err(e),
     };
-    let mut flags = FOF_NOCONFIRMMKDIR | FOF_NOERRORUI;
-    if ask_owner != 0 && permanent {
+    let shell_confirms = ask_owner != 0 && permanent;
+    if shell_confirms {
         if let Err(e) = op.SetOwnerWindow(HWND(ask_owner as _)) {
-            return super::inuse::Attempt { result: Err(e), locked: Vec::new() };
+            return super::inuse::Attempt::err(e);
         }
-    } else {
-        flags |= FOF_NOCONFIRMATION;
+    } else if let Err(e) = own_elevated(&op, pass, owner) {
+        return super::inuse::Attempt::err(e);
     }
-    if !permanent {
-        flags |= FOF_ALLOWUNDO | FOFX_ADDUNDORECORD;
-    }
-    if let Err(e) = op.SetOperationFlags(flags) {
-        return super::inuse::Attempt { result: Err(e), locked: Vec::new() };
+    if let Err(e) = op.SetOperationFlags(delete_flags(permanent, shell_confirms, pass)) {
+        return super::inuse::Attempt::err(e);
     }
     for s in srcs {
         let item: IShellItem = match SHCreateItemFromParsingName(&HSTRING::from(s), None) {
             Ok(it) => it,
-            Err(e) => return super::inuse::Attempt { result: Err(e), locked: Vec::new() },
+            Err(e) => return super::inuse::Attempt::err(e),
         };
         if let Err(e) = op.DeleteItem(&item, None) {
-            return super::inuse::Attempt { result: Err(e), locked: Vec::new() };
+            return super::inuse::Attempt::err(e);
         }
     }
-    let (result, locked) = super::inuse::perform_watched(&op);
-    super::inuse::Attempt { result, locked }
+    super::inuse::perform_watched(&op)
 }
 
 pub(crate) fn default_new_name() -> String {
@@ -1360,7 +1439,7 @@ mod tests {
         let (done_tx, done_rx) = channel();
         let _worker = std::thread::spawn(move || {
             let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
-            let attempt = unsafe { delete_once(&[shown], true, 0) };
+            let attempt = unsafe { delete_once(&[shown], true, 0, Pass::Quiet, HWND::default()) };
             if com {
                 unsafe { CoUninitialize() };
             }
@@ -1381,6 +1460,193 @@ mod tests {
         assert!(path.exists(), "locked file should still be there");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// None when this process can create a file in `C:\` (elevated): a probe would write there.
+    fn protected_root_probe(tag: &str) -> Option<std::path::PathBuf> {
+        let target = std::path::Path::new(r"C:\").join(format!("maguro-uac-{tag}-{}.txt", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(f) => {
+                drop(f);
+                let _ = std::fs::remove_file(&target);
+                eprintln!("C:\\ is writable here (elevated?); skipping the protected-root probe");
+                None
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Some(target),
+            Err(e) => {
+                eprintln!("C:\\ probe skipped: {e}");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn flags_keep_noerrorui_first_and_swap_it_for_the_elevation_prompt_on_retry() {
+        let has = |f: FILEOPERATION_FLAGS, bit: FILEOPERATION_FLAGS| f.0 & bit.0 == bit.0;
+        for rename in [false, true] {
+            let q = copy_flags(rename, false, Pass::Quiet);
+            let e = copy_flags(rename, false, Pass::Elevated);
+            assert!(has(q, FOF_NOERRORUI) && !has(q, FOFX_SHOWELEVATIONPROMPT));
+            assert!(!has(e, FOF_NOERRORUI) && has(e, FOFX_SHOWELEVATIONPROMPT));
+            for f in [q, e] {
+                assert!(has(f, FOF_ALLOWUNDO) && has(f, FOF_NOCONFIRMMKDIR) && has(f, FOFX_ADDUNDORECORD));
+                assert_eq!(has(f, FOF_RENAMEONCOLLISION), rename);
+                assert!(!has(f, FOF_NOCONFIRMATION));
+            }
+        }
+        // Fast copy already asked about conflicts.
+        assert!(has(copy_flags(false, true, Pass::Elevated), FOF_NOCONFIRMATION));
+        // Shift+Delete the shell confirms: it asks on the first pass only.
+        let q = delete_flags(true, true, Pass::Quiet);
+        let e = delete_flags(true, true, Pass::Elevated);
+        assert!(has(q, FOF_NOERRORUI) && !has(q, FOF_NOCONFIRMATION) && !has(q, FOF_ALLOWUNDO));
+        assert!(!has(e, FOF_NOERRORUI) && has(e, FOF_NOCONFIRMATION) && has(e, FOFX_SHOWELEVATIONPROMPT) && !has(e, FOF_ALLOWUNDO));
+        // Shift+Delete Maguro confirmed, and Delete to the recycle bin.
+        assert!(has(delete_flags(true, false, Pass::Quiet), FOF_NOCONFIRMATION));
+        assert!(has(delete_flags(true, false, Pass::Elevated), FOF_NOCONFIRMATION));
+        let r = delete_flags(false, false, Pass::Elevated);
+        assert!(has(r, FOF_ALLOWUNDO) && has(r, FOFX_ADDUNDORECORD) && has(r, FOF_NOCONFIRMATION) && has(r, FOFX_SHOWELEVATIONPROMPT) && !has(r, FOF_NOERRORUI));
+        assert!(has(rename_flags(Pass::Quiet), FOF_NOERRORUI));
+        let r = rename_flags(Pass::Elevated);
+        assert!(!has(r, FOF_NOERRORUI) && has(r, FOFX_SHOWELEVATIONPROMPT) && has(r, FOF_NOCONFIRMATION));
+    }
+
+    /// The quiet first pass into `C:\` fails without any UI, and the code it reports is one
+    /// `recover_with` turns into the elevated pass. The elevated pass itself is not run here:
+    /// it would raise the administrator prompt.
+    #[test]
+    fn quiet_copy_into_protected_root_fails_with_an_elevation_code() {
+        use std::sync::mpsc::channel;
+        let Some(target) = protected_root_probe("copy") else { return };
+        let dir = std::env::temp_dir().join(format!("maguro-uac-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join(target.file_name().unwrap());
+        std::fs::write(&src, b"probe").unwrap();
+        let shown = src.to_string_lossy().into_owned();
+        let (tx, rx) = channel();
+        let _worker = std::thread::spawn(move || {
+            let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+            for mv in [false, true] {
+                let a = unsafe { copy_once(&[shown.clone()], r"C:\", false, mv, Pass::Quiet, HWND::default()) };
+                let code = a.result.as_ref().err().map(|e| e.code()).unwrap_or(S_OK);
+                let _ = tx.send((mv, code, a.failed.clone(), a.locked.clone(), a.denied()));
+            }
+            if com {
+                unsafe { CoUninitialize() };
+            }
+        });
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+                Ok(r) => seen.push(r),
+                Err(_) => {
+                    let _ = std::fs::remove_file(&target);
+                    eprintln!("quiet copy into C:\\ did not return; a system dialog may be showing");
+                    std::process::exit(2);
+                }
+            }
+        }
+        let wrote = target.exists();
+        if wrote {
+            let _ = std::fs::remove_file(&target);
+        }
+        let src_left = src.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!wrote, "copy into C:\\ succeeded unelevated");
+        assert!(src_left, "quiet move into C:\\ removed the source");
+        for (mv, code, failed, locked, denied) in seen {
+            let items: Vec<String> = failed.iter().map(|(p, hr)| format!("{:#010x} {p}", hr.0 as u32)).collect();
+            eprintln!("UAC probe: mv={mv} PerformOperations={:#010x} items={items:?} locked={locked:?}", code.0 as u32);
+            let next = super::super::inuse::next_step(code, "", !locked.is_empty(), !denied.is_empty(), false);
+            assert_eq!(next, super::super::inuse::Next::Elevate, "mv={mv} code={:#010x} items={items:?}", code.0 as u32);
+        }
+    }
+
+    /// Manual: `cargo test --bin maguro -- --ignored elevated_copy_into_protected_root`.
+    /// The elevated pass must show Windows' own prompt instead of failing silently. The test
+    /// closes that prompt itself (Cancel), so nothing is elevated and nothing is written to `C:\`.
+    #[test]
+    #[ignore]
+    fn elevated_copy_into_protected_root_shows_the_windows_prompt() {
+        use std::sync::mpsc::channel;
+        unsafe extern "system" fn ours(hwnd: HWND, lp: LPARAM) -> BOOL {
+            let found = unsafe { &mut *(lp.0 as *mut Vec<(HWND, String, String)>) };
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if pid == std::process::id() && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                let mut class = [0u16; 128];
+                let n = unsafe { GetClassNameW(hwnd, &mut class) } as usize;
+                let mut title = [0u16; 256];
+                let t = unsafe { GetWindowTextW(hwnd, &mut title) } as usize;
+                found.push((hwnd, String::from_utf16_lossy(&class[..n]), String::from_utf16_lossy(&title[..t])));
+            }
+            BOOL(1)
+        }
+        let Some(target) = protected_root_probe("elev") else { return };
+        let dir = std::env::temp_dir().join(format!("maguro-uac-elev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join(target.file_name().unwrap());
+        std::fs::write(&src, b"probe").unwrap();
+        let shown = src.to_string_lossy().into_owned();
+        let (tx, rx) = channel();
+        let _worker = std::thread::spawn(move || {
+            let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+            let a = unsafe { copy_once(&[shown], r"C:\", false, false, Pass::Elevated, HWND::default()) };
+            let code = a.result.as_ref().err().map(|e| e.code()).unwrap_or(S_OK);
+            if com {
+                unsafe { CoUninitialize() };
+            }
+            let _ = tx.send(code);
+        });
+        let start = Instant::now();
+        let mut prompt: Option<(HWND, String, String)> = None;
+        let mut early = None;
+        let mut seen: Vec<String> = Vec::new();
+        while start.elapsed() < std::time::Duration::from_secs(15) && prompt.is_none() && early.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            early = rx.try_recv().ok();
+            let mut found: Vec<(HWND, String, String)> = Vec::new();
+            unsafe {
+                let _ = EnumWindows(Some(ours), LPARAM(&mut found as *mut _ as isize));
+            }
+            for (_, class, title) in &found {
+                let k = format!("{class} \"{title}\"");
+                if !seen.contains(&k) {
+                    seen.push(k);
+                }
+            }
+            // The copy engine draws its "Continue" (administrator) prompt in its own
+            // OperationStatusWindow. A 5-byte copy that is still up after 1.5 s is waiting there.
+            if start.elapsed() > std::time::Duration::from_millis(1500) {
+                prompt = found.into_iter().find(|(_, class, _)| class == "OperationStatusWindow" || class == "#32770");
+            }
+        }
+        let Some((hwnd, class, title)) = prompt else {
+            let wrote = target.exists();
+            let _ = std::fs::remove_file(&target);
+            let _ = std::fs::remove_dir_all(&dir);
+            panic!("no Windows prompt appeared for the elevated pass: early={:?} wrote={wrote} windows={seen:?}", early.map(|c: HRESULT| format!("{:#010x}", c.0 as u32)));
+        };
+        eprintln!("UAC probe: elevated pass showed {class} \"{title}\"; cancelling it");
+        // Close it, never Continue: nothing gets elevated.
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+        let code = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(code) => code,
+            Err(_) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                eprintln!("the prompt did not close; exiting so it does not stay on screen");
+                std::process::exit(2);
+            }
+        };
+        let wrote = target.exists();
+        if wrote {
+            let _ = std::fs::remove_file(&target);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        eprintln!("UAC probe: elevated pass after Cancel -> {:#010x}", code.0 as u32);
+        assert!(!wrote, "the cancelled elevated copy wrote into C:\\");
+    }
 }
-
-

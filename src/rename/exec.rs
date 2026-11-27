@@ -263,30 +263,30 @@ unsafe fn run_wave(wave: &[Step], owner: isize) -> Wave {
 unsafe fn rename_wave_once(wave: &[Step]) -> crate::shell::inuse::Attempt {
     let op: IFileOperation = match CoCreateInstance(&FileOperation, None, CLSCTX_ALL) {
         Ok(op) => op,
-        Err(e) => return crate::shell::inuse::Attempt { result: Err(e), locked: Vec::new() },
+        Err(e) => return crate::shell::inuse::Attempt::err(e),
     };
     // No confirmation: the preview already blocked invalid names. FOF_NOERRORUI lets
     // Maguro name the program instead of the shell "File In Use" box. Progress still shows.
     let flags = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOFX_ADDUNDORECORD;
     if let Err(e) = op.SetOperationFlags(flags) {
-        return crate::shell::inuse::Attempt { result: Err(e), locked: Vec::new() };
+        return crate::shell::inuse::Attempt::err(e);
     }
     for step in wave {
         let path = super::engine::join_path(&step.dir, &step.from);
         let item: IShellItem = match SHCreateItemFromParsingName(&HSTRING::from(&path), None) {
             Ok(it) => it,
-            Err(e) => return crate::shell::inuse::Attempt { result: Err(e), locked: Vec::new() },
+            Err(e) => return crate::shell::inuse::Attempt::err(e),
         };
         let new_name = HSTRING::from(&step.to);
         if let Err(e) = op.RenameItem(&item, PCWSTR(new_name.as_ptr()), None) {
-            return crate::shell::inuse::Attempt { result: Err(e), locked: Vec::new() };
+            return crate::shell::inuse::Attempt::err(e);
         }
     }
-    let (result, locked) = crate::shell::inuse::perform_watched(&op);
-    if result.is_ok() && locked.is_empty() && op.GetAnyOperationsAborted().unwrap_or(BOOL(0)).as_bool() {
-        return crate::shell::inuse::Attempt { result: Err(Error::from(COPYENGINE_E_USER_CANCELLED)), locked };
+    let attempt = crate::shell::inuse::perform_watched(&op);
+    if attempt.result.is_ok() && attempt.locked.is_empty() && op.GetAnyOperationsAborted().unwrap_or(BOOL(0)).as_bool() {
+        return crate::shell::inuse::Attempt { result: Err(Error::from(COPYENGINE_E_USER_CANCELLED)), ..attempt };
     }
-    crate::shell::inuse::Attempt { result, locked }
+    attempt
 }
 
 fn cancelled(e: &windows::core::Error) -> bool {
