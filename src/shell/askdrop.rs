@@ -40,6 +40,88 @@ pub(crate) fn drop_folder(current: &str, child: Option<&str>) -> Option<String> 
     is_fs(current).then(|| current.to_string())
 }
 
+/// `C:` or `\\server\share`, folded for comparing. `None` for anything else.
+pub(crate) fn volume_root(path: &str) -> Option<String> {
+    let b = path.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        return Some(path[..2].to_ascii_uppercase());
+    }
+    let rest = path.strip_prefix(r"\\")?;
+    if rest.starts_with(['?', '.']) {
+        return None;
+    }
+    let mut parts = rest.split(['\\', '/']).filter(|p| !p.is_empty());
+    let server = parts.next()?;
+    let share = parts.next()?;
+    Some(format!(r"\\{}\{}", server.to_lowercase(), share.to_lowercase()))
+}
+
+/// Explorer moves on the same drive and copies across drives.
+pub(crate) fn same_volume(srcs: &[String], dst: &str) -> bool {
+    let Some(d) = volume_root(dst) else { return false };
+    !srcs.is_empty() && srcs.iter().all(|s| volume_root(s).as_deref() == Some(d.as_str()))
+}
+
+/// A folder dropped on itself or into its own subfolder. Explorer refuses that drop.
+pub(crate) fn drops_into_itself(srcs: &[String], dst: &str) -> bool {
+    let d = dst.trim_end_matches(['\\', '/']).to_lowercase();
+    srcs.iter().any(|s| {
+        let s = s.trim_end_matches(['\\', '/']).to_lowercase();
+        !s.is_empty() && (d == s || d.starts_with(&format!("{s}\\")))
+    })
+}
+
+/// Copy (`Some(false)`) or move (`Some(true)`) for a plain left-button file drop that Maguro runs
+/// on its worker. `None` leaves the drop with the shell (a link, or nothing the source allows).
+/// Ctrl copies and Shift moves. Otherwise Always copy (dropm 1) copies and Windows rules move on
+/// the same drive. `shell_link` is the shell's own default, a shortcut, for a plain drop.
+pub(crate) fn drop_choice(dropm: u8, ctrl: bool, shift: bool, alt: bool, allowed: u32, same_volume: bool, shell_link: bool) -> Option<bool> {
+    if alt || (ctrl && shift) {
+        return None;
+    }
+    if shell_link && !ctrl && !shift {
+        return None;
+    }
+    let want_move = if shift {
+        true
+    } else if ctrl || dropm == 1 {
+        false
+    } else {
+        same_volume
+    };
+    let can_copy = allowed & DROPEFFECT_COPY.0 != 0;
+    let can_move = allowed & DROPEFFECT_MOVE.0 != 0;
+    match (want_move, can_move, can_copy) {
+        (true, true, _) => Some(true),
+        (true, false, true) if !shift => Some(false),
+        (false, _, true) => Some(false),
+        (false, true, false) if !ctrl => Some(true),
+        _ => None,
+    }
+}
+
+/// What a non-asked file drop does once the copy or move is chosen.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(crate) enum DropPlan {
+    /// Run on the worker.
+    Run,
+    /// Nothing to do: a move into the folder the files already sit in, or a folder into itself.
+    Refuse,
+    /// Mixed sources: the shell.
+    Shell,
+}
+
+pub(crate) fn drop_plan(srcs: &[String], dst: &str, mv: bool) -> DropPlan {
+    if drops_into_itself(srcs, dst) {
+        return DropPlan::Refuse;
+    }
+    match paste_mode(srcs, dst) {
+        Some(true) if mv => DropPlan::Refuse,
+        Some(_) => DropPlan::Run,
+        None => DropPlan::Shell,
+    }
+}
+
 /// Middle of a favourite folder row, and only while the drop action is Always ask.
 /// Edges stay an insert. Groups, files, and shell places are not copy targets.
 pub(crate) fn fav_into_folder(dropm: u8, group: bool, file: bool, path: &str, y: i32, rh: i32) -> bool {
@@ -98,7 +180,12 @@ pub(crate) unsafe fn ask_copy_or_move(owner: HWND) -> Option<bool> {
 /// Tell the source the move already happened, so it does not delete the originals.
 #[allow(dead_code)] // kept for a sync move that finishes before Drop returns
 pub(crate) unsafe fn mark_move_performed(obj: &IDataObject) -> bool {
-    let fmt = RegisterClipboardFormatW(w!("Performed DropEffect"));
+    set_drop_dword(obj, w!("Performed DropEffect"), DROPEFFECT_MOVE.0)
+}
+
+/// Store one DWORD clipboard format ("Performed DropEffect", "Paste Succeeded") on a data object.
+pub(crate) unsafe fn set_drop_dword(obj: &IDataObject, name: PCWSTR, value: u32) -> bool {
+    let fmt = RegisterClipboardFormatW(name);
     if fmt == 0 {
         return false;
     }
@@ -108,7 +195,7 @@ pub(crate) unsafe fn mark_move_performed(obj: &IDataObject) -> bool {
         let _ = GlobalFree(Some(mem));
         return false;
     }
-    *p = DROPEFFECT_MOVE.0;
+    *p = value;
     let _ = GlobalUnlock(mem);
     let etc = FORMATETC {
         cfFormat: fmt as u16,
@@ -244,7 +331,17 @@ unsafe fn wrap_window(hwnd: HWND, fallback: &IDropTarget, where_: AskWhere) {
     // Drop the shell's registration. Highlight and non-ask drops go to the view's own
     // target, which is `fallback` (the shell view), not whatever pointer the property held.
     let _ = RevokeDragDrop(hwnd);
-    let dt: IDropTarget = AskDrop { hwnd, inner: fallback.clone(), where_, srcs: RefCell::new(Vec::new()), basket: Cell::new(false) }.into();
+    let dt: IDropTarget = AskDrop {
+        hwnd,
+        inner: fallback.clone(),
+        where_,
+        srcs: RefCell::new(Vec::new()),
+        basket: Cell::new(false),
+        allowed: Cell::new(0),
+        shell_effect: Cell::new(0),
+        right: Cell::new(false),
+    }
+    .into();
     if RegisterDragDrop(hwnd, &dt).is_err() {
         let _ = RegisterDragDrop(hwnd, fallback);
         return;
@@ -314,6 +411,12 @@ pub(crate) struct AskDrop {
     srcs: RefCell<Vec<String>>,
     /// This drag started in the file basket. Copy by default, on our worker, not the shell's.
     basket: Cell<bool>,
+    /// Effects the source allows, from the last DragEnter or DragOver.
+    allowed: Cell<u32>,
+    /// The shell target's own answer to the last DragEnter or DragOver.
+    shell_effect: Cell<u32>,
+    /// A right-button drag: the shell shows its Copy / Move / Shortcut menu.
+    right: Cell<bool>,
 }
 
 impl AskDrop {
@@ -323,10 +426,83 @@ impl AskDrop {
         }
     }
 
+    /// Remember what the source allows (`effect` on the way in) before the shell answers.
+    unsafe fn note_allowed(&self, effect: *mut DROPEFFECT) {
+        if !effect.is_null() {
+            self.allowed.set((*effect).0);
+        }
+    }
+
+    unsafe fn note_shell(&self, effect: *mut DROPEFFECT) {
+        if !effect.is_null() {
+            self.shell_effect.set((*effect).0);
+        }
+    }
+
+    /// Always copy: the cursor says copy for a plain drop the worker will copy.
+    unsafe fn offer_always_copy(&self, key: MODIFIERKEYS_FLAGS, effect: *mut DROPEFFECT) {
+        if effect.is_null() || self.right.get() || self.srcs.borrow().is_empty() || app(|a| a.s.dropm) != 1 {
+            return;
+        }
+        let (ctrl, shift, alt) = crate::basket::drag_modifiers(key);
+        if shift || alt || ctrl {
+            return;
+        }
+        let shell = (*effect).0;
+        if shell & (DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0) != 0 && self.allowed.get() & DROPEFFECT_COPY.0 != 0 {
+            *effect = DROPEFFECT_COPY;
+        }
+    }
+
+    /// The folder a plain file drop lands in when Maguro can run it. `None` is the shell's drop.
+    unsafe fn worker_target(&self, pt: &POINTL) -> Option<String> {
+        bind_hwnd(self.hwnd);
+        match &self.where_ {
+            AskWhere::Pane(slot) => {
+                let i = slot.load(Ordering::SeqCst);
+                let cur = app(|a| a.s.paths.get(i).cloned()).unwrap_or_default();
+                if !is_fs(&cur) || crate::pane::recent::path_is_recent(&cur) {
+                    return None;
+                }
+                match crate::pane::drop_row_at(i, POINT { x: pt.x, y: pt.y }) {
+                    crate::pane::DropRow::Here => Some(cur),
+                    crate::pane::DropRow::Folder(p) => Some(p),
+                    crate::pane::DropRow::Shell => None,
+                }
+            }
+            AskWhere::Tree => tree_folder(pt),
+        }
+    }
+
+    /// A plain file drop under Windows rules or Always copy, on the worker. `None` when the
+    /// shell keeps it (virtual items, a link, a right-button drag, a ZIP or program row).
+    unsafe fn worker_drop(&self, d: &Ref<IDataObject>, srcs: Vec<String>, key: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Option<u32> {
+        if self.right.get() || srcs.is_empty() {
+            return None;
+        }
+        let obj = d.as_ref()?;
+        let dst = self.worker_target(pt)?;
+        let allowed = if effect.is_null() { self.allowed.get() } else { (*effect).0 };
+        let (ctrl, shift, alt) = crate::basket::drag_modifiers(key);
+        let link = self.shell_effect.get() == DROPEFFECT_LINK.0;
+        let mv = drop_choice(app(|a| a.s.dropm), ctrl, shift, alt, allowed, same_volume(&srcs, &dst), link)?;
+        match drop_plan(&srcs, &dst, mv) {
+            DropPlan::Shell => None,
+            DropPlan::Refuse => {
+                let _ = self.inner.DragLeave();
+                Some(DROPEFFECT_NONE.0)
+            }
+            DropPlan::Run => {
+                let _ = self.inner.DragLeave();
+                Some(run_asked(obj, srcs, dst, mv))
+            }
+        }
+    }
+
     /// The tree's own target often reports no effect for a file. Without one, OLE never calls
     /// Drop, so Always ask would not run. Offer copy or move while the pointer is on a folder.
     unsafe fn keep_tree_drop(&self, pt: &POINTL, effect: *mut DROPEFFECT) {
-        if effect.is_null() || !matches!(self.where_, AskWhere::Tree) || self.srcs.borrow().is_empty() {
+        if effect.is_null() || !matches!(self.where_, AskWhere::Tree) || self.srcs.borrow().is_empty() || app(|a| a.s.dropm) != 2 {
             return;
         }
         bind_hwnd(self.hwnd);
@@ -390,6 +566,25 @@ unsafe fn tree_destination(pt: &POINTL) -> Option<String> {
     }
     let item = tree.HitTest(&at).ok()?;
     shell_fs_path(&item)
+}
+
+/// A plain file-system folder under a tree drop. A ZIP, a library or a drive the shell owns is `None`.
+unsafe fn tree_folder(pt: &POINTL) -> Option<String> {
+    let (tree, hwnd) = app(|a| a.tree.clone().map(|t| (t, a.tree_hwnd)))?;
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut at = POINT { x: pt.x, y: pt.y };
+    if !ScreenToClient(hwnd, &mut at).as_bool() {
+        return None;
+    }
+    let item = tree.HitTest(&at).ok()?;
+    let attr = item.GetAttributes(SFGAO_FOLDER | SFGAO_STREAM | SFGAO_FILESYSTEM).map(|f| f.0).unwrap_or(0);
+    if !real_folder(attr) || attr & SFGAO_FILESYSTEM.0 == 0 {
+        return None;
+    }
+    let path = pwstr(item.GetDisplayName(SIGDN_FILESYSPATH).ok()?);
+    is_fs(&path).then_some(path)
 }
 
 unsafe fn shell_fs_path(item: &IShellItem) -> Option<String> {
@@ -506,26 +701,33 @@ impl IDropTarget_Impl for AskDrop_Impl {
             super::note_shell_drag();
             let basket = d.as_ref().is_some_and(|obj| crate::basket::is_basket_data(obj));
             self.basket.set(basket);
+            self.right.set(key.0 & MK_RBUTTON.0 != 0);
+            self.note_allowed(effect);
             self.forward_enter(&d, key, pt, effect);
+            self.note_shell(effect);
             // Remember the files now. A second read on Drop fails for some objects, and
             // DragOver has to know this is a file drop before it can offer an effect.
+            // Every file drop keeps them: Drop runs a plain copy or move on the worker.
+            *self.srcs.borrow_mut() = drop_fs_paths(&d);
             if basket {
-                *self.srcs.borrow_mut() = drop_fs_paths(&d);
                 self.offer_basket(key, pt, effect);
-            } else if matches!(self.where_, AskWhere::Tree) && app(|a| a.s.dropm) == 2 {
-                *self.srcs.borrow_mut() = drop_fs_paths(&d);
+            } else {
                 self.keep_tree_drop(pt, effect);
+                self.offer_always_copy(key, effect);
             }
         }
         Ok(())
     }
     fn DragOver(&self, key: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         unsafe {
+            self.note_allowed(effect);
             let _ = self.inner.DragOver(key, *pt, effect);
+            self.note_shell(effect);
             if self.basket.get() {
                 self.offer_basket(key, pt, effect);
             } else {
                 self.keep_tree_drop(pt, effect);
+                self.offer_always_copy(key, effect);
             }
         }
         Ok(())
@@ -563,8 +765,8 @@ impl IDropTarget_Impl for AskDrop_Impl {
             }
             // Always ask owns every filesystem drop, same drive included. Falling through
             // to the shell here is what moved a same-drive file with no prompt.
+            let srcs = if stored.is_empty() { drop_fs_paths(&d) } else { stored };
             if app(|a| a.s.dropm) == 2 {
-                let srcs = if stored.is_empty() { drop_fs_paths(&d) } else { stored };
                 if !srcs.is_empty() {
                     let _ = self.inner.DragLeave();
                     let dst = self.destination(pt);
@@ -583,6 +785,15 @@ impl IDropTarget_Impl for AskDrop_Impl {
                     return Ok(());
                 }
             }
+            // Windows rules and Always copy: a plain file copy or move runs on the worker.
+            // The shell target would run IFileOperation right here, on the UI thread, and
+            // Maguro would freeze until the copy finished.
+            if let Some(eff) = self.worker_drop(&d, srcs, key, pt, effect) {
+                if !effect.is_null() {
+                    *effect = DROPEFFECT(eff);
+                }
+                return Ok(());
+            }
             if let Some(obj) = d.as_ref() {
                 let _ = self.inner.Drop(obj, key, *pt, effect);
             }
@@ -593,8 +804,66 @@ impl IDropTarget_Impl for AskDrop_Impl {
 
 #[cfg(test)]
 mod tests {
-    use super::{drop_folder, fav_into_folder, reported_effect, shell_drop_class};
-    use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_MOVE};
+    use super::{drop_choice, drop_folder, drop_plan, drops_into_itself, fav_into_folder, reported_effect, same_volume, shell_drop_class, volume_root, DropPlan};
+    use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
+
+    const ANY: u32 = DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0 | DROPEFFECT_LINK.0;
+
+    fn v(p: &[&str]) -> Vec<String> {
+        p.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn windows_rules_move_on_one_drive_and_copy_across() {
+        assert_eq!(drop_choice(0, false, false, false, ANY, true, false), Some(true));
+        assert_eq!(drop_choice(0, false, false, false, ANY, false, false), Some(false));
+        assert_eq!(drop_choice(0, true, false, false, ANY, true, false), Some(false), "Ctrl copies");
+        assert_eq!(drop_choice(0, false, true, false, ANY, false, false), Some(true), "Shift moves");
+    }
+
+    #[test]
+    fn always_copy_copies_unless_shift() {
+        assert_eq!(drop_choice(1, false, false, false, ANY, true, false), Some(false));
+        assert_eq!(drop_choice(1, false, true, false, ANY, true, false), Some(true));
+    }
+
+    #[test]
+    fn links_and_forbidden_effects_stay_with_the_shell() {
+        assert_eq!(drop_choice(0, false, false, true, ANY, true, false), None, "Alt links");
+        assert_eq!(drop_choice(0, true, true, false, ANY, true, false), None, "Ctrl+Shift links");
+        assert_eq!(drop_choice(0, false, false, false, ANY, true, true), None, "the shell's default is a shortcut");
+        assert_eq!(drop_choice(0, true, false, false, ANY, true, true), Some(false), "Ctrl still copies");
+        // The source decides what it allows.
+        assert_eq!(drop_choice(0, false, false, false, DROPEFFECT_COPY.0, true, false), Some(false));
+        assert_eq!(drop_choice(0, false, true, false, DROPEFFECT_COPY.0, true, false), None);
+        assert_eq!(drop_choice(0, false, false, false, DROPEFFECT_MOVE.0, false, false), Some(true));
+        assert_eq!(drop_choice(0, true, false, false, DROPEFFECT_MOVE.0, false, false), None);
+        assert_eq!(drop_choice(0, false, false, false, 0, false, false), None);
+    }
+
+    #[test]
+    fn volumes_compare_by_drive_or_share() {
+        assert_eq!(volume_root(r"c:\x").as_deref(), Some("C:"));
+        assert_eq!(volume_root(r"\\NAS\Share\d").as_deref(), Some(r"\\nas\share"));
+        assert_eq!(volume_root(r"\\?\C:\x"), None);
+        assert!(same_volume(&v(&[r"C:\a\x", r"c:\b\y"]), r"C:\z"));
+        assert!(!same_volume(&v(&[r"C:\a\x", r"D:\b\y"]), r"C:\z"));
+        assert!(same_volume(&v(&[r"\\nas\s\a"]), r"\\NAS\S\b"));
+        assert!(!same_volume(&v(&[r"\\nas\s\a"]), r"\\nas\t\b"));
+        assert!(!same_volume(&[], r"C:\z"));
+    }
+
+    #[test]
+    fn drop_plan_refuses_self_and_same_folder_moves() {
+        assert!(drops_into_itself(&v(&[r"C:\a"]), r"C:\a"));
+        assert!(drops_into_itself(&v(&[r"C:\a"]), r"C:\A\sub"));
+        assert!(!drops_into_itself(&v(&[r"C:\a"]), r"C:\ab"));
+        assert_eq!(drop_plan(&v(&[r"C:\a"]), r"C:\a\sub", false), DropPlan::Refuse);
+        assert_eq!(drop_plan(&v(&[r"C:\a\x.txt"]), r"C:\a", true), DropPlan::Refuse);
+        assert_eq!(drop_plan(&v(&[r"C:\a\x.txt"]), r"C:\a", false), DropPlan::Run, "Ctrl copy in place makes '- Copy'");
+        assert_eq!(drop_plan(&v(&[r"C:\a\x.txt"]), r"D:\b", true), DropPlan::Run);
+        assert_eq!(drop_plan(&v(&[r"C:\a\x.txt", r"C:\b\y.txt"]), r"C:\a", false), DropPlan::Shell);
+    }
 
     #[test]
     fn asked_move_is_a_copy_until_the_source_is_told() {
