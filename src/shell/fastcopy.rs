@@ -225,7 +225,14 @@ pub(crate) fn run_fast(job: FastJob) {
         if ui.cancelled() {
             break;
         }
+        let before = errors.len();
         match run_step(&exe, &dir, step, &mut ui, &mut errors) {
+            // Robocopy can exit 0 after `ERROR 5 ... Accessing Destination Directory`: nothing
+            // was copied, so the sources are not done (and a move must not delete them).
+            StepEnd::Ok if denied_since(&errors, before) => {
+                failed = true;
+                break;
+            }
             StepEnd::Ok => copied.extend(step.sources()),
             StepEnd::Cancel => break,
             StepEnd::Fail(code) => {
@@ -243,8 +250,10 @@ pub(crate) fn run_fast(job: FastJob) {
             if let Err(code) = delete_source(path, *is_dir) {
                 failed = true;
                 let sharing = code == 32 || code == 33;
-                if sharing || errors.len() < 40 {
-                    if sharing {
+                // Access denied keeps its code so the elevated fallback below can see it.
+                let denied = code == 5;
+                if sharing || denied || errors.len() < 40 {
+                    if sharing || denied {
                         errors.push(format!("ERROR {code} (0x{code:08X}) {path}"));
                     } else {
                         errors.push(path.clone());
@@ -282,6 +291,10 @@ pub(crate) fn run_fast(job: FastJob) {
             }
             return;
         }
+        if elevate_after(&errors) {
+            elevated_fallback(&job, &items, &copied);
+            return;
+        }
         let list = clip_list(&errors, 12);
         let text = tf(Key::NotCopied, &[("list", &list)]);
         complain(job.owner, &text);
@@ -294,6 +307,59 @@ pub(crate) fn run_fast(job: FastJob) {
     }
     drop(job.busy);
     ui.show_done();
+}
+
+/// Robocopy or `CopyFileExW` said access denied, as a protected folder such as `C:\` does.
+/// A held file is handled before this, by Maguro's in-use box.
+fn elevate_after(errors: &[String]) -> bool {
+    errors.iter().any(|line| super::inuse::text_is_access_denied(line)) && !errors.iter().any(|line| super::inuse::text_is_in_use(line))
+}
+
+/// A step added an access-denied line after `before`.
+fn denied_since(errors: &[String], before: usize) -> bool {
+    errors.iter().skip(before).any(|line| super::inuse::text_is_access_denied(line))
+}
+
+/// The items Fast copy did not finish: not skipped, not already copied. Each keeps the
+/// destination name the conflict window chose.
+fn unfinished(items: &[Item], copied: &[(String, bool)]) -> Vec<(String, String)> {
+    items
+        .iter()
+        .filter(|item| !item.skip && !copied.iter().any(|(path, _)| same_path(path, &item.src)))
+        .map(|item| (item.src.clone(), file_name(&item.dest).to_string()))
+        .collect()
+}
+
+/// Fast copy runs unelevated, so a protected folder fails with access denied. Finish the
+/// rest through `IFileOperation` with the Windows administrator prompt, as Explorer does.
+/// A move then removes the sources Fast copy already copied, elevated if it has to.
+fn elevated_fallback(job: &FastJob, items: &[Item], copied: &[(String, bool)]) {
+    let owner = HWND(job.owner as *mut _);
+    let rest = unfinished(items, copied);
+    let mut result = if rest.is_empty() { Ok(()) } else { unsafe { super::fileop::elevated_transfer(&rest, &job.dst, job.mv, owner) } };
+    if result.is_ok() && job.mv {
+        let stuck: Vec<String> = copied
+            .iter()
+            .filter(|(path, _)| Path::new(path).exists())
+            .filter(|(path, is_dir)| delete_source(path, *is_dir).is_err())
+            .map(|(path, _)| path.clone())
+            .collect();
+        if !stuck.is_empty() {
+            result = unsafe { super::fileop::elevated_remove(&stuck, owner) };
+        }
+    }
+    notify_dir(&job.dst);
+    if job.mv {
+        for src in &job.srcs {
+            notify_dir(&parent_dir(src));
+        }
+    }
+    if let Err(e) = result {
+        if !super::inuse::is_cancel(&e) {
+            let list = e.message().to_string();
+            complain(job.owner, &tf(Key::NotCopied, &[("list", &list)]));
+        }
+    }
 }
 
 /// Sources, the destination folder, and each destination file. Robocopy lines may name the path too.
@@ -2340,4 +2406,91 @@ mod tests {
         assert!(should_alert(7, 40));
         assert!(should_alert(0, 40));
     }
+
+    /// None when this process can create a file in `C:\` (elevated): a probe would write there.
+    fn protected_root_probe(tag: &str) -> Option<std::path::PathBuf> {
+        let target = std::path::Path::new(r"C:\").join(format!("maguro-uac-{tag}-{}.txt", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(f) => {
+                drop(f);
+                let _ = std::fs::remove_file(&target);
+                eprintln!("C:\\ is writable here (elevated?); skipping the protected-root probe");
+                None
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Some(target),
+            Err(e) => {
+                eprintln!("C:\\ probe skipped: {e}");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn access_denied_falls_back_to_elevation_but_a_held_file_does_not() {
+        assert!(elevate_after(&["2026/11/27 17:00:00 ERROR 5 (0x00000005) Copying File C:\\src\\a.txt".into()]));
+        assert!(elevate_after(&["ERROR 5 (0x00000005) Copying File C:\\src\\big.bin".into()]));
+        assert!(elevate_after(&["2026/11/27 17:00:00 ERROR 5 (0x00000005) Creating Destination Directory C:\\x\\".into()]));
+        assert!(!elevate_after(&["ERROR 32 (0x00000020) Copying File C:\\a.txt".into()]));
+        assert!(!elevate_after(&["ERROR 5 (0x00000005) C:\\a.txt".into(), "ERROR 32 (0x00000020) C:\\b.txt".into()]));
+        assert!(!elevate_after(&["ERROR 53 (0x00000035) Accessing Destination Directory \\\\nas\\x\\".into()]));
+        assert!(!elevate_after(&["robocopy 16".into()]));
+        assert!(!elevate_after(&[]));
+        let errors: Vec<String> = vec!["ERROR 32 (0x00000020) C:\\a.txt".into(), "ERROR 5 (0x00000005) Accessing Destination Directory C:\\".into()];
+        assert!(denied_since(&errors, 0) && denied_since(&errors, 1) && !denied_since(&errors, 2));
+        assert!(!denied_since(&errors[..1], 0));
+    }
+
+    #[test]
+    fn elevated_fallback_redoes_only_unfinished_unskipped_items_with_their_chosen_names() {
+        let mut items = vec![
+            Item { src: r"D:\s\a.txt".into(), dest: r"C:\a.txt".into(), is_dir: false, size: 1, skip: false },
+            Item { src: r"D:\s\b.txt".into(), dest: r"C:\b - Copy.txt".into(), is_dir: false, size: 1, skip: false },
+            Item { src: r"D:\s\c.txt".into(), dest: r"C:\c.txt".into(), is_dir: false, size: 1, skip: true },
+            Item { src: r"D:\s\dir".into(), dest: r"C:\dir".into(), is_dir: true, size: 0, skip: false },
+        ];
+        let copied = vec![(r"d:\S\A.txt".to_string(), false)];
+        assert_eq!(
+            unfinished(&items, &copied),
+            vec![(r"D:\s\b.txt".to_string(), "b - Copy.txt".to_string()), (r"D:\s\dir".to_string(), "dir".to_string())]
+        );
+        items.iter_mut().for_each(|i| i.skip = true);
+        assert!(unfinished(&items, &[]).is_empty());
+    }
+
+    #[test]
+    fn fast_copy_into_protected_root_reports_access_denied() {
+        let Some(target) = protected_root_probe("fast") else { return };
+        let dir = std::env::temp_dir().join(format!("maguro-uac-fast-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = target.file_name().unwrap().to_string_lossy().into_owned();
+        let src = dir.join(&name);
+        std::fs::write(&src, b"probe").unwrap();
+        // CopyFileExW, as a large file takes.
+        let result = unsafe { CopyFileExW(&HSTRING::from(src.to_string_lossy().as_ref()), &HSTRING::from(target.to_string_lossy().as_ref()), None, None, None, COPYFILE_FLAGS(0)) };
+        let code = result.as_ref().err().map(win32_code);
+        eprintln!("UAC probe: CopyFileExW into C:\\ -> {code:?}");
+        assert!(!target.exists() || std::fs::remove_file(&target).is_err(), "CopyFileExW wrote into C:\\ unelevated");
+        let code = code.expect("CopyFileExW into C:\\ should fail unelevated");
+        let line = format!("ERROR {code} (0x{code:08X}) Copying File {}", src.display());
+        assert!(elevate_after(&[line.clone()]), "{line}");
+        // robocopy, as small files and folders take.
+        if let Some(exe) = robocopy_exe() {
+            let args = robocopy_args(&dir.to_string_lossy(), r"C:\", &[name.clone()], false, "probe.log");
+            let status = Command::new(&exe).args(&args).current_dir(&dir).creation_flags(CREATE_NO_WINDOW).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            let mut off = 0;
+            let log = read_new(&dir.join("probe.log"), &mut off);
+            let errors: Vec<String> = log.lines().filter_map(parse_error_line).collect();
+            eprintln!("UAC probe: robocopy into C:\\ -> exit {:?}, errors {errors:?}", status.code());
+            if target.exists() {
+                let _ = std::fs::remove_file(&target);
+                panic!("robocopy wrote into C:\\ unelevated");
+            }
+            // Robocopy may still exit 0 here; the step counts as failed because of the line.
+            assert!(denied_since(&errors, 0), "{errors:?}");
+            assert!(elevate_after(&errors), "{errors:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

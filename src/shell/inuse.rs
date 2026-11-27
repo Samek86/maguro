@@ -82,6 +82,103 @@ pub(crate) struct Offer {
 pub(crate) struct Attempt {
     pub(crate) result: Result<()>,
     pub(crate) locked: Vec<String>,
+    /// Items the progress sink saw fail, with the item's HRESULT. Under `FOF_NOERRORUI`
+    /// `PerformOperations` can return S_OK or a generic code while the real reason, such as
+    /// "requires elevation", only reaches `Post*Item`. The path is empty for `FinishOperations`.
+    pub(crate) failed: Vec<(String, HRESULT)>,
+}
+
+impl Attempt {
+    pub(crate) fn err(e: Error) -> Attempt {
+        Attempt { result: Err(e), locked: Vec::new(), failed: Vec::new() }
+    }
+
+    /// Items that failed because the folder needs administrator rights.
+    pub(crate) fn denied(&self) -> Vec<String> {
+        self.failed.iter().filter(|(_, hr)| needs_elevation_code(*hr)).map(|(p, _)| p.clone()).collect()
+    }
+}
+
+/// First pass: `FOF_NOERRORUI`, so Maguro names the program holding a file.
+/// Elevated pass: Windows' own error UI with `FOFX_SHOWELEVATIONPROMPT`, so a protected
+/// folder such as `C:\` gets the "Continue" (administrator) prompt.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Pass {
+    Quiet,
+    Elevated,
+}
+
+/// Operation flags for one pass. `FOF_NOERRORUI` also hides the elevation prompt, so the
+/// elevated pass drops it.
+pub(crate) fn pass_flags(base: FILEOPERATION_FLAGS, pass: Pass) -> FILEOPERATION_FLAGS {
+    match pass {
+        Pass::Quiet => base | FOF_NOERRORUI,
+        Pass::Elevated => FILEOPERATION_FLAGS(base.0 & !FOF_NOERRORUI.0) | FOFX_SHOWELEVATIONPROMPT,
+    }
+}
+
+/// Codes a protected folder gives a process without administrator rights.
+pub(crate) fn needs_elevation_code(code: HRESULT) -> bool {
+    code == COPYENGINE_E_REQUIRES_ELEVATION
+        || code == COPYENGINE_E_ACCESS_DENIED_SRC
+        || code == COPYENGINE_E_ACCESS_DENIED_DEST
+        || code == E_ACCESSDENIED
+        || code == ERROR_ELEVATION_REQUIRED.to_hresult()
+}
+
+/// Robocopy, `CopyFileExW`, and `std::fs` lines for access denied (Win32 5) or elevation required (740).
+pub(crate) fn text_is_access_denied(text: &str) -> bool {
+    let u = text.to_ascii_uppercase();
+    u.contains("ERROR 5 (")
+        || u.contains("ERROR 740 (")
+        || u.contains("0X00000005")
+        || u.contains("0X000002E4")
+        || u.contains("ACCESS IS DENIED")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Next {
+    Done,
+    AskInUse,
+    Elevate,
+    Fail,
+}
+
+/// What `recover_with` does after one attempt. A held file still goes to Maguro's in-use
+/// box first. Cancel is final. An access or elevation failure gets one elevated pass.
+pub(crate) fn next_step(code: HRESULT, message: &str, locked: bool, denied: bool, elevated: bool) -> Next {
+    let ok = code.is_ok();
+    if ok && !locked && !denied {
+        return Next::Done;
+    }
+    let one = [String::new()];
+    let held: &[String] = if locked { &one } else { &[] };
+    if should_prompt(code, message, held) {
+        return Next::AskInUse;
+    }
+    if is_cancel(&Error::from(code)) && !ok {
+        return Next::Fail;
+    }
+    if !elevated && (denied || needs_elevation_code(code)) {
+        return Next::Elevate;
+    }
+    if ok { Next::Done } else { Next::Fail }
+}
+
+/// The sources to run again elevated: those that failed, or under a failed path.
+/// None recorded (only `PerformOperations` said so) means all of them.
+pub(crate) fn retry_targets(srcs: &[String], denied: &[String]) -> Vec<String> {
+    let norm = |p: &str| p.trim_end_matches(['\\', '/']).to_lowercase();
+    let denied: Vec<String> = denied.iter().filter(|d| !d.is_empty()).map(|d| norm(d)).collect();
+    let picked: Vec<String> = srcs
+        .iter()
+        .filter(|s| {
+            let s = norm(s);
+            denied.iter().any(|d| *d == s || d.starts_with(&format!("{s}\\")))
+        })
+        .cloned()
+        .collect();
+    if picked.is_empty() { srcs.to_vec() } else { picked }
 }
 
 /// `RmShutdown` flags. Zero is a polite request. `RmForceShutdown` is never set.
@@ -228,6 +325,41 @@ pub(crate) unsafe fn recover(owner: HWND, kind: OpKind, fallback: &[String], mut
         let paths = if attempt.locked.is_empty() { fallback.to_vec() } else { attempt.locked };
         if !ask_retry(owner, kind, &paths) {
             return Err(Error::from(COPYENGINE_E_USER_CANCELLED));
+        }
+    }
+}
+
+/// Like `recover`, and a failure that needs administrator rights runs once more elevated.
+/// `once` gets the pass and, for the elevated pass, the sources that failed (empty = all).
+pub(crate) unsafe fn recover_with(owner: HWND, kind: OpKind, fallback: &[String], mut once: impl FnMut(Pass, &[String]) -> Attempt) -> Result<()> {
+    let mut pass = Pass::Quiet;
+    let mut only: Vec<String> = Vec::new();
+    loop {
+        let attempt = once(pass, &only);
+        let code = match &attempt.result {
+            Ok(()) => S_OK,
+            Err(e) => e.code(),
+        };
+        let message = match &attempt.result {
+            Ok(()) => String::new(),
+            Err(e) => e.message().to_string(),
+        };
+        let denied = attempt.denied();
+        match next_step(code, &message, !attempt.locked.is_empty(), !denied.is_empty(), pass == Pass::Elevated) {
+            Next::Done => return Ok(()),
+            Next::Fail => return attempt.result,
+            Next::Elevate => {
+                pass = Pass::Elevated;
+                only = denied;
+            }
+            Next::AskInUse => {
+                let paths = if attempt.locked.is_empty() { fallback.to_vec() } else { attempt.locked };
+                if !ask_retry(owner, kind, &paths) {
+                    return Err(Error::from(COPYENGINE_E_USER_CANCELLED));
+                }
+                pass = Pass::Quiet;
+                only.clear();
+            }
         }
     }
 }
@@ -645,9 +777,21 @@ unsafe fn switch_to(pid: u32) -> bool {
 #[implement(IFileOperationProgressSink)]
 struct InUseSink {
     recorded: Arc<Mutex<Vec<String>>>,
+    failed: Arc<Mutex<Vec<(String, HRESULT)>>>,
 }
 
 impl InUseSink {
+    fn fail(&self, hr: HRESULT, item: &windows_core::Ref<IShellItem>) {
+        if hr.is_ok() {
+            return;
+        }
+        let path = shell_path(item).unwrap_or_default();
+        let mut g = self.failed.lock().unwrap_or_else(|e| e.into_inner());
+        if g.len() < 256 {
+            g.push((path, hr));
+        }
+    }
+
     fn note(&self, hr: HRESULT, item: &windows_core::Ref<IShellItem>, dest_folder: &windows_core::Ref<IShellItem>, new_name: &PCWSTR) -> bool {
         if !is_in_use_code(hr) {
             let msg = Error::from(hr).message();
@@ -711,13 +855,15 @@ impl IFileOperationProgressSink_Impl for InUseSink_Impl {
     fn StartOperations(&self) -> Result<()> {
         Ok(())
     }
-    fn FinishOperations(&self, _hrresult: HRESULT) -> Result<()> {
+    fn FinishOperations(&self, hrresult: HRESULT) -> Result<()> {
+        self.fail(hrresult, &windows_core::Ref::default());
         Ok(())
     }
     fn PreRenameItem(&self, _dwflags: u32, _psiitem: windows_core::Ref<IShellItem>, _psznewname: &PCWSTR) -> Result<()> {
         Ok(())
     }
     fn PostRenameItem(&self, _dwflags: u32, psiitem: windows_core::Ref<IShellItem>, psznewname: &PCWSTR, hrrename: HRESULT, _psinewlycreated: windows_core::Ref<IShellItem>) -> Result<()> {
+        self.fail(hrrename, &psiitem);
         // The sink item is the old name. A rename onto an open file is locked at the new path.
         if self.note(hrrename, &psiitem, &windows_core::Ref::default(), psznewname) {
             let name = pcw_string(psznewname);
@@ -743,6 +889,7 @@ impl IFileOperationProgressSink_Impl for InUseSink_Impl {
         hrmove: HRESULT,
         _psinewlycreated: windows_core::Ref<IShellItem>,
     ) -> Result<()> {
+        self.fail(hrmove, &psiitem);
         self.note(hrmove, &psiitem, &psidestinationfolder, psznewname);
         Ok(())
     }
@@ -758,6 +905,7 @@ impl IFileOperationProgressSink_Impl for InUseSink_Impl {
         hrcopy: HRESULT,
         _psinewlycreated: windows_core::Ref<IShellItem>,
     ) -> Result<()> {
+        self.fail(hrcopy, &psiitem);
         self.note(hrcopy, &psiitem, &psidestinationfolder, psznewname);
         Ok(())
     }
@@ -765,6 +913,7 @@ impl IFileOperationProgressSink_Impl for InUseSink_Impl {
         Ok(())
     }
     fn PostDeleteItem(&self, _dwflags: u32, psiitem: windows_core::Ref<IShellItem>, hrdelete: HRESULT, _psinewlycreated: windows_core::Ref<IShellItem>) -> Result<()> {
+        self.fail(hrdelete, &psiitem);
         self.note(hrdelete, &psiitem, &windows_core::Ref::default(), &PCWSTR::null());
         Ok(())
     }
@@ -774,13 +923,14 @@ impl IFileOperationProgressSink_Impl for InUseSink_Impl {
     fn PostNewItem(
         &self,
         _dwflags: u32,
-        _psidestinationfolder: windows_core::Ref<IShellItem>,
+        psidestinationfolder: windows_core::Ref<IShellItem>,
         _psznewname: &PCWSTR,
         _psztemplatename: &PCWSTR,
         _dwfileattributes: u32,
-        _hrnew: HRESULT,
+        hrnew: HRESULT,
         _psinewitem: windows_core::Ref<IShellItem>,
     ) -> Result<()> {
+        self.fail(hrnew, &psidestinationfolder);
         Ok(())
     }
     fn UpdateProgress(&self, _iworktotal: u32, _iworksofar: u32) -> Result<()> {
@@ -924,9 +1074,10 @@ fn sink_dest(src: &str, folder: Option<String>, new_name: &str, created: Option<
     Some(format!("{}\\{name}", folder.trim_end_matches(['\\', '/'])))
 }
 
-pub(crate) unsafe fn perform_watched(op: &IFileOperation) -> (Result<()>, Vec<String>) {
+pub(crate) unsafe fn perform_watched(op: &IFileOperation) -> Attempt {
     let recorded = Arc::new(Mutex::new(Vec::new()));
-    let sink: IFileOperationProgressSink = InUseSink { recorded: recorded.clone() }.into();
+    let failed = Arc::new(Mutex::new(Vec::new()));
+    let sink: IFileOperationProgressSink = InUseSink { recorded: recorded.clone(), failed: failed.clone() }.into();
     let marks: IFileOperationProgressSink = MarkSink.into();
     let cookie = op.Advise(&sink).ok();
     let mark_cookie = op.Advise(&marks).ok();
@@ -938,7 +1089,8 @@ pub(crate) unsafe fn perform_watched(op: &IFileOperation) -> (Result<()>, Vec<St
         let _ = op.Unadvise(c);
     }
     let locked = recorded.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    (result, locked)
+    let failed = failed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Attempt { result, locked, failed }
 }
 
 // Silence the unused import if the callback type alias is only documentation.
@@ -1075,4 +1227,90 @@ mod tests {
         drop(file);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn access_and_elevation_codes_ask_for_elevation_and_nothing_else_does() {
+        for code in [
+            COPYENGINE_E_REQUIRES_ELEVATION,
+            COPYENGINE_E_ACCESS_DENIED_SRC,
+            COPYENGINE_E_ACCESS_DENIED_DEST,
+            E_ACCESSDENIED,
+            ERROR_ACCESS_DENIED.to_hresult(),
+            ERROR_ELEVATION_REQUIRED.to_hresult(),
+        ] {
+            assert!(needs_elevation_code(code), "{code:?}");
+            assert!(!is_in_use_code(code), "{code:?}");
+        }
+        for code in [
+            S_OK,
+            COPYENGINE_E_USER_CANCELLED,
+            ERROR_CANCELLED.to_hresult(),
+            ERROR_SHARING_VIOLATION.to_hresult(),
+            ERROR_LOCK_VIOLATION.to_hresult(),
+            COPYENGINE_E_SHARING_VIOLATION_SRC,
+            COPYENGINE_E_SHARING_VIOLATION_DEST,
+            COPYENGINE_E_ACCESSDENIED_READONLY,
+            ERROR_FILE_NOT_FOUND.to_hresult(),
+        ] {
+            assert!(!needs_elevation_code(code), "{code:?}");
+        }
+        assert!(text_is_access_denied("2026/11/27 17:00:00 ERROR 5 (0x00000005) Copying File C:\\a.txt"));
+        assert!(text_is_access_denied("Access is denied."));
+        assert!(text_is_access_denied("ERROR 740 (0x000002E4)"));
+        assert!(!text_is_access_denied("ERROR 53 (0x00000035) Accessing Destination Directory"));
+        assert!(!text_is_access_denied("ERROR 32 (0x00000020) Copying File C:\\a.txt"));
+    }
+
+    #[test]
+    fn next_step_elevates_once_after_a_quiet_access_failure() {
+        let deny = COPYENGINE_E_REQUIRES_ELEVATION;
+        let msg = "";
+        // Clean success.
+        assert_eq!(next_step(S_OK, msg, false, false, false), Next::Done);
+        // PerformOperations said S_OK but an item reported "requires elevation".
+        assert_eq!(next_step(S_OK, msg, false, true, false), Next::Elevate);
+        // PerformOperations itself failed with an access or elevation code.
+        for code in [deny, COPYENGINE_E_ACCESS_DENIED_DEST, E_ACCESSDENIED, ERROR_ELEVATION_REQUIRED.to_hresult()] {
+            assert_eq!(next_step(code, msg, false, false, false), Next::Elevate, "{code:?}");
+        }
+        // Cancel stays cancel, even with a denied item recorded.
+        assert_eq!(next_step(COPYENGINE_E_USER_CANCELLED, msg, false, true, false), Next::Fail);
+        assert_eq!(next_step(ERROR_CANCELLED.to_hresult(), msg, false, true, false), Next::Fail);
+        // A held file still gets Maguro's in-use box, not elevation.
+        assert_eq!(next_step(ERROR_SHARING_VIOLATION.to_hresult(), msg, false, false, false), Next::AskInUse);
+        assert_eq!(next_step(COPYENGINE_E_USER_CANCELLED, msg, true, true, false), Next::AskInUse);
+        assert_eq!(next_step(E_FAIL, "being used by another process", false, false, false), Next::AskInUse);
+        // The elevated pass is the last one.
+        assert_eq!(next_step(deny, msg, false, true, true), Next::Fail);
+        assert_eq!(next_step(S_OK, msg, false, true, true), Next::Done);
+        // Anything else is a plain failure.
+        assert_eq!(next_step(ERROR_FILE_NOT_FOUND.to_hresult(), msg, false, false, false), Next::Fail);
+    }
+
+    #[test]
+    fn elevated_retry_runs_only_the_sources_that_were_denied() {
+        let srcs: Vec<String> = vec![r"D:\a.txt".into(), r"D:\dir".into(), r"D:\c.txt".into()];
+        assert_eq!(retry_targets(&srcs, &[r"d:\A.TXT".into()]), vec![r"D:\a.txt".to_string()]);
+        assert_eq!(retry_targets(&srcs, &[r"D:\dir\deep\x.bin".into(), String::new()]), vec![r"D:\dir".to_string()]);
+        // Only PerformOperations / FinishOperations knew: retry them all.
+        assert_eq!(retry_targets(&srcs, &[String::new()]), srcs);
+        assert_eq!(retry_targets(&srcs, &[r"E:\other".into()]), srcs);
+        // "D:\di" is not a parent of "D:\dir".
+        assert_eq!(retry_targets(&[r"D:\di".to_string()], &[r"D:\dir\x".into()]), vec![r"D:\di".to_string()]);
+        let attempt = Attempt { result: Ok(()), locked: Vec::new(), failed: vec![(r"D:\a.txt".into(), COPYENGINE_E_REQUIRES_ELEVATION), (r"D:\c.txt".into(), ERROR_FILE_NOT_FOUND.to_hresult())] };
+        assert_eq!(attempt.denied(), vec![r"D:\a.txt".to_string()]);
+    }
+
+    #[test]
+    fn quiet_pass_hides_errors_and_elevated_pass_shows_the_admin_prompt() {
+        let base = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR;
+        let quiet = pass_flags(base, Pass::Quiet);
+        assert_eq!(quiet.0 & FOF_NOERRORUI.0, FOF_NOERRORUI.0);
+        assert_eq!(quiet.0 & FOFX_SHOWELEVATIONPROMPT.0, 0);
+        let up = pass_flags(base | FOF_NOERRORUI, Pass::Elevated);
+        assert_eq!(up.0 & FOF_NOERRORUI.0, 0);
+        assert_eq!(up.0 & FOFX_SHOWELEVATIONPROMPT.0, FOFX_SHOWELEVATIONPROMPT.0);
+        assert_eq!(up.0 & base.0, base.0);
+    }
+
 }
