@@ -1473,22 +1473,37 @@ mod tests {
         });
         let start = Instant::now();
         let mut prompt: Option<(HWND, String, String)> = None;
-        while start.elapsed() < std::time::Duration::from_secs(15) && prompt.is_none() {
+        let mut early = None;
+        let mut seen: Vec<String> = Vec::new();
+        while start.elapsed() < std::time::Duration::from_secs(15) && prompt.is_none() && early.is_none() {
             std::thread::sleep(std::time::Duration::from_millis(200));
+            early = rx.try_recv().ok();
             let mut found: Vec<(HWND, String, String)> = Vec::new();
             unsafe {
                 let _ = EnumWindows(Some(ours), LPARAM(&mut found as *mut _ as isize));
             }
-            prompt = found.into_iter().find(|(_, class, _)| class == "#32770");
+            for (_, class, title) in &found {
+                let k = format!("{class} \"{title}\"");
+                if !seen.contains(&k) {
+                    seen.push(k);
+                }
+            }
+            // The copy engine draws its "Continue" (administrator) prompt in its own
+            // OperationStatusWindow. A 5-byte copy that is still up after 1.5 s is waiting there.
+            if start.elapsed() > std::time::Duration::from_millis(1500) {
+                prompt = found.into_iter().find(|(_, class, _)| class == "OperationStatusWindow" || class == "#32770");
+            }
         }
         let Some((hwnd, class, title)) = prompt else {
+            let wrote = target.exists();
+            let _ = std::fs::remove_file(&target);
             let _ = std::fs::remove_dir_all(&dir);
-            panic!("no Windows prompt appeared for the elevated pass");
+            panic!("no Windows prompt appeared for the elevated pass: early={:?} wrote={wrote} windows={seen:?}", early.map(|c: HRESULT| format!("{:#010x}", c.0 as u32)));
         };
         eprintln!("UAC probe: elevated pass showed {class} \"{title}\"; cancelling it");
-        // Cancel, never Continue: nothing gets elevated.
+        // Close it, never Continue: nothing gets elevated.
         unsafe {
-            let _ = PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(IDCANCEL.0 as usize), LPARAM(0));
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
         let code = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(code) => code,
