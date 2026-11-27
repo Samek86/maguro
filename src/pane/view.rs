@@ -1909,6 +1909,73 @@ pub(crate) unsafe fn select_accessible_row(i: usize, pt: POINT) {
     }
 }
 
+/// One row that shares the display name under a drop.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DropRowItem {
+    /// A browsable file-system folder (not ZIP or CAB), with its path.
+    pub(crate) folder: Option<String>,
+    /// The item takes drops itself: a ZIP, a program, a shortcut.
+    pub(crate) drop_target: bool,
+}
+
+/// What a file drop at a point in the list lands on.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum DropRow {
+    /// Empty space, or a plain file row: the pane's folder, as in Explorer.
+    Here,
+    /// A folder row.
+    Folder(String),
+    /// A row the shell must handle (ZIP, program, shortcut, a name we could not resolve).
+    Shell,
+}
+
+/// `None` rows means the point is not on a row. `Some(empty)` is a row whose name matched nothing.
+/// Hidden extensions can give two rows one name; any doubt goes to the shell.
+pub(crate) fn drop_row(rows: Option<&[DropRowItem]>) -> DropRow {
+    let Some(rows) = rows else { return DropRow::Here };
+    if rows.is_empty() {
+        return DropRow::Shell;
+    }
+    let folders: Vec<&String> = rows.iter().filter_map(|r| r.folder.as_ref()).collect();
+    if folders.is_empty() {
+        return if rows.iter().any(|r| r.drop_target) { DropRow::Shell } else { DropRow::Here };
+    }
+    if folders.len() == 1 && rows.len() == 1 {
+        return DropRow::Folder(folders[0].clone());
+    }
+    DropRow::Shell
+}
+
+/// The row under a file drop at `pt` (screen) in pane `i`.
+pub(crate) unsafe fn drop_row_at(i: usize, pt: POINT) -> DropRow {
+    let Some((item, mut child)) = list_item_at(pt) else { return drop_row(None) };
+    let name = acc_label(&item, &child).or_else(|| acc_label(&item, &VARIANT::from(0i32)));
+    _ = VariantClear(&mut child);
+    let Some(name) = name else { return DropRow::Shell };
+    let Some(fv) = view_of::<IFolderView2>(i) else { return DropRow::Shell };
+    let n = fv.ItemCount(SVGIO_ALLVIEW).unwrap_or(0);
+    let mut rows = Vec::new();
+    for k in 0..n {
+        let Ok(it) = fv.GetItem::<IShellItem>(k) else { continue };
+        let disp = it.GetDisplayName(SIGDN_NORMALDISPLAY).ok().map(|p| pwstr(p)).unwrap_or_default();
+        if !disp.eq_ignore_ascii_case(&name) {
+            continue;
+        }
+        let attr = it.GetAttributes(SFGAO_FOLDER | SFGAO_STREAM | SFGAO_FILESYSTEM | SFGAO_DROPTARGET).map(|f| f.0).unwrap_or(0);
+        let folder = (real_folder(attr) && attr & SFGAO_FILESYSTEM.0 != 0)
+            .then(|| it.GetDisplayName(SIGDN_FILESYSPATH).ok().map(|p| pwstr(p)))
+            .flatten()
+            .filter(|p| is_fs(p));
+        let drop_target = attr & SFGAO_DROPTARGET.0 != 0;
+        // A folder that is not a plain file-system folder (a library, a ZIP) is the shell's.
+        rows.push(DropRowItem { folder, drop_target: drop_target || (attr & SFGAO_FOLDER.0 != 0 && !real_folder(attr)) });
+        if rows.len() > 4 {
+            break;
+        }
+    }
+    drop_row(Some(&rows))
+}
+
 unsafe fn select_named(i: usize, name: &str) -> bool {
     let Some(fv) = view_of::<IFolderView2>(i) else { return false };
     let n = fv.ItemCount(SVGIO_ALLVIEW).unwrap_or(0);
@@ -2748,3 +2815,30 @@ pub(crate) unsafe fn toggle_hidden() {
     crate::toolbar::invalidate_commands();
 }
 
+
+#[cfg(test)]
+mod drop_row_tests {
+    use super::{drop_row, DropRow, DropRowItem};
+
+    fn folder(p: &str) -> DropRowItem {
+        DropRowItem { folder: Some(p.to_string()), drop_target: true }
+    }
+    fn file(drop_target: bool) -> DropRowItem {
+        DropRowItem { folder: None, drop_target }
+    }
+
+    #[test]
+    fn a_drop_lands_in_a_folder_row_or_the_pane() {
+        assert_eq!(drop_row(None), DropRow::Here, "empty space");
+        assert_eq!(drop_row(Some(&[folder(r"C:\a\sub")])), DropRow::Folder(r"C:\a\sub".into()));
+        assert_eq!(drop_row(Some(&[file(false)])), DropRow::Here, "a plain file row is the folder, as in Explorer");
+    }
+
+    #[test]
+    fn zip_programs_and_doubt_go_to_the_shell() {
+        assert_eq!(drop_row(Some(&[file(true)])), DropRow::Shell, "ZIP, program or shortcut");
+        assert_eq!(drop_row(Some(&[])), DropRow::Shell, "name matched nothing");
+        assert_eq!(drop_row(Some(&[folder(r"C:\a\x"), file(false)])), DropRow::Shell, "two rows share a name");
+        assert_eq!(drop_row(Some(&[file(false), file(true)])), DropRow::Shell);
+    }
+}

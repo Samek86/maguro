@@ -822,7 +822,13 @@ unsafe fn insert_excel(menu: HMENU, cm: &IContextMenu) {
     let _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_EXCEL as usize, &HSTRING::from(tr(crate::Key::OpenReadOnly)));
 }
 
-fn fast_paste_dest(pane: usize, background: bool, items: &[(String, bool)]) -> String {
+/// The shell's Paste row, under either verb Windows gives it.
+pub(crate) fn is_paste_verb(verb: &str) -> bool {
+    let v = verb.trim();
+    v.eq_ignore_ascii_case("paste") || v.eq_ignore_ascii_case("windows.paste")
+}
+
+pub(crate) fn fast_paste_dest(pane: usize, background: bool, items: &[(String, bool)]) -> String {
     if !background && items.len() == 1 && !items[0].1 && is_fs(&items[0].0) {
         return items[0].0.clone();
     }
@@ -1495,6 +1501,13 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     } else if cmd > 0 {
         let offset = (cmd as u32 - 1) as usize;
         let verb = cmd_verb(&cm, offset);
+        // Paste runs the copy or move on Maguro's worker. The shell's Paste would run it here,
+        // on the UI thread, and freeze the window until it finished. Virtual items stay with it.
+        let paste_verb = if verb.is_empty() { cmd_verb_ansi(&cm, offset) } else { verb.clone() };
+        let pasted = is_paste_verb(&paste_verb)
+            && !crate::pane::recent::locked(pane)
+            && super::fileop::try_paste_to(pane, fast_paste_dest(pane, background, items));
+        if !pasted {
         let default_item = GetMenuDefaultItem(menu, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0)) as i32 == cmd;
         // The shell item stays on the menu. InvokeCommand has no view site, so it does not edit.
         // A file-pane click uses the view's own F2. A search hit is not that selection.
@@ -1550,6 +1563,7 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
             }
             }
             None => {}
+        }
         }
     }
     _ = DestroyMenu(menu);
@@ -2234,6 +2248,40 @@ pub(crate) unsafe fn explorer_new_folder(i: usize) {
     _ = DestroyMenu(menu);
 }
 
+/// The view's own Paste, for what Maguro's worker cannot take (virtual items, links).
+pub(crate) unsafe fn shell_paste(i: usize) {
+    if crate::pane::recent::locked(i) {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    }
+    let Some(sv) = view_of::<IShellView>(i) else {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    };
+    let Ok(cm) = sv.GetItemObject::<IContextMenu>(SVGIO_BACKGROUND) else {
+        _ = MessageBeep(MB_ICONWARNING);
+        return;
+    };
+    _ = IUnknown_SetSite(&cm, &sv);
+    let Ok(menu) = CreatePopupMenu() else { return };
+    let verb = b"paste\0";
+    if cm.QueryContextMenu(menu, 0, 1, 0x7fff, CMF_NORMAL).is_ok() {
+        let ci = CMINVOKECOMMANDINFO {
+            cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
+            hwnd: sv.GetWindow().unwrap_or_default(),
+            lpVerb: PCSTR(verb.as_ptr()),
+            nShow: SW_SHOWNORMAL.0 as i32,
+            ..Default::default()
+        };
+        if cm.InvokeCommand(&ci).is_err() {
+            _ = MessageBeep(MB_ICONWARNING);
+        }
+    } else {
+        _ = MessageBeep(MB_ICONWARNING);
+    }
+    _ = DestroyMenu(menu);
+}
+
 // Ctrl+Shift+N: a new folder in the active pane, then the shell's own rename (F2) once it shows up.
 pub(crate) unsafe fn new_folder(i: usize) {
     if crate::pane::recent::locked(i) {
@@ -2569,5 +2617,20 @@ mod utf8_boundary_tests {
         assert_eq!(super::parent_of(r"E:\😀\あ.txt").as_deref(), Some(r"E:\😀"));
         assert_eq!(super::parent_of(r"C:\abcdサ.txt").as_deref(), Some(r"C:\"));
         assert_eq!(super::parent_of("샘플.txt"), None);
+    }
+}
+
+#[cfg(test)]
+mod paste_verb_tests {
+    use super::is_paste_verb;
+
+    #[test]
+    fn paste_rows_are_caught_under_either_verb() {
+        assert!(is_paste_verb("paste"));
+        assert!(is_paste_verb("Paste"));
+        assert!(is_paste_verb("windows.paste"));
+        assert!(!is_paste_verb("pastelink"));
+        assert!(!is_paste_verb("copy"));
+        assert!(!is_paste_verb(""));
     }
 }

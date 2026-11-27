@@ -1947,8 +1947,11 @@ unsafe fn run_command(owner: HWND, action: Action, doc: &Doc, lay: &BarLay, from
         Action::NewFolder => crate::new_folder(pane),
         Action::NewFile => crate::new_file(pane),
         Action::DeleteSelection => crate::delete_selection(pane, false),
+        // Copy and cut both run on the worker. What it cannot take goes to the view's own Paste.
         Action::Paste => {
-            let _ = crate::try_paste(pane);
+            if !crate::try_paste(pane) {
+                crate::shell_paste(pane);
+            }
         }
         Action::RenameInPlace => {
             let _ = crate::rename_inplace(pane);

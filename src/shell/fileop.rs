@@ -3,7 +3,7 @@ use windows::Win32::Graphics::Imaging::{
     WICDecodeMetadataCacheOnDemand,
 };
 use windows::Win32::System::Com::{STREAM_SEEK_END, STREAM_SEEK_SET};
-use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
+use windows::Win32::System::DataExchange::{GetClipboardSequenceNumber, IsClipboardFormatAvailable};
 use windows::Win32::System::Memory::GlobalSize;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 
@@ -195,10 +195,86 @@ pub(crate) unsafe fn copy_paths(a: usize) {
     update_status();
 }
 
-// Plain file copies (Ctrl+C, then Ctrl+V into a folder) run on their own thread, so Maguro stays usable.
-// Cut, links, virtual items and anything else stay with the shell.
+// Plain file copies and moves (Ctrl+C or Ctrl+X, then Ctrl+V into a folder) run on their own thread,
+// so Maguro stays usable. Links, virtual items and anything else stay with the shell.
 pub(crate) unsafe fn try_paste(a: usize) -> bool {
     paste_clipboard(a, None, false)
+}
+
+/// The context menu's Paste, into `dest` (the clicked folder or the pane's folder).
+/// False leaves the paste with the shell.
+pub(crate) unsafe fn try_paste_to(a: usize, dest: String) -> bool {
+    paste_clipboard(a, Some(dest), false)
+}
+
+/// What the clipboard's "Preferred DropEffect" asks for.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(crate) enum ClipAct {
+    Copy,
+    Move,
+    Shell,
+}
+
+/// No effect is a copy. Cut is move alone. Copy (with or without link) is a copy.
+/// Anything else (link only, copy and move both) is left with the shell.
+pub(crate) fn clip_act(effect: Option<u32>) -> ClipAct {
+    match effect {
+        None => ClipAct::Copy,
+        Some(e) if e & DROPEFFECT_MOVE.0 != 0 && e & DROPEFFECT_COPY.0 == 0 => ClipAct::Move,
+        Some(e) if e & DROPEFFECT_MOVE.0 == 0 && e & DROPEFFECT_COPY.0 != 0 => ClipAct::Copy,
+        Some(_) => ClipAct::Shell,
+    }
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(crate) enum PastePlan {
+    /// Copy on the worker. `true` names the copies "- Copy" (the files already sit there).
+    Copy(bool),
+    /// Move on the worker.
+    Move,
+    /// A cut pasted into the folder it came from: Explorer does nothing, and so do we.
+    Nothing,
+    /// Mixed, virtual or not a file system path: the shell's paste.
+    Shell,
+}
+
+/// `mode` is `paste_mode(srcs, dst)`.
+pub(crate) fn paste_plan(act: ClipAct, mode: Option<bool>) -> PastePlan {
+    match (act, mode) {
+        (ClipAct::Copy, Some(rename)) => PastePlan::Copy(rename),
+        (ClipAct::Move, Some(false)) => PastePlan::Move,
+        (ClipAct::Move, Some(true)) => PastePlan::Nothing,
+        _ => PastePlan::Shell,
+    }
+}
+
+/// After a cut is pasted, every source is gone. A cancel or a partial failure leaves some behind.
+pub(crate) fn cut_finished(srcs: &[String], exists: impl Fn(&str) -> bool) -> bool {
+    !srcs.is_empty() && srcs.iter().all(|s| !exists(s))
+}
+
+/// A finished cut-and-paste: tell the source (Explorer clears its cut state on "Paste Succeeded")
+/// and empty the clipboard, as Explorer does, so a second paste cannot move nothing.
+/// Only when the clipboard still holds the cut that was pasted (`seq`).
+unsafe fn finish_cut(seq: u32) {
+    if GetClipboardSequenceNumber() != seq {
+        return;
+    }
+    let ole = OleInitialize(None).is_ok();
+    if let Ok(obj) = OleGetClipboard() {
+        let _ = super::askdrop::set_drop_dword(&obj, w!("Performed DropEffect"), DROPEFFECT_MOVE.0);
+        let _ = super::askdrop::set_drop_dword(&obj, w!("Paste Succeeded"), DROPEFFECT_MOVE.0);
+    }
+    // The source may have cleared it on "Paste Succeeded". Anything newer is someone else's.
+    if GetClipboardSequenceNumber() == seq && OpenClipboard(None).is_ok() {
+        if GetClipboardSequenceNumber() == seq {
+            let _ = EmptyClipboard();
+        }
+        let _ = CloseClipboard();
+    }
+    if ole {
+        OleUninitialize();
+    }
 }
 
 /// Context-menu Fast paste. Robocopy even when the fast-copy setting is off, and for a local folder.
@@ -233,6 +309,7 @@ unsafe fn paste_clipboard(a: usize, dest: Option<String>, force: bool) -> bool {
             srcs.push(String::from_utf16_lossy(&buf[..n]));
         }
     }
+    let seq = GetClipboardSequenceNumber();
     let mut effect = None;
     if let Ok(h) = GetClipboardData(RegisterClipboardFormatW(w!("Preferred DropEffect"))) {
         let p = GlobalLock(HGLOBAL(h.0)) as *const u32;
@@ -257,18 +334,21 @@ unsafe fn paste_clipboard(a: usize, dest: Option<String>, force: bool) -> bool {
         }
         return start_picture(pic, dst);
     }
-    let copy = effect.is_none_or(|e| e & DROPEFFECT_MOVE.0 == 0 && e & DROPEFFECT_COPY.0 != 0);
+    let act = clip_act(effect);
     if force {
-        let mv = effect.is_some_and(|e| e & DROPEFFECT_MOVE.0 != 0 && e & DROPEFFECT_COPY.0 == 0);
-        if mv {
+        if act == ClipAct::Move {
             let Some(_) = send_mode(&srcs, &dst, true) else { return false };
-            return start_transfer(srcs, dst, false, true, false, true);
+            return start_transfer(srcs, dst, false, true, false, true, Some(seq));
         }
-        let Some(rename) = paste_mode(&srcs, &dst).filter(|_| copy) else { return false };
-        return start_transfer(srcs, dst, rename, false, false, true);
+        let Some(rename) = paste_mode(&srcs, &dst).filter(|_| act == ClipAct::Copy) else { return false };
+        return start_transfer(srcs, dst, rename, false, false, true, None);
     }
-    let Some(rename) = paste_mode(&srcs, &dst).filter(|_| copy) else { return false };
-    start_copy(srcs, dst, rename, false)
+    match paste_plan(act, paste_mode(&srcs, &dst)) {
+        PastePlan::Copy(rename) => start_copy(srcs, dst, rename, false),
+        PastePlan::Move => start_transfer(srcs, dst, false, true, false, false, Some(seq)),
+        PastePlan::Nothing => true,
+        PastePlan::Shell => false,
+    }
 }
 
 /// A picture with no real files. Text or HTML beside it (a browser's Copy image) does not matter.
@@ -460,16 +540,18 @@ fn keep_job(job: std::thread::JoinHandle<()>) {
 
 // Copies (or, with `mv`, moves) `srcs` into `dst` on a worker thread. False = the thread didn't start.
 pub(crate) unsafe fn start_copy(srcs: Vec<String>, dst: String, rename: bool, mv: bool) -> bool {
-    start_transfer(srcs, dst, rename, mv, false, false)
+    start_transfer(srcs, dst, rename, mv, false, false, None)
 }
 
 /// Move started from a drop. `MoveItem` runs only after the drag source can release the
 /// file. Doing it inside `Drop` reports the item missing and leaves it in place.
 pub(crate) unsafe fn start_drop_move(srcs: Vec<String>, dst: String) -> bool {
-    start_transfer(srcs, dst, false, true, true, false)
+    start_transfer(srcs, dst, false, true, true, false, None)
 }
 
-unsafe fn start_transfer(srcs: Vec<String>, dst: String, rename: bool, mv: bool, after_drop: bool, force: bool) -> bool {
+/// `cut` is the clipboard sequence number of a pasted cut. When every source is gone afterwards,
+/// the clipboard is told and emptied (see `finish_cut`).
+unsafe fn start_transfer(srcs: Vec<String>, dst: String, rename: bool, mv: bool, after_drop: bool, force: bool, cut: Option<u32>) -> bool {
     let (owner, accent, setting) = app(|a| (a.main.0 as isize, a.s.accent_now(), a.s.fast_copy));
     // Captured here, on the UI thread. The worker realizes its own copies if FastCopy runs.
     let snap = unsafe { crate::dialog_snap() };
@@ -481,6 +563,7 @@ unsafe fn start_transfer(srcs: Vec<String>, dst: String, rename: bool, mv: bool,
     let job = std::thread::Builder::new().spawn(move || {
         let later = super::listsync::RefreshLater::new(hwnds, folders);
         let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let originals = if cut.is_some() { srcs.clone() } else { Vec::new() };
         let _ = crate::crash::guard(std::panic::AssertUnwindSafe(|| unsafe {
         if after_drop {
             settle_drop_move(&srcs);
@@ -522,6 +605,11 @@ unsafe fn start_transfer(srcs: Vec<String>, dst: String, rename: bool, mv: bool,
             }
         }
         }));
+        if let Some(seq) = cut {
+            if mv && cut_finished(&originals, |p| std::fs::symlink_metadata(p).is_ok()) {
+                let _ = crate::crash::guard(std::panic::AssertUnwindSafe(|| unsafe { finish_cut(seq) }));
+            }
+        }
         drop(later);
         if com {
             CoUninitialize();
@@ -1106,6 +1194,46 @@ pub(crate) fn apply_boot(s: &mut Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_effect_picks_copy_move_or_shell() {
+        assert_eq!(clip_act(None), ClipAct::Copy);
+        // Explorer's Copy is copy | link; Cut is move alone.
+        assert_eq!(clip_act(Some(DROPEFFECT_COPY.0 | DROPEFFECT_LINK.0)), ClipAct::Copy);
+        assert_eq!(clip_act(Some(DROPEFFECT_COPY.0)), ClipAct::Copy);
+        assert_eq!(clip_act(Some(DROPEFFECT_MOVE.0)), ClipAct::Move);
+        assert_eq!(clip_act(Some(DROPEFFECT_LINK.0)), ClipAct::Shell);
+        assert_eq!(clip_act(Some(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0)), ClipAct::Shell);
+    }
+
+    #[test]
+    fn cut_paste_runs_on_the_worker_and_same_folder_cut_does_nothing() {
+        let srcs = vec![r"C:\a\x.txt".to_string()];
+        let act = clip_act(Some(DROPEFFECT_MOVE.0));
+        assert_eq!(paste_plan(act, paste_mode(&srcs, r"D:\b")), PastePlan::Move);
+        assert_eq!(paste_plan(act, paste_mode(&srcs, r"C:\a")), PastePlan::Nothing);
+        let mixed = vec![r"C:\a\x.txt".to_string(), r"C:\b\y.txt".to_string()];
+        assert_eq!(paste_plan(act, paste_mode(&mixed, r"C:\a")), PastePlan::Shell);
+        assert_eq!(paste_plan(act, None), PastePlan::Shell);
+    }
+
+    #[test]
+    fn copy_paste_keeps_the_copy_names_rule() {
+        let srcs = vec![r"C:\a\x.txt".to_string()];
+        assert_eq!(paste_plan(ClipAct::Copy, paste_mode(&srcs, r"D:\b")), PastePlan::Copy(false));
+        assert_eq!(paste_plan(ClipAct::Copy, paste_mode(&srcs, r"C:\a")), PastePlan::Copy(true));
+        assert_eq!(paste_plan(ClipAct::Shell, paste_mode(&srcs, r"D:\b")), PastePlan::Shell);
+        // Virtual items carry no file system path.
+        assert_eq!(paste_plan(ClipAct::Copy, paste_mode(&["::{x}".to_string()], r"D:\b")), PastePlan::Shell);
+    }
+
+    #[test]
+    fn cut_clears_the_clipboard_only_when_every_source_moved() {
+        let srcs = vec!["a".to_string(), "b".to_string()];
+        assert!(cut_finished(&srcs, |_| false));
+        assert!(!cut_finished(&srcs, |p| p == "b"), "cancel or partial failure keeps the cut");
+        assert!(!cut_finished(&[], |_| false));
+    }
 
     fn dib(size: u32, bits: u16, comp: u32, used: u32, extra: usize) -> Vec<u8> {
         let mut d = vec![0u8; size as usize + extra];
