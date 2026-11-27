@@ -592,18 +592,64 @@ mod tests {
     #[test]
     fn pane_number_tip_is_in_every_bundled_language() {
         let id = "pane_num_tip";
-        let en = "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu";
+        let en = "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu / Double-click: Expand this pane";
         let pos = KEY_ID.iter().position(|k| *k == id).unwrap_or_else(|| panic!("missing {id}"));
         assert_eq!(EN[pos], en);
         let expect = [
-            ("ko", KO_INI, "드래그: 패널 이동 / Ctrl+드래그: 탭 복사 / 우클릭: 메뉴"),
-            ("ja", JA_INI, "ドラッグ: ペインを移動 / Ctrl+ドラッグ: タブをコピー / 右クリック: メニュー"),
-            ("fr", FR_INI, "Glisser : déplacer le panneau / Ctrl+glisser : copier l'onglet / Clic droit : menu"),
-            ("de", DE_INI, "Ziehen: Bereich verschieben / Strg+Ziehen: Registerkarte kopieren / Rechtsklick: Menü"),
+            ("ko", KO_INI, "드래그: 패널 이동 / Ctrl+드래그: 탭 복사 / 우클릭: 메뉴 / 더블클릭: 이 패널만 크게 보기"),
+            ("ja", JA_INI, "ドラッグ: ペインを移動 / Ctrl+ドラッグ: タブをコピー / 右クリック: メニュー / ダブルクリック: このペインを最大化"),
+            ("fr", FR_INI, "Glisser : déplacer le panneau / Ctrl+glisser : copier l'onglet / Clic droit : menu / Double-clic : agrandir ce panneau"),
+            ("de", DE_INI, "Ziehen: Bereich verschieben / Strg+Ziehen: Registerkarte kopieren / Rechtsklick: Menü / Doppelklick: Diesen Bereich maximieren"),
         ];
         for (code, text, tip) in expect {
             let (_, map) = parse_ini(text);
             assert_eq!(map[id], tip, "{code}");
+        }
+    }
+
+    #[test]
+    fn pane_zoom_tip_and_menu_are_in_every_bundled_language() {
+        let cases = [
+            (
+                "pane_num_tip_zoomed",
+                "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu / Double-click: Restore layout",
+                [
+                    ("ko", "드래그: 패널 이동 / Ctrl+드래그: 탭 복사 / 우클릭: 메뉴 / 더블클릭: 원래 레이아웃으로 복원"),
+                    ("ja", "ドラッグ: ペインを移動 / Ctrl+ドラッグ: タブをコピー / 右クリック: メニュー / ダブルクリック: 元のレイアウトに戻す"),
+                    ("fr", "Glisser : déplacer le panneau / Ctrl+glisser : copier l'onglet / Clic droit : menu / Double-clic : restaurer la disposition"),
+                    ("de", "Ziehen: Bereich verschieben / Strg+Ziehen: Registerkarte kopieren / Rechtsklick: Menü / Doppelklick: Layout wiederherstellen"),
+                ],
+            ),
+            (
+                "pane_zoom_expand",
+                "Expand this pane",
+                [
+                    ("ko", "이 패널만 크게 보기"),
+                    ("ja", "このペインを最大化"),
+                    ("fr", "Agrandir ce panneau"),
+                    ("de", "Diesen Bereich maximieren"),
+                ],
+            ),
+            (
+                "pane_zoom_restore",
+                "Restore layout",
+                [
+                    ("ko", "원래 레이아웃으로 복원"),
+                    ("ja", "元のレイアウトに戻す"),
+                    ("fr", "Restaurer la disposition"),
+                    ("de", "Layout wiederherstellen"),
+                ],
+            ),
+        ];
+        let files = [("ko", KO_INI), ("ja", JA_INI), ("fr", FR_INI), ("de", DE_INI)];
+        for (id, en, expect) in cases {
+            let pos = KEY_ID.iter().position(|k| *k == id).unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(EN[pos], en);
+            for (code, text) in files {
+                let want = expect.iter().find(|(c, _)| *c == code).unwrap().1;
+                let (_, map) = parse_ini(text);
+                assert_eq!(map[id], want, "{code} {id}");
+            }
         }
     }
 
