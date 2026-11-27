@@ -1580,6 +1580,19 @@ pub(crate) unsafe fn focus_view(i: usize) {
     }
 }
 
+/// A press on a pane's own chrome (header, number, blank strip) makes that pane active.
+/// Keyboard focus must follow, or the next key arrives in the pane that had focus and
+/// takes the active pane back there (Ctrl+V would paste into that other pane).
+/// Focus already inside this pane (its address or filter edit, its list) stays put.
+pub(crate) unsafe fn focus_into_pane(i: usize) {
+    let Some(ph) = app(|a| a.panes.get(i).and_then(|p| p.as_ref()).map(|p| p.hwnd)) else { return };
+    let f = GetFocus();
+    if !f.0.is_null() && (f == ph || IsChild(ph, f).as_bool()) {
+        return;
+    }
+    focus_view(i);
+}
+
 /// Keyboard focus after a window-tab or pane-tab switch.
 ///
 /// DirectUI treats a focus arrival with Shift down as Shift+Tab and parks the

@@ -531,8 +531,10 @@ pub(crate) unsafe fn key(m: &MSG) -> bool {
             return false;
         }
     }
-    if let Some(i) = pane_of(m.hwnd) {
-        set_active(i);
+    if key_follows_focus(vk) {
+        if let Some(i) = pane_of(m.hwnd) {
+            set_active(i);
+        }
     }
     let a = active_pane();
     let addr = pane_ctl(a, ID_EDIT) == Some(m.hwnd);
@@ -1268,6 +1270,11 @@ pub(crate) unsafe fn pre_translate(m: &MSG) -> bool {
             }
             if let Some(i) = pane_of(m.hwnd) {
                 set_active(i);
+                // The pane window itself is only its chrome: the list and the edits are children.
+                // Their own clicks focus them. A press on the chrome has to move focus here.
+                if app(|a| a.panes.get(i).and_then(|p| p.as_ref()).is_some_and(|p| p.hwnd == m.hwnd)) {
+                    focus_into_pane(i);
+                }
             }
             false
         }
@@ -1323,6 +1330,15 @@ pub(crate) unsafe fn pre_translate(m: &MSG) -> bool {
         }
         _ => false,
     }
+}
+
+/// A bare Ctrl, Shift, Alt, or Win press does nothing in a pane by itself.
+/// It must not move the active pane; the key that follows it does.
+pub(crate) fn key_follows_focus(vk: u16) -> bool {
+    !matches!(
+        VIRTUAL_KEY(vk),
+        VK_CONTROL | VK_LCONTROL | VK_RCONTROL | VK_SHIFT | VK_LSHIFT | VK_RSHIFT | VK_MENU | VK_LMENU | VK_RMENU | VK_LWIN | VK_RWIN
+    )
 }
 
 /// F6 ring: 0 file list, 1 address, 2 filter, then the upper left-panel half and the lower one.
@@ -1409,7 +1425,18 @@ unsafe fn cycle_focus(back: bool) {
 
 #[cfg(test)]
 mod focus_tests {
-    use super::{focus_at, focus_ring, panel_stops, tree_input_after, PanelStop};
+    use super::{focus_at, focus_ring, key_follows_focus, panel_stops, tree_input_after, PanelStop};
+    use windows::Win32::UI::Input::KeyboardAndMouse::*;
+
+    #[test]
+    fn bare_modifiers_keep_the_active_pane() {
+        for vk in [VK_CONTROL, VK_LCONTROL, VK_RCONTROL, VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_MENU, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN] {
+            assert!(!key_follows_focus(vk.0), "{vk:?}");
+        }
+        for vk in [VK_V, VK_C, VK_A, VK_DOWN, VK_RETURN, VK_DELETE, VK_F2, VK_F5, VK_TAB, VK_BACK, VK_SPACE] {
+            assert!(key_follows_focus(vk.0), "{vk:?}");
+        }
+    }
 
     #[test]
     fn focus_rings() {
