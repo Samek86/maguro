@@ -1675,14 +1675,13 @@ pub(crate) unsafe fn num_tip_at(h: HWND, over: bool) {
         hide_num_tip();
         return;
     }
-    let (tip, main) = app(|a| (a.tip, a.main));
+    let (tip, main, dpi, zoomed) = app(|a| (a.tip, a.main, a.dpi, a.zoom.is_some()));
     if tip.0.is_null() || main.0.is_null() || h.0.is_null() {
         return;
     }
-    let text = tr(Key::PaneNumTip);
+    let text = tr(if zoomed { Key::PaneNumTipZoomed } else { Key::PaneNumTip });
     let mut rc = RECT::default();
     _ = GetClientRect(h, &mut rc);
-    let dpi = app(|a| a.dpi);
     let item = crate::ui::tip_screen_rect(h, pane_geo_of(h, rc.right, rc.bottom, dpi).num);
     let key = 0xB100_0000_0000_0000u64 ^ (h.0 as usize as u64);
     let added = app(|a| a.num_tip);

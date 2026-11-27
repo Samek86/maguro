@@ -2055,14 +2055,15 @@ const NEW_TAB_CMD: usize = 232;
 const COPY_PATH_CMD: usize = 233;
 const EXPLORER_CMD: usize = 234;
 const CLOSE_PANE_CMD: usize = 235;
+const ZOOM_CMD: usize = 236;
 
 pub(crate) unsafe fn tint_menu(h: HWND, i: usize, at: POINT) {
-    let (cur, cols, rows_here, panes, path_ready) = app(|a| {
+    let (cur, cols, rows_here, panes, path_ready, zoomed) = app(|a| {
         let panes = a.s.panes();
         let heights = a.s.heights.clone();
         let rows_here = if i < panes { heights.get(slot(&heights, i).0).copied().unwrap_or(0) } else { 0 };
         let path_ready = a.s.paths.get(i).is_some_and(|p| !p.is_empty());
-        (a.s.tints.get(i).copied().unwrap_or(0), heights.len(), rows_here, panes, path_ready)
+        (a.s.tints.get(i).copied().unwrap_or(0), heights.len(), rows_here, panes, path_ready, a.zoom.is_some())
     });
     let live = pane_mode_icon(i);
     let checked = live.and_then(|(m, z)| explorer_view_index(m, z));
@@ -2096,6 +2097,15 @@ pub(crate) unsafe fn tint_menu(h: HWND, i: usize, at: POINT) {
         let flags = if on { MF_STRING } else { MF_STRING | MF_GRAYED };
         _ = AppendMenuW(menu, flags, id, &HSTRING::from(text));
     };
+    let can_zoom = panes > 1 && i < panes;
+    let zoom_key = if zoomed { crate::Key::PaneZoomRestore } else { crate::Key::PaneZoomExpand };
+    let zoom_chord = crate::keys::index("view.zoom").map(crate::keys::chord_text).unwrap_or_default();
+    let zoom_label = if zoom_chord.is_empty() {
+        tr(zoom_key).to_string()
+    } else {
+        format!("{}\t{zoom_chord}", tr(zoom_key))
+    };
+    item(ZOOM_CMD, &zoom_label, can_zoom);
     item(SPLIT_RIGHT_CMD, tr(crate::Key::SplitRightSameFolder), can_right);
     item(SPLIT_BELOW_CMD, tr(crate::Key::SplitBelowSameFolder), can_below);
     let chord = crate::keys::index("pane.tab.new").map(crate::keys::chord_text).unwrap_or_default();
@@ -2127,6 +2137,10 @@ pub(crate) unsafe fn tint_menu(h: HWND, i: usize, at: POINT) {
         return;
     }
     match pick {
+        ZOOM_CMD => {
+            set_active(i);
+            toggle_zoom();
+        }
         SPLIT_RIGHT_CMD => header_split(i, false),
         SPLIT_BELOW_CMD => header_split(i, true),
         NEW_TAB_CMD => {

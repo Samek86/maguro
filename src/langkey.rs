@@ -973,11 +973,14 @@ pub(crate) enum Key {
     PreviewIcon,
     PreviewUrl,
     PreviewOriginal,
+    PaneNumTipZoomed,
+    PaneZoomExpand,
+    PaneZoomRestore,
 }
 
-pub(crate) const KEY_COUNT: usize = 966;
+pub(crate) const KEY_COUNT: usize = 969;
 
-const _: () = assert!((Key::PreviewOriginal as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::PaneZoomRestore as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1858,7 +1861,7 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Reason: {reason}",
     "List",
     "If you want to remove Maguro completely, turn this switch off first, then delete it.",
-    "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu",
+    "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu / Double-click: Expand this pane",
     "Moving this tab. An edge splits it into a new pane; the centre moves the whole pane",
     "Can't split this tab here: 4 columns, 4 rows in a column, or 16 panes",
     "Vertical tabs",
@@ -1946,6 +1949,9 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Icon",
     "URL",
     "Original name",
+    "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu / Double-click: Restore layout",
+    "Expand this pane",
+    "Restore layout",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2915,4 +2921,7 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "preview_icon",
     "preview_url",
     "preview_original",
+    "pane_num_tip_zoomed",
+    "pane_zoom_expand",
+    "pane_zoom_restore",
 ];
