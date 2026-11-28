@@ -744,6 +744,8 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 let last = window_count() <= 1;
                 if last {
                     // The last window stays in the file, so the next launch restores every window that was open.
+                    let shown = app(|a| crate::archive::shown_paths(&a.s));
+                    crate::archive::shutdown(&shown);
                     crate::remote::unmount_all();
                     if !skip_save {
                         save_session();
@@ -955,6 +957,7 @@ fn pane_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 }
             }
             WM_TIMER if wp.0 == TIMER_CLIPSEL => crate::cliphot::on_select_timer(h),
+            WM_TIMER if wp.0 == TIMER_ARCHSEL => on_archive_select(h),
             WM_TIMER if wp.0 == TIMER_NEWF => {
                 let job = PENDING_NEW.lock().ok().and_then(|mut p| {
                     let cur = p.as_mut()?;

@@ -16,14 +16,15 @@ pub(crate) unsafe fn insert(menu: HMENU, items: &[(String, bool)], background: b
     if !crate::shell::ctxmenu::maguro_shown("mount") {
         return;
     }
+    let at = windows::Win32::UI::WindowsAndMessaging::GetMenuItemCount(Some(menu)).max(0) as u32;
     let file = (!background && items.len() == 1).then(|| items[0].0.as_str());
     if let Some(path) = file {
         if disk_kind(path).is_some() && std::path::Path::new(path).is_file() {
             let label = HSTRING::from(crate::tr(crate::Key::MountAndOpen));
-            let _ = InsertMenuW(menu, 0, MF_STRING | MF_BYPOSITION, ID_CTX_MOUNT as usize, &label);
+            let _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_MOUNT as usize, &label);
             if vdisk::attached_letter(std::path::Path::new(path)).is_some() {
                 let label = HSTRING::from(crate::tr(crate::Key::DiskUnmount));
-                let _ = InsertMenuW(menu, 1, MF_STRING | MF_BYPOSITION, ID_CTX_UNMOUNT as usize, &label);
+                let _ = InsertMenuW(menu, at.saturating_add(1), MF_STRING | MF_BYPOSITION, ID_CTX_UNMOUNT as usize, &label);
             }
             return;
         }
@@ -32,7 +33,7 @@ pub(crate) unsafe fn insert(menu: HMENU, items: &[(String, bool)], background: b
     if let Some(letter) = drive {
         if vdisk::image_for_letter(letter).is_some() || vdisk::file_backed_drive(letter) {
             let label = HSTRING::from(crate::tr(crate::Key::EjectUnmount));
-            let _ = InsertMenuW(menu, 0, MF_STRING | MF_BYPOSITION, ID_CTX_EJECT as usize, &label);
+            let _ = InsertMenuW(menu, at, MF_STRING | MF_BYPOSITION, ID_CTX_EJECT as usize, &label);
         }
     }
 }

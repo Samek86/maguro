@@ -460,6 +460,9 @@ pub(crate) unsafe fn status_base(i: usize, path: &str, main: HWND, fv: &IFolderV
     } else {
         want_size(&dirs, busy);
     }
+    if !crate::archive::display_path(path).eq_ignore_ascii_case(path) {
+        parts.push(tr(crate::Key::ArchiveReadOnly).into());
+    }
     let head = parts.join("     ·     ");
     let mut parts = vec![String::new()];
     if !spec.is_empty() {

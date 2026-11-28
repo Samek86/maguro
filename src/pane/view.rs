@@ -1976,7 +1976,7 @@ pub(crate) unsafe fn drop_row_at(i: usize, pt: POINT) -> DropRow {
     drop_row(Some(&rows))
 }
 
-unsafe fn select_named(i: usize, name: &str) -> bool {
+pub(crate) unsafe fn select_named(i: usize, name: &str) -> bool {
     let Some(fv) = view_of::<IFolderView2>(i) else { return false };
     let n = fv.ItemCount(SVGIO_ALLVIEW).unwrap_or(0);
     let flags = (SVSI_SELECT.0 | SVSI_DESELECTOTHERS.0 | SVSI_FOCUSED.0 | SVSI_ENSUREVISIBLE.0) as u32;

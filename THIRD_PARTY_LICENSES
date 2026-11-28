@@ -59,3 +59,43 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
+
+Archive folder view and disk images
+===================================
+
+Maguro opens 7z, tar, and ISO files as folders by extracting them into a
+cache directory. The shape of that feature (extract, then browse a real
+folder) follows `browse_archives` in rustyfiles, which is MIT licensed:
+https://github.com/gelenmedya/rustyfiles
+The readers in this tree are Maguro's. No rustyfiles source is copied.
+
+Crates added for this feature
+-----------------------------
+
+sevenz-rust2 0.27.0 — Apache-2.0
+https://github.com/hasenbanck/sevenz-rust2
+LZMA, LZMA2, and BCJ are part of the crate. This build also enables deflate,
+bzip2, PPMd, and AES-256.
+
+tar 0.4.46 — MIT OR Apache-2.0
+https://github.com/alexcrichton/tar-rs
+
+flate2 1.1.11 — MIT OR Apache-2.0
+https://github.com/rust-lang/flate2-rs
+Built with the rust_backend feature (miniz_oxide). No C zlib.
+
+lzma-rust2 0.26.0 — Apache-2.0
+https://github.com/hasenbanck/lzma-rust2
+Used to read .tar.xz. Pure Rust.
+
+bzip2 0.6.1 — MIT OR Apache-2.0
+https://github.com/trifectatechfoundation/bzip2-rs
+The default backend is libbz2-rs-sys (MIT OR Apache-2.0), a pure-Rust bzip2.
+The C bzip2-sys feature is not enabled.
+
+ppmd-rust 1.5.2 (via sevenz-rust2) — CC0-1.0 OR MIT-0
+https://github.com/hasenbanck/ppmd-rust
+zlib-rs (via sevenz-rust2's deflate feature) — Zlib license
+
+The ISO 9660 / Joliet reader is written for Maguro and follows ECMA-119.
+It does not use a third-party ISO crate.

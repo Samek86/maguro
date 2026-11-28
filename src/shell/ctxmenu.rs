@@ -1036,7 +1036,7 @@ unsafe fn mark_slot(menu: HMENU) -> u32 {
 /// Favourites, mark, batch rename, who-is-using, Excel tidy, and WinMerge.
 /// Reveal, fast paste, Excel read-only, and terminal-as-admin stay where they were inserted.
 pub(crate) fn bottom_maguro_id(id: u32) -> bool {
-    matches!(id, crate::ID_CTX_FAV | crate::ID_CTX_BATCH | crate::ID_CTX_WHO | crate::excel::ID_CTX_EXCEL | ID_CTX_MARK) || (0x8020..=0x80FF).contains(&id)
+    matches!(id, crate::ID_CTX_FAV | crate::ID_CTX_BATCH | crate::ID_CTX_WHO | crate::excel::ID_CTX_EXCEL | ID_CTX_MARK | crate::archive::menu::ID_CTX_MOUNT | crate::archive::menu::ID_CTX_UNMOUNT | crate::archive::menu::ID_CTX_EJECT) || (0x8020..=0x80FF).contains(&id)
 }
 
 fn submenu_has_bottom_id(menu: HMENU, depth: u8) -> bool {
@@ -3850,10 +3850,11 @@ const MAGURO: &[MaguroSpec] = &[
     MaguroSpec { id: "reveal", key: crate::Key::ShowInFolder },
     MaguroSpec { id: "props", key: crate::Key::Properties },
     MaguroSpec { id: "winmerge", key: crate::Key::VendorWinmerge },
+    MaguroSpec { id: "mount", key: crate::Key::MountAndOpen },
 ];
 
 pub(crate) fn maguro_ids() -> &'static [&'static str] {
-    const IDS: &[&str] = &["fav", "mark", "batch", "who", "fast", "term", "excelro", "exceltidy", "reveal", "props", "winmerge"];
+    const IDS: &[&str] = &["fav", "mark", "batch", "who", "fast", "term", "excelro", "exceltidy", "reveal", "props", "winmerge", "mount"];
     IDS
 }
 
@@ -3967,6 +3968,7 @@ pub(crate) fn maguro_key_for_id(id: u32) -> Option<&'static str> {
         0x8007 => Some("exceltidy"),
         0x8008 => Some("term"),
         0x8009 => Some("mark"),
+        0x800A | 0x800B | 0x800C => Some("mount"),
         0x8020..=0x80FF => Some("winmerge"),
         _ => None,
     }

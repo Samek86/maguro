@@ -77,6 +77,7 @@ const TG_SIDE_TREE: u8 = 29;
 const TG_CTX_LOG: u8 = 30;
 const TG_VTABS: u8 = 31;
 const TG_MARKS: u8 = 32;
+const TG_ARCHIVES: u8 = 33;
 
 const CB_SETMINVISIBLE: u32 = 0x1701;
 const EM_SETCUEBANNER: u32 = 0x1501;
@@ -220,6 +221,7 @@ const GEN: &[Spec] = &[
     Spec { title: crate::Key::FoldersInOpenAndSaveDialogs, desc: crate::Key::WhileAnotherAppSOpenOrSaveDialogIsInFront, live: true, ctl: Ctl::Toggle(TG_DIALOG) },
     Spec { title: crate::Key::OpenClipboardPath, desc: crate::Key::OpenClipboardPathHint, live: true, ctl: Ctl::Toggle(TG_CLIP) },
     Spec { title: crate::Key::DoubleClickEmptySpaceForParentFolder, desc: crate::Key::InFileListDoubleClickOnEmpty, live: true, ctl: Ctl::Toggle(TG_DBLUP) },
+    Spec { title: crate::Key::OpenArchivesAsFolders, desc: crate::Key::OpenArchivesAsFoldersDesc, live: true, ctl: Ctl::Toggle(TG_ARCHIVES) },
     Spec { title: crate::Key::Status, desc: crate::Key::InstalledRunningVersion, live: true, ctl: Ctl::EvStatus },
     Spec { title: crate::Key::UseEverythingForSearch, desc: crate::Key::OnByDefaultSubfolderSearchAsksEverything, live: true, ctl: Ctl::Toggle(TG_EV) },
     Spec { title: crate::Key::GetEverything, desc: crate::Key::StartItWhenItIsInstalledInstall, live: true, ctl: Ctl::EvAct },
@@ -1434,6 +1436,7 @@ fn toggle_on(id: u8) -> bool {
         TG_SINGLE => app(|a| a.s.single),
         TG_ONE => app(|a| a.s.one_window),
         TG_DBLUP => app(|a| a.s.dblup),
+        TG_ARCHIVES => app(|a| a.s.open_archives),
         TG_HIDDEN => unsafe { super::hidden() },
         TG_BAR => app(|a| a.s.bar),
         TG_DRIVES => app(|a| a.s.drive_buttons),

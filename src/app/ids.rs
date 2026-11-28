@@ -129,6 +129,8 @@ pub(crate) const TIMER_LIST: usize = 28; // trailing compare after a burst, plus
 pub(crate) const TIMER_PARK: usize = 29;
 /// Show a cold tab's shell view if navigation has not finished.
 pub(crate) const TIMER_SHELL: usize = 31;
+/// Select the archive file after Up leaves its cache folder.
+pub(crate) const TIMER_ARCHSEL: usize = 32;
 /// Coalesce Ctrl+Tab / Ctrl+Shift+Tab. The strip moves at once; the panes wait this long,
 /// or until Ctrl is released. Restarted on each key repeat.
 pub(crate) const TIMER_TAB_SWITCH: usize = 30;

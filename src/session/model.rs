@@ -72,6 +72,8 @@ pub(crate) fn stored_pane_tab_name(typed: &str) -> String {
 /// A shell place (`::{CLSID}`, `shell:…`) uses the OS display name. When the shell cannot
 /// name it, the path itself is the fallback. An empty path is empty.
 pub(crate) fn folder_display_name(path: &str) -> String {
+    let mapped = crate::archive::display_path(path);
+    let path = if mapped.eq_ignore_ascii_case(path) { path } else { mapped.as_str() };
     if let Some(name) = shell_display_name(path) {
         return name;
     }
@@ -87,6 +89,8 @@ pub(crate) fn folder_display_name(path: &str) -> String {
 /// Tooltip for one folder. A shell place is the OS display name. A filesystem path stays
 /// the path, so it can be copied and opened again. The address bar does not use this.
 pub(crate) fn folder_tip_text(path: &str) -> String {
+    let owned = crate::archive::display_path(path);
+    let path = owned.as_str();
     if path.is_empty() {
         return String::new();
     }
@@ -1166,10 +1170,15 @@ impl Session {
                     }
                 }
                 "fav" if !v.trim().is_empty() => s.favs.push(v.trim().to_string()),
-                "recent" if !v.trim().is_empty() && s.recent.len() < RECENT => s.recent.push(v.trim().to_string()),
+                "recent" if !v.trim().is_empty() && s.recent.len() < RECENT => {
+                    let path = crate::archive::session_load_path(v.trim());
+                    if !path.is_empty() {
+                        s.recent.push(path);
+                    }
+                }
                 _ => {
                     if let Some(i) = slot('p') {
-                        s.paths[i] = v.to_string();
+                        s.paths[i] = crate::archive::session_load_path(v);
                     } else if let (Some(i), [m, z]) = (slot('v'), &nums::<i32>(v)[..]) {
                         s.views[i] = (*m, *z);
                     } else if let Some(i) = slot('c') {
@@ -1297,11 +1306,15 @@ impl Session {
             o += &format!("fav={f}\n");
         }
         for r in &self.recent {
-            o += &format!("recent={r}\n");
+            let shown = crate::archive::session_store_path(r);
+            if !shown.is_empty() {
+                o += &format!("recent={shown}\n");
+            }
         }
         for i in 0..MAXP {
-            if !self.paths[i].is_empty() {
-                o += &format!("p{i}={}\n", self.paths[i]);
+            let shown = crate::archive::session_store_path(&self.paths[i]);
+            if !shown.is_empty() {
+                o += &format!("p{i}={shown}\n");
             }
             if self.views[i].0 != 0 {
                 o += &format!("v{i}={},{}\n", self.views[i].0, self.views[i].1);
@@ -2305,7 +2318,7 @@ pub(crate) fn pane_json(t: &Tab) -> Vec<Value> {
         let mut p = serde_json::Map::new();
         p.insert("index".into(), Value::from(i));
         if !t.paths[i].is_empty() {
-            p.insert("path".into(), Value::String(t.paths[i].clone()));
+            p.insert("path".into(), Value::String(crate::archive::session_store_path(&t.paths[i])));
         }
         if t.views[i].0 != 0 {
             p.insert("view".into(), Value::Array(vec![Value::from(t.views[i].0), Value::from(t.views[i].1)]));
@@ -2320,7 +2333,7 @@ pub(crate) fn pane_json(t: &Tab) -> Vec<Value> {
             p.insert("tint".into(), Value::from(tint));
         }
         if folders.len() > 1 {
-            p.insert("folders".into(), Value::Array(folders.into_iter().map(Value::String).collect()));
+            p.insert("folders".into(), Value::Array(folders.into_iter().map(|f| Value::String(crate::archive::session_store_path(&f))).collect()));
             p.insert("folder".into(), Value::from(folder));
         }
         if !locks.is_empty() {
@@ -2410,7 +2423,7 @@ pub(crate) fn tab_from_value(v: &Value) -> Option<Tab> {
                 continue;
             }
             if let Some(path) = o.get("path").and_then(|x| x.as_str()) {
-                paths[i] = path.to_string();
+                paths[i] = crate::archive::session_load_path(path);
             }
             if let Some(view) = o.get("view").and_then(|x| x.as_array()) {
                 let m = view.first().and_then(|n| n.as_i64()).unwrap_or(0) as i32;
@@ -2429,7 +2442,7 @@ pub(crate) fn tab_from_value(v: &Value) -> Option<Tab> {
                 tints[i] = if t <= 6 { t as u8 } else { 0 };
             }
             if let Some(fs) = o.get("folders").and_then(|x| x.as_array()) {
-                let list: Vec<String> = fs.iter().filter_map(|x| x.as_str()).filter(|p| !p.is_empty()).map(str::to_string).collect();
+                let list: Vec<String> = fs.iter().filter_map(|x| x.as_str()).filter(|p| !p.is_empty()).map(crate::archive::session_load_path).filter(|p| !p.is_empty()).collect();
                 if list.len() > 1 {
                     let cur = o.get("folder").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
                     pane_cur[i] = cur.min(list.len() - 1);

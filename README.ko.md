@@ -166,6 +166,8 @@
 
 F3으로 빠른 미리보기를 엽니다. 스페이스로 미리보기가 켜져 있으면(기본값) 스페이스로도 열립니다. 글자를 입력한 뒤 1초 안의 스페이스나 IME 조합 중의 스페이스는 이름의 일부로 들어갑니다.
 
+7z, tar, tar.gz, tar.xz, tar.bz2, ISO 파일은 두 번 클릭하거나 Enter로 같은 창에서 읽기 전용 폴더로 엽니다(설정 → 일반 → 압축 파일을 폴더처럼 열기). 복사, 끌기, 열기는 풀어 둔 실제 파일을 씁니다. Zip은 탐색기 그대로입니다. ISO, IMG, VHD, VHDX는 우클릭의 마운트하고 열기로 붙입니다. 붙어 있는 동안 마운트 해제가 나오고, 마운트된 가상 드라이브에는 꺼내기 / 마운트 해제가 나옵니다.
+
 빠른 미리보기와 미리보기 창(Alt+P)은 같은 파일을 보여 줍니다. 그림은 JPEG, PNG, GIF, BMP, TIFF, WebP, ICO, DDS, 카메라 RAW를 포함합니다. HEIC, HEIF, AVIF는 Windows 이미징 구성 요소를 쓰며 해당하는 Windows 코덱이 필요합니다. SVG는 이미지로 그립니다. 같은 보기에서 PDF, Markdown, 텍스트와 코드, CSV·TSV, 표로 보는 xlsx, RTF, OpenDocument, EPUB, 메일(.eml과 .msg. 머리글, 첨부 이름, 본문), 바로 가기(.lnk와 .url), 압축 목록(zip, tar, gzip, Cabinet), HWP/HWPX/HWPT를 보여 줍니다. 텍스트 인코딩은 바이트로 정합니다. Maguro가 읽는 Office 파일(docx, pptx 등)은 Maguro가 그립니다. HTML과 그 밖의 형식은 등록된 Windows 미리보기 처리기를 씁니다. 동영상과 오디오는 Windows Media Foundation으로 재생합니다.
 
 Ctrl+=, Ctrl+-, Ctrl+0과 Ctrl+휠로 확대·축소합니다(10–800%). 파일을 옮겨도 배율은 유지됩니다. 그림은 끌어서 이동하고 휠로 스크롤합니다. 텍스트는 끌어서 선택하고, Ctrl+A는 모두 선택, Ctrl+C는 복사입니다. 빠른 미리보기에서 ←/→는 파일 이동, Enter는 파일 열기, Esc·Space·F3은 창을 닫습니다. **F2**로 이름을 바꾸고 **Del**로 보고 있는 파일을 지웁니다. K는 재생과 일시정지, J와 L은 5초 이동합니다. 미리보기 창에서 Space는 일시정지입니다.

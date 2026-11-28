@@ -620,11 +620,11 @@ impl SettingsFile {
             }
             panes.push(PaneJson {
                 index: i,
-                path: s.paths[i].clone(),
+                path: crate::archive::session_store_path(&s.paths[i]),
                 view: if s.views[i].0 == 0 { Vec::new() } else { vec![s.views[i].0, s.views[i].1] },
                 columns: s.cols[i].clone(),
                 filter,
-                folders: folders.clone(),
+                folders: folders.iter().map(|f| crate::archive::session_store_path(f)).collect(),
                 folder: if folders.len() > 1 { s.pane_cur[i].min(folders.len() - 1) } else { 0 },
                 locks,
                 labels,
@@ -704,7 +704,7 @@ impl SettingsFile {
             winmerge_path: s.winmerge_path.trim().to_string(),
             session: s.file.clone(),
             favorites,
-            recent: s.recent.clone(),
+            recent: s.recent.iter().map(|p| crate::archive::session_store_path(p)).collect(),
             tabs: serde_json::from_str(&crate::tabs_json(&shown, at)).unwrap_or_default(),
             windows: crate::take_snaps(),
             keybindings: crate::keys::bindings_json(),
@@ -830,7 +830,7 @@ impl SettingsFile {
             if p.index >= MAXP {
                 continue;
             }
-            s.paths[p.index] = p.path.clone();
+            s.paths[p.index] = crate::archive::session_load_path(&p.path);
             if p.view.len() >= 2 {
                 s.views[p.index] = (p.view[0], p.view[1]);
             } else if let Some(m) = p.view.first() {
@@ -839,7 +839,7 @@ impl SettingsFile {
             s.cols[p.index] = p.columns.clone();
             if p.folders.len() > 1 {
                 s.pane_cur[p.index] = p.folder.min(p.folders.len() - 1);
-                s.pane_folders[p.index] = p.folders.clone();
+                s.pane_folders[p.index] = p.folders.iter().map(|f| crate::archive::session_load_path(f)).filter(|f| !f.is_empty()).collect();
             }
             let (locks, labels) = crate::pane_meta_json(s.pane_folders[p.index].len(), &p.locks, &p.labels);
             s.pane_locks[p.index] = locks;
@@ -948,7 +948,7 @@ impl SettingsFile {
             }).collect();
             s.tree = crate::tree_from_flat(&s.favs);
         }
-        s.recent = self.recent.iter().filter(|r| !r.trim().is_empty()).take(RECENT).cloned().collect();
+        s.recent = self.recent.iter().filter(|r| !r.trim().is_empty()).take(RECENT).map(|r| crate::archive::session_load_path(r)).filter(|r| !r.is_empty()).collect();
         if self.tabs.is_empty() {
             s.tabs.clear();
             s.tab = 0;
@@ -2369,6 +2369,21 @@ mod tests {
         assert_eq!(kept.accent, 0x123456);
         assert_eq!(kept.accent_dark, 0xEFAE92);
         assert_eq!(std::fs::read_to_string(&keep_path).unwrap(), raw);
+    }
+
+    #[test]
+    fn open_archives_defaults_on_and_round_trips() {
+        assert!(Session::default().open_archives);
+        assert!(adopt(r#"{"version":1}"#).unwrap().open_archives);
+        assert!(Session::parse("side=1\n").open_archives);
+        let mut s = Session::default();
+        s.open_archives = false;
+        assert!(!Session::parse(&s.to_ini()).open_archives);
+        assert!(Session::parse("openarchives=1").open_archives);
+        let text = pretty(&SettingsFile::from_session(&s));
+        assert!(text.contains("\"open_archives\": false"), "{text}");
+        assert!(!adopt(&text).unwrap().open_archives);
+        assert!(!pretty(&SettingsFile::from_session(&Session::default())).contains("open_archives"));
     }
 
     fn space_preview_defaults_on_and_round_trips() {

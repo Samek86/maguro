@@ -108,6 +108,7 @@ fn main() -> Result<()> {
             }).collect();
             stash_windows(pending);
         }
+        crate::archive::startup(&crate::archive::shown_paths(&s));
         let boot = s.boot;
         let restore = session_arg(&args).is_none() && args.is_empty();
         // `--keep-tabs` is a theme restart: the file already has the windows the user was looking at.
