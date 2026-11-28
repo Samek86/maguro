@@ -706,6 +706,7 @@ fn main_proc_inner(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             WM_WATCH_OPEN => crate::watch::open_queued(),
             WM_WATCH_TOAST => crate::watch::show_fallback(),
             WM_FAST_NOTE => apply_fast_note(),
+            crate::WM_ARCHIVE => crate::archive::on_ui(),
             WM_MARKS => {
                 crate::update_status();
                 crate::pane::marks_overlay::on_marks_changed();

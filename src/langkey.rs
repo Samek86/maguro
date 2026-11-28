@@ -976,11 +976,24 @@ pub(crate) enum Key {
     PaneNumTipZoomed,
     PaneZoomExpand,
     PaneZoomRestore,
+    OpenArchivesAsFolders,
+    OpenArchivesAsFoldersDesc,
+    MountAndOpen,
+    DiskUnmount,
+    EjectUnmount,
+    OpeningArchive,
+    ArchiveTooLarge,
+    ArchiveEncrypted,
+    ArchiveOpenFailed,
+    ArchiveReadOnly,
+    MountFailed,
+    MountNeedsAdmin,
+    UnmountFailed,
 }
 
-pub(crate) const KEY_COUNT: usize = 969;
+pub(crate) const KEY_COUNT: usize = 982;
 
-const _: () = assert!((Key::PaneZoomRestore as usize) + 1 == KEY_COUNT);
+const _: () = assert!((Key::UnmountFailed as usize) + 1 == KEY_COUNT);
 
 pub(crate) const EN: [&str; KEY_COUNT] = [
     "About",
@@ -1952,6 +1965,19 @@ pub(crate) const EN: [&str; KEY_COUNT] = [
     "Drag: move pane / Ctrl+drag: copy tab / Right-click: menu / Double-click: Restore layout",
     "Expand this pane",
     "Restore layout",
+    "Open archives as folders",
+    "Double-click or Enter opens 7z, tar, and ISO files as a read-only folder. Zip files stay with Explorer.",
+    "Mount and open",
+    "Unmount",
+    "Eject / unmount",
+    "Opening archive…",
+    "This archive is larger than Maguro will open as a folder ({limit}).",
+    "This archive is encrypted.",
+    "Could not open this archive.\n{detail}",
+    "Read-only",
+    "Could not mount this disk image.\n{detail}",
+    "Mounting this disk image needs administrator permission.",
+    "Could not unmount this disk image.\n{detail}",
 ];
 
 pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
@@ -2924,4 +2950,17 @@ pub(crate) const KEY_ID: [&str; KEY_COUNT] = [
     "pane_num_tip_zoomed",
     "pane_zoom_expand",
     "pane_zoom_restore",
+    "open_archives_as_folders",
+    "open_archives_as_folders_desc",
+    "mount_and_open",
+    "disk_unmount",
+    "eject_unmount",
+    "opening_archive",
+    "archive_too_large",
+    "archive_encrypted",
+    "archive_open_failed",
+    "archive_read_only",
+    "mount_failed",
+    "mount_needs_admin",
+    "unmount_failed",
 ];

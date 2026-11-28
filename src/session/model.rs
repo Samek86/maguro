@@ -354,6 +354,8 @@ pub(crate) struct Session {
     pub(crate) accent_dark: u32,       // selection colour, dark theme
     pub(crate) dark: bool,
     pub(crate) dblup: bool,            // double-click on empty space goes to the parent folder
+    /// Double-click or Enter opens 7z, tar, and ISO as a read-only folder. Missing means on.
+    pub(crate) open_archives: bool,
     /// Space in a file list opens quick look. Missing from the file means on.
     pub(crate) space_preview: bool,
     /// Wheel in quick look steps to the next or previous file at the content's end. Missing means on.
@@ -569,6 +571,7 @@ impl Default for Session {
             accent_dark: 0x0A9BD6,
             dark: false,
             dblup: true,
+            open_archives: true,
             space_preview: true,
             peek_wheel_nav: false,
             remember_views: true,
@@ -672,6 +675,7 @@ impl PartialEq for Session {
             && self.accent_dark == o.accent_dark
             && self.dark == o.dark
             && self.dblup == o.dblup
+            && self.open_archives == o.open_archives
             && self.space_preview == o.space_preview
             && self.peek_wheel_nav == o.peek_wheel_nav
             && self.remember_views == o.remember_views
@@ -1136,6 +1140,7 @@ impl Session {
                 "dot" => s.dot = v.trim() != "0",
                 "upcheck" => s.update_check = v.trim() != "0",
                 "dblup" => s.dblup = v.trim() != "0",
+                "openarchives" => s.open_archives = v.trim() != "0",
                 "panetabs" => {} // older files; pane tabs are always on
                 "spacepreview" => s.space_preview = v.trim() != "0",
                 "peekwheelnav" => s.peek_wheel_nav = v.trim() == "1",
@@ -1279,6 +1284,9 @@ impl Session {
         }
         o += &format!("autosave={}\ndot={}\nupcheck={}\n", self.autosave as u8, self.dot as u8, self.update_check as u8);
         o += &format!("dblup={}\nhotkey={}\nlang={}\nsingle={}\nonewindow={}\neverything={}\nevasked={}\nremoteasked={}\nspacepreview={}\npeekwheelnav={}\nfolderview={}\nfoldersize={}\nfoldersizenet={}\nmarkstars={}\ndialogjump={}\ncliphotkey={}\n", self.dblup as u8, self.hotkey as u8, self.lang.ini(), self.single as u8, self.one_window as u8, self.use_everything as u8, self.ev_asked as u8, self.remote_asked as u8, self.space_preview as u8, self.peek_wheel_nav as u8, self.remember_views as u8, self.folder_sizes as u8, self.folder_sizes_network as u8, self.show_mark_stars as u8, self.dialog_jump as u8, self.clip_hotkey as u8);
+        if !self.open_archives {
+            o += "openarchives=0\n";
+        }
         if !self.winmerge_path.trim().is_empty() {
             o += &format!("winmerge={}\n", self.winmerge_path.trim());
         }

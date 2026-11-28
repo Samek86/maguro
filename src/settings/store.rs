@@ -352,6 +352,10 @@ struct SettingsFile {
     update_check: bool,
     #[serde(default = "yes")]
     dblup: bool,
+    /// Open 7z, tar, and ISO files as folders. Missing means on. Omitted while on,
+    /// so an older maguro.json stays unchanged until the user turns it off.
+    #[serde(default = "yes", skip_serializing_if = "is_on")]
+    open_archives: bool,
     /// Global hotkey. Missing means on, so an older settings file keeps the hotkey on.
     #[serde(default = "yes", skip_serializing_if = "is_on")]
     hotkey: bool,
@@ -551,6 +555,7 @@ impl SettingsFile {
             dot: true,
             update_check: true,
             dblup: true,
+            open_archives: true,
             hotkey: true,
             dialog_jump: true,
             clip_hotkey: true,
@@ -675,6 +680,7 @@ impl SettingsFile {
             dot: s.dot,
             update_check: s.update_check,
             dblup: s.dblup,
+            open_archives: s.open_archives,
             hotkey: s.hotkey,
             dialog_jump: s.dialog_jump,
             clip_hotkey: s.clip_hotkey,
@@ -884,6 +890,7 @@ impl SettingsFile {
         s.dot = self.dot;
         s.update_check = self.update_check;
         s.dblup = self.dblup;
+        s.open_archives = self.open_archives;
         s.hotkey = self.hotkey;
         s.dialog_jump = self.dialog_jump;
         s.clip_hotkey = self.clip_hotkey;

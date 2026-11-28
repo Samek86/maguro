@@ -31,6 +31,7 @@ mod uninstall;
 mod winpath;
 mod remote;
 mod watch;
+mod archive;
 
 use imports::*;
 
