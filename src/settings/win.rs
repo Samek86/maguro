@@ -1497,6 +1497,7 @@ fn flip(id: u8) {
         TG_SINGLE => app(|a| a.s.single ^= true),
         TG_ONE => app(|a| a.s.one_window ^= true),
         TG_DBLUP => app(|a| a.s.dblup ^= true),
+        TG_ARCHIVES => app(|a| a.s.open_archives ^= true),
         TG_HIDDEN => {
             unsafe { crate::toggle_hidden() };
             return;

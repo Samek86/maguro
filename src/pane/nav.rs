@@ -1327,6 +1327,17 @@ pub(crate) unsafe fn try_nav(i: usize, path: &str) -> Result<()> {
     if control_panel_path(path) {
         return Err(Error::from(E_FAIL));
     }
+    // A virtual archive path (`D:\x\foo.7z\sub`) is not a directory. Browse the
+    // extracted cache, or start the extract and leave this pane where it is.
+    match crate::archive::plan(path) {
+        crate::archive::Plan::Normal => {}
+        crate::archive::Plan::Browse(dest) => return try_nav(i, &dest),
+        crate::archive::Plan::Extract { .. } => {
+            crate::archive::begin_open(i, path);
+            return Ok(());
+        }
+        crate::archive::Plan::Missing(parent) => return try_nav(i, &parent),
+    }
     if share_path(path) {
         // Accepted: BrowseToIDList runs on WM_NET, after the worker has a PIDL or the wait ends.
         return if start_share(i, path, false, None, None, false, None) { Ok(()) } else { Err(Error::from(E_FAIL)) };
@@ -1481,7 +1492,69 @@ pub(crate) unsafe fn rec_event(i: usize, ev: Nav, pidl: *const ITEMIDLIST) {
     }
 }
 
+struct ArchSel {
+    pane: usize,
+    name: String,
+    left: u8,
+}
+
+fn arch_sel() -> &'static std::sync::Mutex<Option<ArchSel>> {
+    static SEL: std::sync::LazyLock<std::sync::Mutex<Option<ArchSel>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+    &SEL
+}
+
+unsafe fn arm_archive_select(pane: usize, name: &str) {
+    if let Ok(mut g) = arch_sel().lock() {
+        *g = Some(ArchSel { pane, name: name.to_string(), left: 20 });
+    }
+    if let Some(h) = pane_hwnd(pane) {
+        let _ = SetTimer(Some(h), TIMER_ARCHSEL, 80, None);
+    }
+}
+
+/// The list fills in after the folder opens. Retry until the archive file is selected.
+pub(crate) unsafe fn on_archive_select(h: HWND) {
+    let Some(i) = pane_of(h) else {
+        let _ = KillTimer(Some(h), TIMER_ARCHSEL);
+        return;
+    };
+    let job = arch_sel().lock().ok().and_then(|mut g| {
+        let cur = g.as_mut()?;
+        if cur.pane != i {
+            return None;
+        }
+        cur.left = cur.left.saturating_sub(1);
+        let out = (cur.name.clone(), cur.left);
+        if cur.left == 0 {
+            *g = None;
+        }
+        Some(out)
+    });
+    let Some((name, left)) = job else {
+        let _ = KillTimer(Some(h), TIMER_ARCHSEL);
+        return;
+    };
+    if select_named(i, &name) || left == 0 {
+        if let Ok(mut g) = arch_sel().lock() {
+            *g = None;
+        }
+        let _ = KillTimer(Some(h), TIMER_ARCHSEL);
+    }
+}
+
 pub(crate) unsafe fn browse(i: usize, flags: u32) {
+    // Up from an extracted archive root goes to the folder that contains the
+    // archive file, not to the cache directory above it.
+    if flags == SBSP_PARENT {
+        let cur = app(|a| a.s.paths.get(i).cloned().unwrap_or_default());
+        if let Some(up) = crate::archive::up_from(&cur) {
+            arm_archive_select(i, &up.select);
+            if navigate(i, &up.parent) {
+                focus_view(i);
+            }
+            return;
+        }
+    }
     let history = flags == SBSP_NAVIGATEBACK || flags == SBSP_NAVIGATEFORWARD;
     if folder_step(net_failed(i), history) == FolderStep::Stay {
         leave_net_fail(i);
@@ -1888,6 +1961,15 @@ pub(crate) unsafe fn go_edit(i: usize) {
             if crate::folderapp::shown_on() && crate::folderapp::link_file(&target) {
                 if let Some(dir) = folder_link_target(&target) {
                     target = dir;
+                }
+            }
+            // A typed archive path, or `D:\x\foo.7z\sub`, opens the cache folder.
+            match crate::archive::plan(&target) {
+                crate::archive::Plan::Normal => {}
+                _ => {
+                    let ok = navigate(i, &target);
+                    resolved = true;
+                    break 'go ok.then_some(true);
                 }
             }
             // Enter on Control Panel opens Explorer. The pane, and its address, stay.
@@ -3340,7 +3422,11 @@ unsafe fn on_nav_impl(i: usize, pidl: *const ITEMIDLIST) {
     }
     let parse = name(pidl, SIGDN_DESKTOPABSOLUTEPARSING);
     crate::crash::note_path(&parse);
-    let disp = name(pidl, SIGDN_DESKTOPABSOLUTEEDITING);
+    let shell_disp = name(pidl, SIGDN_DESKTOPABSOLUTEEDITING);
+    let shown = crate::archive::display_path(&parse);
+    let disp = if shown.eq_ignore_ascii_case(&parse) { shell_disp } else { shown };
+    crate::archive::note_left(i, &parse);
+    crate::archive::touch_path(&parse);
     // Same folder, rebuilt for the theme. Not a visit, and not a new folder-view baseline.
     let theme_same = theme_keep_path(i).is_some_and(|k| k.eq_ignore_ascii_case(&parse));
     if !theme_same {
@@ -3363,14 +3449,25 @@ unsafe fn on_nav_impl(i: usize, pidl: *const ITEMIDLIST) {
         };
         let old = std::mem::replace(&mut a.s.paths[i], parse.clone());
         let path = a.s.paths[i].clone();
-        visit(&mut a.s.recent, left.as_deref().unwrap_or(&old), &path);
+        let old_hist = crate::archive::history_path(left.as_deref().unwrap_or(&old));
+        let new_hist = crate::archive::history_path(&path);
+        if !new_hist.is_empty() && !old_hist.eq_ignore_ascii_case(&new_hist) {
+            if old_hist.is_empty() {
+                a.s.recent.retain(|x| !x.eq_ignore_ascii_case(&new_hist));
+                a.s.recent.insert(0, new_hist);
+                a.s.recent.truncate(crate::RECENT);
+            } else {
+                visit(&mut a.s.recent, &old_hist, &new_hist);
+            }
+        }
         // A locked pane tab stays put. The folder just opened becomes a new pane tab.
         // A pane-tab switch (`tab_left`) and a theme rebuild do not fork.
         if !theme_same && left.is_none() && !super::recent::same_dir(&old, &parse) {
             forked = a.s.fork_locked_nav(i, &old, &parse);
         }
         let remember = a.s.remember_views;
-        let choice = if remember { crate::folderview::choose(&path) } else { crate::folderview::Choice::None };
+        let view_key = crate::archive::display_path(&path);
+        let choice = if remember { crate::folderview::choose(&view_key) } else { crate::folderview::Choice::None };
         let (pane_view, own) = (a.s.views[i], a.s.cols[i].clone());
         let folder = match choice {
             crate::folderview::Choice::Saved(v) | crate::folderview::Choice::Default(v) => Some(v),
@@ -3401,7 +3498,7 @@ unsafe fn on_nav_impl(i: usize, pidl: *const ITEMIDLIST) {
             // A theme rebuild keeps the watch taken before the browse. A new baseline here would
             // store the shell's rebuilt columns as a user edit.
             if !refreshing && remember {
-                p.view_watch = crate::folderview::normalize_folder_key(&path).map(|key| {
+                p.view_watch = crate::folderview::normalize_folder_key(&view_key).map(|key| {
                     let mut applied = folder.clone().unwrap_or(crate::folderview::ViewSnap {
                         mode: view.0,
                         icon: view.1,
@@ -4386,6 +4483,28 @@ fn row_counts(rows: &[ActRow]) -> (usize, usize, usize) {
     (folder, file, unknown)
 }
 
+/// One ordinary file that should open as an archive folder. A mix of files stays
+/// on the normal open path.
+unsafe fn archive_activation(rows: &[ActRow]) -> Option<String> {
+    let mut found = None;
+    for row in rows {
+        let path = match row {
+            ActRow::File(it) => item_path(it),
+            ActRow::FilePath(p) => p.clone(),
+            ActRow::FolderItem(_) | ActRow::FolderPath(_) => return None,
+            ActRow::Unknown => continue,
+        };
+        if path.trim().is_empty() {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(path);
+    }
+    found.filter(|p| crate::archive::wants_folder(p))
+}
+
 /// Double-click / Enter on the file list, including the filter.
 ///
 /// Plain activation of a folder browses this pane. These are the cases that used to
@@ -4428,6 +4547,14 @@ pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
     // returns nothing here and keeps the classification below.
     if source != "enter" {
         if let Some(files) = double_click_files(i, &fv) {
+            if files.len() == 1 && crate::archive::wants_folder(&files[0].path) {
+                let paths = vec![files[0].path.clone()];
+                if !repeated_activation(i, &paths) {
+                    remember_activation(i, &paths);
+                    crate::archive::begin_open(i, &files[0].path);
+                }
+                return true;
+            }
             let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
             // The details-cell fallback enters this function again for the same click.
             if repeated_activation(i, &paths) {
@@ -4467,6 +4594,13 @@ pub(crate) unsafe fn take_default(i: usize, sv: Option<&IShellView>) -> bool {
     // Enter is its own keypress and is not collapsed with a click.
     if source != "enter" && repeated_activation(i, &paths) {
         crate::shell::openlog::trace("path", || format!("source={source} mode=duplicate-skipped"));
+        return true;
+    }
+    if let Some(path) = archive_activation(&rows) {
+        if source != "enter" {
+            remember_activation(i, &paths);
+        }
+        crate::archive::begin_open(i, &path);
         return true;
     }
     let registered = crate::folderapp::shown_on();

@@ -129,6 +129,8 @@ pub(crate) const TIMER_LIST: usize = 28; // trailing compare after a burst, plus
 pub(crate) const TIMER_PARK: usize = 29;
 /// Show a cold tab's shell view if navigation has not finished.
 pub(crate) const TIMER_SHELL: usize = 31;
+/// Select the archive file after Up leaves its cache folder.
+pub(crate) const TIMER_ARCHSEL: usize = 32;
 /// Coalesce Ctrl+Tab / Ctrl+Shift+Tab. The strip moves at once; the panes wait this long,
 /// or until Ctrl is released. Restarted on each key repeat.
 pub(crate) const TIMER_TAB_SWITCH: usize = 30;
@@ -137,6 +139,7 @@ pub(crate) const WM_SHELL_CHANGE: u32 = WM_APP + 88; // SHChangeNotifyRegister d
 pub(crate) const WM_LIST_NOW: u32 = WM_APP + 89; // a file operation finished; compare its folders
 pub(crate) const WM_FAST_NOTE: u32 = WM_APP + 94; // fast copy/move finished; the note text is queued for the status line
 pub(crate) const WM_MARKS: u32 = WM_APP + 97; // marks moved; redraw stars on the UI thread
+pub(crate) const WM_ARCHIVE: u32 = WM_APP + 99; // archive extract or disk mount finished off the UI thread
 pub(crate) const FVIEW_SAVE_MS: u32 = 700;
 pub(crate) const WM_FIND: u32 = WM_APP + 50; // search results arrived for this pane
 pub(crate) const WM_EV: u32 = WM_APP + 51; // Everything status changed in the settings window

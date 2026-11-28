@@ -1154,7 +1154,8 @@ struct CrumbMetrics {
 /// Segment widths the breadcrumb row lays out with. Same measure `crumb_layout` paints from.
 unsafe fn crumb_metrics(dc: HDC, font: HFONT, dpi: i32, parse: &str, disp: &str) -> CrumbMetrics {
     let s = |v: i32| v * dpi / 96;
-    let mut items = crumbs(parse);
+    let shown = crate::archive::display_path(parse);
+    let mut items = crumbs(&shown);
     let fs = !items.is_empty();
     if items.is_empty() {
         let name = if disp.is_empty() { tr(crate::Key::ThisPc).to_string() } else { disp.to_string() };
@@ -1619,7 +1620,7 @@ unsafe fn addr_tip_body(h: HWND) -> Option<String> {
         }
         let failed = p.net.as_ref().filter(|n| n.bad).map(|n| n.path.clone());
         let connecting = p.net.as_ref().is_some_and(|n| !n.bad);
-        Some((a.s.paths.get(i).cloned().unwrap_or_default(), p.disp.clone(), failed, connecting))
+        Some((crate::archive::display_path(&a.s.paths.get(i).cloned().unwrap_or_default()), p.disp.clone(), failed, connecting))
     })?;
     if connecting {
         return None;

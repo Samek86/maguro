@@ -72,6 +72,8 @@ pub(crate) fn stored_pane_tab_name(typed: &str) -> String {
 /// A shell place (`::{CLSID}`, `shell:…`) uses the OS display name. When the shell cannot
 /// name it, the path itself is the fallback. An empty path is empty.
 pub(crate) fn folder_display_name(path: &str) -> String {
+    let mapped = crate::archive::display_path(path);
+    let path = if mapped.eq_ignore_ascii_case(path) { path } else { mapped.as_str() };
     if let Some(name) = shell_display_name(path) {
         return name;
     }
@@ -87,6 +89,8 @@ pub(crate) fn folder_display_name(path: &str) -> String {
 /// Tooltip for one folder. A shell place is the OS display name. A filesystem path stays
 /// the path, so it can be copied and opened again. The address bar does not use this.
 pub(crate) fn folder_tip_text(path: &str) -> String {
+    let owned = crate::archive::display_path(path);
+    let path = owned.as_str();
     if path.is_empty() {
         return String::new();
     }
@@ -354,6 +358,8 @@ pub(crate) struct Session {
     pub(crate) accent_dark: u32,       // selection colour, dark theme
     pub(crate) dark: bool,
     pub(crate) dblup: bool,            // double-click on empty space goes to the parent folder
+    /// Double-click or Enter opens 7z, tar, and ISO as a read-only folder. Missing means on.
+    pub(crate) open_archives: bool,
     /// Space in a file list opens quick look. Missing from the file means on.
     pub(crate) space_preview: bool,
     /// Wheel in quick look steps to the next or previous file at the content's end. Missing means on.
@@ -569,6 +575,7 @@ impl Default for Session {
             accent_dark: 0x0A9BD6,
             dark: false,
             dblup: true,
+            open_archives: true,
             space_preview: true,
             peek_wheel_nav: false,
             remember_views: true,
@@ -672,6 +679,7 @@ impl PartialEq for Session {
             && self.accent_dark == o.accent_dark
             && self.dark == o.dark
             && self.dblup == o.dblup
+            && self.open_archives == o.open_archives
             && self.space_preview == o.space_preview
             && self.peek_wheel_nav == o.peek_wheel_nav
             && self.remember_views == o.remember_views
@@ -1136,6 +1144,7 @@ impl Session {
                 "dot" => s.dot = v.trim() != "0",
                 "upcheck" => s.update_check = v.trim() != "0",
                 "dblup" => s.dblup = v.trim() != "0",
+                "openarchives" => s.open_archives = v.trim() != "0",
                 "panetabs" => {} // older files; pane tabs are always on
                 "spacepreview" => s.space_preview = v.trim() != "0",
                 "peekwheelnav" => s.peek_wheel_nav = v.trim() == "1",
@@ -1161,10 +1170,15 @@ impl Session {
                     }
                 }
                 "fav" if !v.trim().is_empty() => s.favs.push(v.trim().to_string()),
-                "recent" if !v.trim().is_empty() && s.recent.len() < RECENT => s.recent.push(v.trim().to_string()),
+                "recent" if !v.trim().is_empty() && s.recent.len() < RECENT => {
+                    let path = crate::archive::session_load_path(v.trim());
+                    if !path.is_empty() {
+                        s.recent.push(path);
+                    }
+                }
                 _ => {
                     if let Some(i) = slot('p') {
-                        s.paths[i] = v.to_string();
+                        s.paths[i] = crate::archive::session_load_path(v);
                     } else if let (Some(i), [m, z]) = (slot('v'), &nums::<i32>(v)[..]) {
                         s.views[i] = (*m, *z);
                     } else if let Some(i) = slot('c') {
@@ -1279,6 +1293,9 @@ impl Session {
         }
         o += &format!("autosave={}\ndot={}\nupcheck={}\n", self.autosave as u8, self.dot as u8, self.update_check as u8);
         o += &format!("dblup={}\nhotkey={}\nlang={}\nsingle={}\nonewindow={}\neverything={}\nevasked={}\nremoteasked={}\nspacepreview={}\npeekwheelnav={}\nfolderview={}\nfoldersize={}\nfoldersizenet={}\nmarkstars={}\ndialogjump={}\ncliphotkey={}\n", self.dblup as u8, self.hotkey as u8, self.lang.ini(), self.single as u8, self.one_window as u8, self.use_everything as u8, self.ev_asked as u8, self.remote_asked as u8, self.space_preview as u8, self.peek_wheel_nav as u8, self.remember_views as u8, self.folder_sizes as u8, self.folder_sizes_network as u8, self.show_mark_stars as u8, self.dialog_jump as u8, self.clip_hotkey as u8);
+        if !self.open_archives {
+            o += "openarchives=0\n";
+        }
         if !self.winmerge_path.trim().is_empty() {
             o += &format!("winmerge={}\n", self.winmerge_path.trim());
         }
@@ -1289,11 +1306,15 @@ impl Session {
             o += &format!("fav={f}\n");
         }
         for r in &self.recent {
-            o += &format!("recent={r}\n");
+            let shown = crate::archive::session_store_path(r);
+            if !shown.is_empty() {
+                o += &format!("recent={shown}\n");
+            }
         }
         for i in 0..MAXP {
-            if !self.paths[i].is_empty() {
-                o += &format!("p{i}={}\n", self.paths[i]);
+            let shown = crate::archive::session_store_path(&self.paths[i]);
+            if !shown.is_empty() {
+                o += &format!("p{i}={shown}\n");
             }
             if self.views[i].0 != 0 {
                 o += &format!("v{i}={},{}\n", self.views[i].0, self.views[i].1);
@@ -2297,7 +2318,7 @@ pub(crate) fn pane_json(t: &Tab) -> Vec<Value> {
         let mut p = serde_json::Map::new();
         p.insert("index".into(), Value::from(i));
         if !t.paths[i].is_empty() {
-            p.insert("path".into(), Value::String(t.paths[i].clone()));
+            p.insert("path".into(), Value::String(crate::archive::session_store_path(&t.paths[i])));
         }
         if t.views[i].0 != 0 {
             p.insert("view".into(), Value::Array(vec![Value::from(t.views[i].0), Value::from(t.views[i].1)]));
@@ -2312,7 +2333,7 @@ pub(crate) fn pane_json(t: &Tab) -> Vec<Value> {
             p.insert("tint".into(), Value::from(tint));
         }
         if folders.len() > 1 {
-            p.insert("folders".into(), Value::Array(folders.into_iter().map(Value::String).collect()));
+            p.insert("folders".into(), Value::Array(folders.into_iter().map(|f| Value::String(crate::archive::session_store_path(&f))).collect()));
             p.insert("folder".into(), Value::from(folder));
         }
         if !locks.is_empty() {
@@ -2402,7 +2423,7 @@ pub(crate) fn tab_from_value(v: &Value) -> Option<Tab> {
                 continue;
             }
             if let Some(path) = o.get("path").and_then(|x| x.as_str()) {
-                paths[i] = path.to_string();
+                paths[i] = crate::archive::session_load_path(path);
             }
             if let Some(view) = o.get("view").and_then(|x| x.as_array()) {
                 let m = view.first().and_then(|n| n.as_i64()).unwrap_or(0) as i32;
@@ -2421,7 +2442,7 @@ pub(crate) fn tab_from_value(v: &Value) -> Option<Tab> {
                 tints[i] = if t <= 6 { t as u8 } else { 0 };
             }
             if let Some(fs) = o.get("folders").and_then(|x| x.as_array()) {
-                let list: Vec<String> = fs.iter().filter_map(|x| x.as_str()).filter(|p| !p.is_empty()).map(str::to_string).collect();
+                let list: Vec<String> = fs.iter().filter_map(|x| x.as_str()).filter(|p| !p.is_empty()).map(crate::archive::session_load_path).filter(|p| !p.is_empty()).collect();
                 if list.len() > 1 {
                     let cur = o.get("folder").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
                     pane_cur[i] = cur.min(list.len() - 1);

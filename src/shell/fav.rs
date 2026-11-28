@@ -1444,6 +1444,7 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
     if !background && !items.is_empty() {
         super::ctxmenu::insert_mark_item(menu, items);
     }
+    crate::archive::menu::insert(menu, items, background, props_folder);
     // After every insert, including mark. Shell Properties and ID_CTX_PROPS stay last.
     super::ctxmenu::pin_properties_last(menu);
     // Folder and drive clicks: Open is the top default. The Maguro verb is hidden in this menu only.
@@ -1482,6 +1483,8 @@ unsafe fn popup_ctx(owner: HWND, cm: IContextMenu, paths: &[String], items: &[(S
         }
     } else if cmd == super::ctxmenu::ID_CTX_MARK as i32 {
         crate::marks::toggle_items(items);
+    } else if crate::archive::menu::handles(cmd) {
+        crate::archive::menu::run(cmd, owner, pane, items, props_folder);
     } else if cmd == ID_CTX_BATCH as i32 {
         // The pane's own menu can re-read the selection in view order. Search results pass their paths.
         if pane_selection {
