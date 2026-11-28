@@ -129,14 +129,22 @@ struct Located {
 fn locate(path: &str, root: &Path) -> Option<Located> {
     let root_n = norm_path(&root.display().to_string());
     let root_n = root_n.trim_end_matches('\\');
-    let path_n = norm_path(path);
-    let rest = path_n.strip_prefix(root_n)?.trim_start_matches('\\');
+    // Match on the lowercase form, but keep the entry names' own case for the
+    // virtual path. ASCII lowercasing keeps byte offsets, so one offset serves both.
+    let mut path_c = path.trim().replace('/', "\\");
+    while path_c.len() > 3 && path_c.ends_with('\\') {
+        path_c.pop();
+    }
+    let path_n = path_c.to_ascii_lowercase();
+    let off = path_n.len() - path_n.strip_prefix(root_n)?.len();
+    let rest = path_c.get(off..)?.trim_start_matches('\\');
     if rest.is_empty() {
         return None;
     }
     let mut parts = rest.split('\\');
-    let id = parts.next().unwrap_or("");
-    if !is_id(id) || parts.next() != Some("files") {
+    let id = parts.next().unwrap_or("").to_ascii_lowercase();
+    let id = id.as_str();
+    if !is_id(id) || !parts.next().is_some_and(|p| p.eq_ignore_ascii_case("files")) {
         return None;
     }
     let inner = parts.filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\\");
@@ -525,6 +533,9 @@ mod tests {
         assert!(shown.ends_with(r"foo.7z\sub"), "{shown}");
         let stored = display_of(&files.display().to_string(), &root.join("cache"));
         assert!(stored.ends_with("foo.7z") && !stored.contains("ArchiveCache"), "{stored}");
+        // Entry names keep their own case in the address bar.
+        let mixed = display_of(&files.join("Docs").join("Specs").display().to_string(), &root.join("cache"));
+        assert!(mixed.ends_with(r"foo.7z\Docs\Specs"), "{mixed}");
 
         let not_dir = |p: &str| Path::new(p).is_dir();
         match classify(&shown, &root.join("cache"), true, not_dir) {

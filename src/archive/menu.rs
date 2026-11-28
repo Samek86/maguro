@@ -50,9 +50,21 @@ pub(crate) unsafe fn run(cmd: i32, owner: windows::Win32::Foundation::HWND, pane
     match cmd as u32 {
         ID_CTX_MOUNT => {
             let image = path.clone();
-            let hwnd = owner.0 as isize;
+            // WM_ARCHIVE is handled by the main window, not by the menu owner (a pane or view).
+            let _ = owner;
+            let hwnd = crate::app(|a| a.main.0 as isize);
             std::thread::spawn(move || {
                 let result = vdisk::mount(std::path::Path::new(&image));
+                // A new CD-ROM volume can take a moment before its root is readable.
+                if let Ok(letter) = result {
+                    let root = format!(r"{letter}:\");
+                    for _ in 0..50 {
+                        if std::path::Path::new(&root).is_dir() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
                 super::post_mount(hwnd, pane, result);
             });
         }

@@ -1,8 +1,9 @@
 //! Extract a supported archive into a real directory.
 //!
 //! Entry names go through [`super::names::sanitize`]. Symlinks and hard links
-//! are skipped. The running total of bytes written stops at `limit`. Files are
-//! marked read-only so the cache does not look like a place to edit.
+//! are skipped. The running total of bytes written stops at `limit`. Files keep
+//! normal attributes so a copy taken out of the archive stays editable; the pane
+//! shows a read-only note in the status bar instead.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -30,14 +31,6 @@ impl std::fmt::Display for ExtractError {
             ExtractError::TooLarge { bytes, limit } => write!(f, "size {bytes} exceeds {limit}"),
             ExtractError::Cancelled => write!(f, "cancelled"),
         }
-    }
-}
-
-pub(crate) fn mark_readonly(path: &Path) {
-    if let Ok(meta) = std::fs::metadata(path) {
-        let mut perms = meta.permissions();
-        perms.set_readonly(true);
-        let _ = std::fs::set_permissions(path, perms);
     }
 }
 
@@ -85,7 +78,6 @@ fn write_file(dest: &Path, rel: &str, reader: &mut impl Read, written: &mut u64,
     let mut out = File::create(&path).map_err(|e| ExtractError::Io(e.to_string()))?;
     copy_limited(reader, &mut out, written, limit, cancel)?;
     drop(out);
-    mark_readonly(&path);
     Ok(())
 }
 
@@ -143,9 +135,6 @@ fn extract_7z(src: &Path, dest: &Path, limit: u64, cancel: &AtomicBool) -> Resul
             return Ok(true);
         }
         let wrote = sevenz_rust2::default_entry_extract_fn(entry, reader, path)?;
-        if path.is_file() {
-            mark_readonly(path);
-        }
         Ok(wrote)
     })
     .map_err(map_7z)?;
@@ -234,7 +223,7 @@ mod tests {
         assert!(n >= 5, "{name} wrote {n}");
         let hello = dest.join("dir").join("hello.txt");
         assert_eq!(std::fs::read(&hello).unwrap(), b"hello");
-        assert!(hello.metadata().unwrap().permissions().readonly());
+        assert!(!hello.metadata().unwrap().permissions().readonly());
         assert!(!dest.join("dir").join("link.txt").exists());
         assert!(!dir.join("outside.txt").exists());
         assert!(!dest.join("outside.txt").exists());
@@ -284,7 +273,7 @@ mod tests {
         let n = extract(&arch, &dest, 8 * 1024 * 1024, &AtomicBool::new(false)).unwrap();
         assert!(n >= 5);
         assert_eq!(std::fs::read(dest.join("dir").join("hello.txt")).unwrap(), b"hello");
-        assert!(dest.join("dir").join("hello.txt").metadata().unwrap().permissions().readonly());
+        assert!(!dest.join("dir").join("hello.txt").metadata().unwrap().permissions().readonly());
         let err = map_7z(sevenz_rust2::Error::PasswordRequired);
         assert!(matches!(err, ExtractError::Encrypted));
         let _ = std::fs::remove_dir_all(&dir);

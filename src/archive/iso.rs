@@ -13,7 +13,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use super::extract::{copy_limited, mark_readonly, ExtractError};
+use super::extract::{copy_limited, ExtractError};
 use super::names::sanitize;
 
 const SECTOR: u64 = 2048;
@@ -198,7 +198,6 @@ pub(crate) fn extract_file(
         let mut limited = file.by_ref().take(rec.size);
         copy_limited(&mut limited, &mut out, &mut written, limit, cancel)?;
         drop(out);
-        mark_readonly(&path);
     }
     Ok(written)
 }
@@ -398,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn extracts_to_a_folder_read_only() {
+    fn extracts_to_a_writable_folder() {
         let dir = std::env::temp_dir().join(format!("maguro-iso-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -410,7 +409,8 @@ mod tests {
         assert!(n >= 9);
         let hello = dest.join("Hello.txt");
         assert_eq!(std::fs::read(&hello).unwrap(), b"hello-iso");
-        assert!(std::fs::metadata(&hello).unwrap().permissions().readonly());
+        // Copies made out of the cache must stay editable, so no read-only bit.
+        assert!(!std::fs::metadata(&hello).unwrap().permissions().readonly());
         assert!(!dest.join("secret.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
